@@ -1,0 +1,29 @@
+# ========================
+# Project Specific
+# ========================
+# Ignore generated credentials and local camera configurations
+camera_creds.xml
+cameras.json
+
+# ========================
+# PowerShell & Logs
+# ========================
+*.log
+*.err
+*Error.txt
+
+# ========================
+# VS Code
+# ========================
+.vscode/
+
+# ========================
+# Windows OS
+# ========================
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
