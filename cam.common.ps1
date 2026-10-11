@@ -214,7 +214,7 @@ function Get-CamConfigDefault {
         # column count from the console it ends up with. Neither number can
         # affect correctness.
         HealthCellWidthPx    = 9
-        HealthCellHeightPx   = 22
+        HealthCellHeightPx   = 20
 
         # Sections the health strip renders, in this order. Remove a name to
         # switch that section off; an empty list renders an empty strip.

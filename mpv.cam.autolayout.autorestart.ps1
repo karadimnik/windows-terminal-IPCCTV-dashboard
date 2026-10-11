@@ -349,7 +349,10 @@ $Host.UI.RawUI.WindowTitle = 'cam.health'
     $hintColumns = [int][math]::Max(40, [math]::Floor($Layout.StripWidth / [double]$Config.HealthCellWidthPx))
     $hintRows = [int][math]::Max(4, [math]::Floor($Layout.StripHeight / [double]$Config.HealthCellHeightPx))
 
-    & wt.exe -w cctv-health --pos ("{0},{1}" -f $Layout.StripLeft, $Layout.StripTop) `
+    # --focus drops the tab bar, which is dead weight on a one-pane status
+    # strip. Measured: the same 1913x296 window carries 15 text rows with it
+    # and 13 without, so the flag is worth two rows of the Operator's budget.
+    & wt.exe -w cctv-health --focus --pos ("{0},{1}" -f $Layout.StripLeft, $Layout.StripTop) `
         --size ("{0},{1}" -f $hintColumns, $hintRows) `
         powershell.exe -NoExit -EncodedCommand $encoded
 
