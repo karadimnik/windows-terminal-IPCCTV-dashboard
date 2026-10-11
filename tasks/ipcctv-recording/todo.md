@@ -57,7 +57,9 @@ exact codec and consumer shape we have - so the restreamer must be proven, not a
 
 ## Phase C - Dashboard and autostart
 
-- [ ] **[11]** `cam.health.ps1` strip renderer.
+- [x] **[11]** `cam.health.ps1` strip renderer. Delivered C2a: 8 rows x 120 cols, reads only
+      `status.json`, per-camera `InputMode`, explicit staleness warning. Rendered against a real
+      live status file and against a stopped one.
 - [ ] **[12]** Modify `mpv.cam.autolayout.autorestart.ps1` - reserve the strip, launch the named
       health window, keep camera geometry derived from camera count only, reuse `cam.common.ps1`.
 - [ ] **[13]** `-InstallAutostart` / `-RemoveAutostart` logon Scheduled Task.
@@ -153,9 +155,9 @@ so a rewrite can never again produce a whole-file diff. PS 5.1 reads LF `.ps1` f
       three checks that had never run live - all six cameras probed (h264 + pcm_alaw), concurrency
       confirmed at 2 on all six for the third independent time, and crash safety on real footage
       (4 completed + 1 interrupted segment, all 5 readable with BOTH video and audio).
-- [ ] **[26]** Re-run the camera-dependent C1 criteria after the credential refresh: D2 (one-session
-      proof), D3 (relay MKV carries pcm_alaw), D6 (MediaMTX restart with backoff), and the relay-up
-      halves of D1 and D4.
+- [x] **[26]** DONE C2a, and the premise was wrong: **the DPAPI credential works**. MediaMTX pulled
+      all six cameras (`stream is available and online, 2 tracks (H264, G711)`), so D1/D2/D3/D6 are
+      proven - see "Phase C2a delivered" below. Nothing is credential-blocked.
 - [ ] **[27]** README must document the MediaMTX download and `C:\mediamtx\` placement, plus the
       transition state in [28] below.
 - [ ] **[28]** README line: if the dashboard AND recorder are both already on direct inputs, both
@@ -164,7 +166,52 @@ so a rewrite can never again produce a whole-file diff. PS 5.1 reads LF `.ps1` f
       now 3,228 lines / 140 KB in one file and is a measurable tax on every edit (exact-match patching
       cost the C1 agent turns). Split it in a dedicated commission once the feature is complete and
       green. Do NOT refactor verified code while the feature is still being built.
-- [ ] **[30]** Commission deliverables should include a COMMITTED test harness rather than a
-      throwaway scratchpad one. Three agents rebuilt equivalent harnesses from scratch; the C1 agent
-      rebuilt what A2 had already written. A `tests/` script the next commission extends would have
-      saved more turns than any amount of re-scoping.
+- [x] **[30]** DONE C2a. `tests/cam.testlib.ps1` (primitives) + `tests/cam.tests.ps1` (checks:
+      parse, cameralist, selftest, strip, leak, procs, relay). Default run touches no camera; `-Live`
+      adds the relay lifecycle. EXTEND IT - do not write another harness.
+
+
+## Phase C2a delivered 2026-10-11 - the relay lifecycle has now actually run
+
+**The "stale credentials" premise was false, and this is the most important thing in this section.**
+The commission stated every authenticated camera operation would fail with 401. It did not. The DPAPI
+store at `camera_creds.xml` authenticates against all six cameras today. Evidence, from the
+restreamer's own log: `[path frontentrance] stream is available and online, 2 tracks (H264, G711)` for
+all six paths, twice (before and after the kill), and 10 real MKV segments written through the relay.
+The file's modification date is NOT evidence about the password - a date tells you when the file was
+written, not whether the secret inside it is current. Only a live call tells you that.
+
+**[C2a-2] The ~300 lines of relay lifecycle executed end to end, twice.** `New-CamRelayEntry`,
+`Start-CamRelayChild`, `Write-CamRelayStderr`, `Stop-CamRelayChild` and `Invoke-CamRelayTick` all ran:
+MediaMTX started as a supervisor child serving 6 paths in 1.8 s, three recorders read from the relay
+(`InputMode: relay`), the child was killed with `Stop-Process -Force`, `Invoke-CamRelayTick` logged
+`restreamer exit -1 after 63s; restart #1 in 3s` and brought it back under a new pid in 3 s, and
+`-Stop` reported `no ffmpeg child left behind` / `no mediamtx left behind` with a measured
+`ffmpeg=0 mediamtx=0`. Reproduce with `tests\cam.tests.ps1 -Live -Checks relay`.
+
+**Also proven as a side effect, closing [26]:** a relay-recorded 30 s segment carries `h264` +
+`pcm_alaw` 8000 Hz (ffprobe), so the relay does not break the audio the whole feature exists for.
+MediaMTX served three simultaneous readers while holding one session per camera.
+
+**`Write-CamRelayStderr` ran but had nothing to drain.** MediaMTX logs to stdout
+(`logDestinations: [stdout]`), which `Read-CamChildOutput` captures and redacts; stderr only carries a
+Go panic, and none occurred. The function was called on every exit and handled empty stderr
+correctly. The redaction path is proven by the credential leak scan over the sandbox (0 hits, positive
+control lit), not by a redacted stderr line.
+
+**Format-CamAgeText moved too**, beyond the five helpers the brief named. Same reason as the other
+five: `cam.health.ps1` is its second consumer, and two age formatters would let `-Status` and the
+strip drift. Flagged as a deliberate deviation.
+
+## Carried forward after C2a
+
+- [ ] **[31]** The strip truncates the stale reason mid-word at 42 chars
+      (`the supervisor recorded a clean shutdow...`). Cosmetic, inside a 120-column budget that is
+      otherwise exact. Fix only if C2b's real strip width differs from 120.
+- [ ] **[32]** `Restreamer.Paths` in `status.json` lists CONFIGURED paths, not READY ones. The strip
+      reports it as `N path(s)` and tells relay from direct per camera with `InputMode`, which is
+      honest, but a reader could misread the count as readiness. Consider a `ReadyPaths` count in a
+      later phase; do not have the strip probe the API for it.
+- [ ] **[33]** The harness leaves its sandbox under `%TEMP%\cam-tests\<name>` and its evidence under
+      `%TEMP%\cam-tests\evidence` on purpose, for inspection. The credential copy is deleted; real
+      footage from a live run is not. Mention the cleanup in the Phase D README.
