@@ -19,6 +19,11 @@
     -RemoveRestreamer
                Deletes that generated config. Recording and viewing continue on
                the direct camera inputs.
+    -InstallAutostart
+               Registers a Scheduled Task that runs -Run at logon as the current
+               user. Needs no elevation and is idempotent.
+    -RemoveAutostart
+               Unregisters that task. A no-op when it is not installed.
     -SelfTest  Pre-flight report: tool check, per-camera RTSP probe, measured
                concurrent-connection limit, crash-safety proof, disk projection.
                Add -Offline to skip every check that touches a camera.
@@ -59,6 +64,12 @@ param(
 
     [Parameter(ParameterSetName = 'RemoveRestreamer')]
     [switch]$RemoveRestreamer,
+
+    [Parameter(ParameterSetName = 'InstallAutostart')]
+    [switch]$InstallAutostart,
+
+    [Parameter(ParameterSetName = 'RemoveAutostart')]
+    [switch]$RemoveAutostart,
 
     [Parameter(ParameterSetName = 'SelfTest')]
     [switch]$SelfTest,
@@ -437,6 +448,135 @@ function Invoke-CamRemoveRestreamer {
     Write-CamHost -Message ("the binary at {0} is left in place" -f [string]$Config.RestreamerExePath)
     Write-CamHost -Message 'Set RestreamerEnabled to false in recorder.config.json to stop the supervisor trying to start it.'
     Write-CamHost -Message 'Recording and viewing continue on the direct camera inputs.' -Colour 'Cyan'
+}
+
+
+# ===========================================================================
+# Autostart: a logon Scheduled Task for the supervisor
+# ===========================================================================
+# Registered through the ScheduledTasks module rather than schtasks.exe.
+# Measured on this machine: schtasks /create /sc onlogon fails with "Access is
+# denied" for a standard user, in the root folder and in a subfolder alike,
+# while Register-ScheduledTask with a per-user LogonTrigger and an interactive,
+# limited principal succeeds unelevated. Reading the task back with
+# schtasks /query needs no elevation either way.
+
+$script:CamAutostartTaskName = 'IPCCTV-Recorder'
+
+
+function Get-CamAutostartTask {
+    <# The registered task, or $null. Never throws. #>
+    if (-not (Get-Command -Name 'Get-ScheduledTask' -ErrorAction SilentlyContinue)) { return $null }
+    return (Get-ScheduledTask -TaskName $script:CamAutostartTaskName -ErrorAction SilentlyContinue |
+        Select-Object -First 1)
+}
+
+
+function Get-CamAutostartAccount {
+    <# DOMAIN\user for the account the task will run as - the current user. #>
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ($identity) { return $identity }
+    return ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME)
+}
+
+
+function Invoke-CamInstallAutostart {
+    <#
+        Registers a Scheduled Task that starts the supervisor at logon as the
+        current user, with no elevation anywhere in the path.
+
+        Idempotent: -Force replaces the registration rather than adding a
+        second task, so running this twice leaves exactly one.
+
+        Two settings are not defaults and are load-bearing for a 24/7 recorder:
+        ExecutionTimeLimit zero, because the default three-day limit would
+        otherwise kill the supervisor on day three, and MultipleInstances
+        IgnoreNew, so a second logon cannot start a second supervisor competing
+        for the same two camera slots.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    Write-CamHost -Message ''
+    Write-CamHost -Message '=== install the logon autostart task ===' -Colour 'Cyan'
+
+    if (-not (Get-Command -Name 'Register-ScheduledTask' -ErrorAction SilentlyContinue)) {
+        throw 'The ScheduledTasks module is not available on this machine, so the task cannot be registered. Windows 8 or later provides it.'
+    }
+
+    $scriptPath = Join-Path -Path $PSScriptRoot -ChildPath 'cam.recorder.ps1'
+    if (-not (Test-Path -LiteralPath $scriptPath)) {
+        throw "Cannot find $scriptPath to point the task at."
+    }
+
+    $powershell = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Run' -f $scriptPath)
+    $account = Get-CamAutostartAccount
+
+    $existing = Get-CamAutostartTask
+
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
+    $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+
+    $task = Register-ScheduledTask -TaskName $script:CamAutostartTaskName -Action $action `
+        -Trigger $trigger -Principal $principal -Settings $settings `
+        -Description 'Starts the IPCCTV continuous recorder at logon.' -Force
+
+    if ($existing) {
+        Write-CamHost -Message ("updated the existing task '{0}'" -f $script:CamAutostartTaskName) -Colour 'Green'
+    }
+    else {
+        Write-CamHost -Message ("created the task '{0}'" -f $script:CamAutostartTaskName) -Colour 'Green'
+    }
+
+    Write-CamHost -Message ("  runs      {0} {1}" -f $powershell, $arguments)
+    Write-CamHost -Message ("  as        {0} (interactive token, no elevation)" -f $account)
+    Write-CamHost -Message ("  trigger   at logon of {0}" -f $account)
+    Write-CamHost -Message  '  limits    no execution time limit, a second instance is ignored'
+    Write-CamHost -Message ("  state     {0}" -f $task.State)
+    Write-CamHost -Message ("  registered task(s) with this name: {0}" -f @(Get-ScheduledTask -TaskName $script:CamAutostartTaskName -ErrorAction SilentlyContinue).Count)
+
+    if ($scriptPath.StartsWith('\\')) {
+        Write-CamHost -Message ''
+        Write-CamHost -Message ("WARNING: the task points at a network path ({0})." -f $scriptPath) -Colour 'Yellow'
+        Write-CamHost -Message '         A \\wsl.localhost path exists only while WSL is running, so at logon the' -Colour 'Yellow'
+        Write-CamHost -Message '         task can start before the share is there and fail. Copy the scripts to a' -Colour 'Yellow'
+        Write-CamHost -Message '         local drive before relying on autostart.' -Colour 'Yellow'
+    }
+
+    Write-CamHost -Message ''
+    Write-CamHost -Message 'Verify it with:  schtasks /query /tn IPCCTV-Recorder /fo list' -Colour 'Cyan'
+    Write-CamHost -Message 'Remove it with:  cam.recorder.ps1 -RemoveAutostart' -Colour 'Cyan'
+}
+
+
+function Invoke-CamRemoveAutostart {
+    <#
+        Unregisters the logon task. A clean no-op when nothing is installed:
+        Unregister-ScheduledTask throws on a missing task, so the task is
+        looked up first.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    Write-CamHost -Message ''
+    Write-CamHost -Message '=== remove the logon autostart task ===' -Colour 'Cyan'
+
+    $existing = Get-CamAutostartTask
+    if (-not $existing) {
+        Write-CamHost -Message ("nothing to remove: no task named '{0}' is registered" -f $script:CamAutostartTaskName) -Colour 'Yellow'
+        return
+    }
+
+    Unregister-ScheduledTask -TaskName $script:CamAutostartTaskName -Confirm:$false
+    $left = @(Get-ScheduledTask -TaskName $script:CamAutostartTaskName -ErrorAction SilentlyContinue).Count
+    if ($left -ne 0) {
+        throw "Unregistered '$($script:CamAutostartTaskName)' but $left task(s) with that name are still registered."
+    }
+
+    Write-CamHost -Message ("removed the task '{0}'" -f $script:CamAutostartTaskName) -Colour 'Green'
+    Write-CamHost -Message 'A supervisor that is running now keeps running. Stop it with -Stop.'
 }
 
 
@@ -2095,7 +2235,13 @@ function Write-CamStatusFile {
         [Parameter(Mandatory = $true)][ValidateSet('running', 'stopped')][string]$State,
         $Archive,
         $PruneState,
-        $Relay
+        $Relay,
+        # The supervisor log. Its tail is published as the Events list so the
+        # health strip can show recent restarts, watchdog kills, prune
+        # deletions and failures without opening a second file. Every line in
+        # that log is already timestamped and redacted, and the log is only
+        # written when something happens, so its tail IS the event stream.
+        [string]$SupervisorLogPath
     )
 
     $now = [DateTime]::Now
@@ -2249,6 +2395,28 @@ function Write-CamStatusFile {
         }
     }
 
+    # Newest first: the strip has room for a handful of lines and the newest
+    # are the ones worth the space.
+    $events = @()
+    $eventCount = [int]$Config.StatusEventCount
+    if ($eventCount -gt 0 -and $SupervisorLogPath) {
+        $tail = @(Get-CamFileTailLines -Path $SupervisorLogPath -Count $eventCount)
+        for ($i = $tail.Count - 1; $i -ge 0; $i--) {
+            $line = [string]$tail[$i]
+            $at = $null
+            $text = $line
+            # "yyyy-MM-dd HH:mm:ss zzz message", the shape Write-CamLog emits.
+            if ($line -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{2}:\d{2}) (.*)$') {
+                $at = $Matches[1]
+                $text = $Matches[2]
+            }
+            $events += [pscustomobject]@{
+                At   = $at
+                Text = Get-CamRedacted -Text $text
+            }
+        }
+    }
+
     $document = [pscustomobject]@{
         Schema        = 1
         State         = $State
@@ -2274,6 +2442,7 @@ function Write-CamStatusFile {
         }
         Prune         = $prune
         Restreamer    = $restreamer
+        Events        = $events
         Cameras       = $rows
     }
 
@@ -3008,7 +3177,8 @@ function Invoke-CamSupervisor {
 
                 try {
                     Write-CamStatusFile -Config $Config -Path $statusPath -Cameras $cameras -Children $children `
-                        -StartedAt $startedAt -State 'running' -Archive $archive -PruneState $pruneState -Relay $relay
+                        -StartedAt $startedAt -State 'running' -Archive $archive -PruneState $pruneState -Relay $relay `
+                        -SupervisorLogPath $supervisorLog
                 }
                 catch {
                     Write-CamLog -Path $supervisorLog -Message ("status write failed: {0}" -f $_.Exception.Message) -MaxBytes $maxBytes
@@ -3048,7 +3218,8 @@ function Invoke-CamSupervisor {
         # cleanly at T" instead of showing a snapshot they cannot account for.
         try {
             Write-CamStatusFile -Config $Config -Path $statusPath -Cameras $cameras -Children $children `
-                -StartedAt $startedAt -State 'stopped' -Archive $archive -PruneState $pruneState -Relay $relay
+                -StartedAt $startedAt -State 'stopped' -Archive $archive -PruneState $pruneState -Relay $relay `
+                -SupervisorLogPath $supervisorLog
         }
         catch { }
 
@@ -3090,6 +3261,12 @@ elseif ($InstallRestreamer) {
 elseif ($RemoveRestreamer) {
     Invoke-CamRemoveRestreamer -Config $config
 }
+elseif ($InstallAutostart) {
+    Invoke-CamInstallAutostart -Config $config
+}
+elseif ($RemoveAutostart) {
+    Invoke-CamRemoveAutostart -Config $config
+}
 elseif ($Run) {
     Invoke-CamSupervisor -Config $config
 }
@@ -3104,4 +3281,6 @@ else {
     Write-CamHost -Message '  cam.recorder.ps1 -SelfTest [-Offline]  pre-flight checks'
     Write-CamHost -Message '  cam.recorder.ps1 -InstallRestreamer    generate the MediaMTX config from cameras.json'
     Write-CamHost -Message '  cam.recorder.ps1 -RemoveRestreamer     delete it again'
+    Write-CamHost -Message '  cam.recorder.ps1 -InstallAutostart     run -Run at logon as this user'
+    Write-CamHost -Message '  cam.recorder.ps1 -RemoveAutostart      remove that logon task'
 }
