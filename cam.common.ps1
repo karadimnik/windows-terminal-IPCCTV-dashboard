@@ -159,6 +159,13 @@ function Get-CamConfigDefault {
         RtspTransport        = 'tcp'
         TimeoutMicroseconds  = 10000000
         ReconcileSeconds     = 5
+        StatusIntervalSeconds = 5
+        # The archive-wide scan behind the status file's disk figures. Separate
+        # from the status cadence because it touches every segment file, which
+        # is too much work to repeat every 5 s.
+        ArchiveScanSeconds   = 60
+        # How long -Stop waits for the supervisor to tear its children down.
+        StopTimeoutSeconds   = 30
         BackoffStartSeconds  = 3
         BackoffMaxSeconds    = 60
         HealthyResetSeconds  = 300
@@ -275,7 +282,10 @@ function Get-CamList {
         throw "Camera list not found at '$Path'."
     }
 
-    $text = [System.IO.File]::ReadAllText($Path)
+    # Get-CamFileText rather than ReadAllText: the supervisor re-reads this file
+    # every few seconds while -Enable may be replacing it, and a plain read
+    # would block that rename.
+    $text = Get-CamFileText -Path $Path
     $parsed = ConvertFrom-Json -InputObject $text
 
     # ConvertFrom-Json does not enumerate its array down the pipeline, so the
@@ -323,12 +333,7 @@ function Set-CamList {
     if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
     [System.IO.File]::WriteAllText($temp, $json, $encoding)
 
-    # Move-Item -Force, not [System.IO.File]::Replace. Replace() calls ReplaceFileW,
-    # which the \\wsl.localhost 9P share answers with "The request is not supported"
-    # - and this repository is normally run from exactly that share. Move-Item -Force
-    # goes through MoveFileEx with MOVEFILE_REPLACE_EXISTING, which is an atomic
-    # rename on NTFS and works on the share as well.
-    Move-Item -LiteralPath $temp -Destination $Path -Force
+    Move-CamFileAtomic -TempPath $temp -Path $Path
 }
 
 
@@ -623,4 +628,142 @@ function Get-CamFreeSpaceGB {
     $root = [System.IO.Path]::GetPathRoot($full)
     $drive = New-Object System.IO.DriveInfo($root)
     return [math]::Round($drive.AvailableFreeSpace / 1GB, 2)
+}
+
+
+# ---------------------------------------------------------------------------
+# State files shared between the supervisor and the CLI
+# ---------------------------------------------------------------------------
+
+function Get-CamStateDirPath {
+    <# The _state directory path. Does not create it: readers must not. #>
+    param([Parameter(Mandatory = $true)]$Config)
+    return (Join-Path -Path ([string]$Config.RootPath) -ChildPath '_state')
+}
+
+
+function Get-CamStatusFilePath {
+    <#
+        status.json, the supervisor's only outward channel. -Status, -Stop and
+        the health strip all read this file, which is why none of them needs IPC
+        and all of them work from any shell.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+    return (Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath 'status.json')
+}
+
+
+function Get-CamStopFlagPath {
+    <#
+        The stop request flag. -Stop creates it, the supervisor notices it within
+        one tick and shuts its children down itself.
+
+        A flag file rather than a console control event: the supervisor normally
+        runs from a Scheduled Task with no console to attach to, and a signal
+        sent to a shared console group would hit every ffmpeg child at once
+        instead of letting the supervisor tear them down in order.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+    return (Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath 'stop.request')
+}
+
+
+function Get-CamFileText {
+    <#
+        Reads a text file that another process may be replacing underneath us.
+
+        FileShare.Delete is the point: without it this read would block the
+        atomic rename in Move-CamFileAtomic, so the supervisor rewriting
+        status.json would fail whenever -Status happened to be reading it. A
+        UTF-8 BOM is detected and stripped, as ReadAllText would.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$RetryCount = 5,
+        [int]$RetryDelayMs = 80
+    )
+
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            $stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, $share)
+            try {
+                $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8, $true)
+                try { return $reader.ReadToEnd() }
+                finally { $reader.Dispose() }
+            }
+            finally { $stream.Dispose() }
+        }
+        catch [System.IO.IOException] {
+            # A genuinely absent file is not a transient condition.
+            if ($_.Exception -is [System.IO.FileNotFoundException]) { throw }
+            if ($_.Exception -is [System.IO.DirectoryNotFoundException]) { throw }
+            if ($attempt -ge $RetryCount) { throw }
+            Start-Sleep -Milliseconds $RetryDelayMs
+        }
+    }
+}
+
+
+function Move-CamFileAtomic {
+    <#
+        Replaces $Path with $TempPath, retrying while a reader holds the
+        destination open.
+
+        Move-Item -Force, not [System.IO.File]::Replace: Replace() calls
+        ReplaceFileW, which the \\wsl.localhost 9P share answers with "The
+        request is not supported", and this repository is normally run from
+        exactly that share. Move-Item goes through MoveFileEx with
+        MOVEFILE_REPLACE_EXISTING, an atomic rename on NTFS that the share
+        accepts too.
+
+        The retry exists because a reader that opened the destination without
+        FILE_SHARE_DELETE blocks the rename for as long as it holds the handle.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$TempPath,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [int]$RetryCount = 10,
+        [int]$RetryDelayMs = 100
+    )
+
+    $attempt = 0
+    while ($true) {
+        $attempt++
+        try {
+            Move-Item -LiteralPath $TempPath -Destination $Path -Force
+            return
+        }
+        catch {
+            if ($attempt -ge $RetryCount) { throw }
+            Start-Sleep -Milliseconds $RetryDelayMs
+        }
+    }
+}
+
+
+function Test-CamPathInside {
+    <#
+        True only when $Path resolves inside $Root. The trailing separator on the
+        root is what stops 'E:\cameras_old\x.mkv' counting as inside
+        'E:\cameras', and GetFullPath collapses any '..' before the comparison.
+
+        This is the pruner's last line of defence: nothing is ever deleted
+        without passing through here.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+
+    $separator = [string][System.IO.Path]::DirectorySeparatorChar
+    $rootFull = [System.IO.Path]::GetFullPath($Root)
+    if (-not $rootFull.EndsWith($separator)) { $rootFull = $rootFull + $separator }
+
+    $full = [System.IO.Path]::GetFullPath($Path)
+    return $full.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)
 }

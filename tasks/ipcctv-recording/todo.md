@@ -30,14 +30,30 @@ Approved: 2026-10-11
 - [x] **[5]** Supervisor `-Run` - one ffmpeg child per enabled camera, verified flag set, flat
       per-camera dirs, redacted per-camera logs, restart backoff, stall watchdog.
 
+## Phase A2 - Connection-model evidence (gates Phase C)
+
+Operator chose on 2026-10-11 to pull the restreamer forward ahead of Phase C. Measured ceiling is
+exactly 2 RTSP sessions per camera, so dashboard + recorder leaves zero headroom. BUT go2rtc has an
+open bug where long-running RTSP consumers of a relayed G.711 stream progressively lose audio - the
+exact codec and consumer shape we have - so the restreamer must be proven, not assumed.
+
+- [ ] **[19]** Measure slot-release time: hold one session, hard-kill a recorder child, count backoff
+      cycles before it reconnects. If release is prompt, direct connection needs no restreamer.
+- [ ] **[20]** MediaMTX G.711 soak: 1 h, two long-running consumers, audio packet continuity sampled
+      over time. Prefer MediaMTX over go2rtc on the documented-bug evidence. Fail = stay direct.
+- [ ] **[21]** Decide the connection model on [19] + [20], then implement. Restreamer is a transport
+      fan-out ONLY - recording stays in our supervisor, never moved into the restreamer.
+- [ ] **[22]** If adopting a restreamer, give the dashboard a direct-connection fallback so a
+      restreamer outage cannot take live viewing down with recording.
+
 ## Phase B - Control, status, retention
 
-- [ ] **[6]** `-Enable` / `-Disable` / `-List`, atomic `cameras.json` writes preserving all fields.
-- [ ] **[7]** 5 s reconcile loop - live pickup of `Record` changes without a restart.
-- [ ] **[8]** `status.json` writer + `-Status` renderer (per-camera health, disk free, projected days).
-- [ ] **[9]** Pruner - free-space watermark with hysteresis, oldest-first, never the in-progress
+- [x] **[6]** `-Enable` / `-Disable` / `-List`, atomic `cameras.json` writes preserving all fields.
+- [x] **[7]** 5 s reconcile loop - live pickup of `Record` changes without a restart.
+- [x] **[8]** `status.json` writer + `-Status` renderer (per-camera health, disk free, projected days).
+- [x] **[9]** Pruner - free-space watermark with hysteresis, oldest-first, never the in-progress
       file, every deletion logged.
-- [ ] **[10]** `-Stop` - graceful shutdown leaving the final segment readable.
+- [x] **[10]** `-Stop` - graceful shutdown leaving the final segment readable.
 
 ## Phase C - Dashboard and autostart
 
