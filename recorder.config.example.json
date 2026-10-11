@@ -8,6 +8,12 @@
   "PruneIntervalSeconds": 300,
   "MaxRetentionDays": null,
   "HealthStripHeightPx": 140,
+  "RestreamerEnabled": true,
+  "RestreamerExePath": "C:\\mediamtx\\mediamtx.exe",
+  "RestreamerConfigPath": "C:\\mediamtx\\mediamtx.yml",
+  "RelayBase": "rtsp://127.0.0.1:8554",
+  "RelayApiBase": "http://127.0.0.1:9997",
+  "RelayProbeTimeoutMs": 1500,
   "Container": "mkv",
   "ContainerProfiles": {
     "mkv": {

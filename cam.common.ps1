@@ -131,6 +131,18 @@ function Get-CamConfigDefault {
         PruneIntervalSeconds = 300
         MaxRetentionDays     = $null
         HealthStripHeightPx  = 140
+        # Local restreamer (MediaMTX). Transport fan-out only: it frees the
+        # second camera slot, keeps the camera password out of every consumer's
+        # command line, and halves the load on camera and network. The paths
+        # it serves are generated from cameras.json by -InstallRestreamer.
+        RestreamerEnabled    = $true
+        RestreamerExePath    = 'C:\mediamtx\mediamtx.exe'
+        RestreamerConfigPath = 'C:\mediamtx\mediamtx.yml'
+        RelayBase            = 'rtsp://127.0.0.1:8554'
+        RelayApiBase         = 'http://127.0.0.1:9997'
+        # Budget for one control-API probe. Spent once per recorder child
+        # start and once per mpv pane attempt, both on loopback.
+        RelayProbeTimeoutMs  = 1500
         Container            = 'mkv'
         ContainerProfiles    = @{
             mkv  = [pscustomobject]@{
@@ -398,6 +410,278 @@ function Get-CamRecordEnabled {
     $property = $Camera.PSObject.Properties['Record']
     if (-not $property) { return $false }
     return ([bool]$property.Value -eq $true)
+}
+
+
+# ---------------------------------------------------------------------------
+# Local restreamer (MediaMTX): a transport fan-out in front of the cameras
+# ---------------------------------------------------------------------------
+# One camera session is pulled by MediaMTX and re-served on loopback, so the
+# recorder and the dashboard share it instead of taking a camera slot each.
+# These cameras serve exactly two concurrent RTSP sessions, so this is what
+# leaves a slot free for the phone app. Recording, segmenting, pruning and
+# redaction stay in cam.recorder.ps1: MediaMTX is transport only.
+#
+# Every consumer prefers the relay and falls back to the direct camera URL
+# when the relay is not serving that path, which keeps viewing and recording
+# working while the restreamer is down.
+
+function Get-CamRelayEnabled {
+    <# False turns the restreamer off completely: no child, no relay URLs. #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    if ($Config -is [System.Collections.IDictionary]) {
+        if (-not $Config.Contains('RestreamerEnabled')) { return $false }
+        return ([bool]$Config['RestreamerEnabled'] -eq $true)
+    }
+
+    $property = $Config.PSObject.Properties['RestreamerEnabled']
+    if (-not $property) { return $false }
+    return ([bool]$property.Value -eq $true)
+}
+
+
+function Get-CamRelayPathName {
+    <#
+        The MediaMTX path name for a camera: its safe name lowercased with
+        every character that is not a letter or a digit removed.
+
+        Why the characters have to go. MediaMTX takes each path's source from
+        the environment variable MTX_PATHS_<NAME>_SOURCE, and its env loader
+        cuts the map key at the FIRST underscore, requires that segment to be
+        uppercase, and stores it lowercased. A path named workshop_entrance
+        therefore produces a stray path "workshop" plus an "workshop_entrance"
+        that keeps source: publisher and stays offline - with no error at all.
+        Measured on v1.21.2, 2026-10-11:
+
+            CASE 'workshopentrance'  -> ready=True  tracks=[H264,G711]
+            CASE 'workshop_entrance' -> two paths, both ready=False, no tracks
+
+        An alphanumeric name is what makes that mapping unambiguous.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$SafeName)
+
+    $name = [regex]::Replace($SafeName.ToLowerInvariant(), '[^a-z0-9]', '')
+    if ([string]::IsNullOrEmpty($name)) {
+        throw "Camera name '$SafeName' contains no letter or digit, so it cannot name a MediaMTX path. Rename the camera in cameras.json."
+    }
+    return $name
+}
+
+
+function Get-CamRelayPathMap {
+    <#
+        Ordered path name -> camera map covering EVERY camera in the list, not
+        only the ones being recorded: the dashboard views them all and shares
+        the same relay.
+
+        Pass (Get-CamList), never @(Get-CamList): Get-CamList returns its array
+        with a leading comma, which @() around a function call nests one level
+        deeper, and this loop would then run once over a single element holding
+        every camera.
+
+        A collision throws rather than resolving itself, because the quiet
+        outcome would be one camera's stream served under two names while
+        another camera is never pulled at all.
+    #>
+    param([Parameter(Mandatory = $true)][object[]]$Cameras)
+
+    $map = New-Object System.Collections.Specialized.OrderedDictionary
+    foreach ($camera in $Cameras) {
+        $safe = Get-CamSafeName -Name ([string]$camera.Name)
+        $path = Get-CamRelayPathName -SafeName $safe
+        if ($map.Contains($path)) {
+            throw "Cameras '$($map[$path].Name)' and '$($camera.Name)' both map to the MediaMTX path '$path'. Rename one in cameras.json."
+        }
+        $map[$path] = $camera
+    }
+    return $map
+}
+
+
+function Get-CamRelaySourceEnvName {
+    <# The variable MediaMTX reads this path's source URL from. #>
+    param([Parameter(Mandatory = $true)][string]$PathName)
+
+    return "MTX_PATHS_$($PathName.ToUpperInvariant())_SOURCE"
+}
+
+
+function Get-CamRelayUrl {
+    <# The loopback URL for one relayed camera. Carries no credential. #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$PathName
+    )
+
+    return ("{0}/{1}" -f ([string]$Config.RelayBase).TrimEnd('/'), $PathName)
+}
+
+
+function Get-CamRelayHostPort {
+    <#
+        Strips a URL down to the host:port MediaMTX wants in its own config, so
+        the addresses have a single source of truth in recorder.config.json.
+        Done with a regex rather than [System.Uri] because rtsp:// is not a
+        scheme .NET parses consistently across versions.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Url)
+
+    $text = [regex]::Replace([string]$Url, '(?i)^[a-z][a-z0-9+.\-]*://', '')
+    $text = $text.TrimEnd('/')
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        throw "'$Url' has no host:port to give MediaMTX."
+    }
+    return $text
+}
+
+
+function Get-CamRelayApiJson {
+    <#
+        GETs one route from the MediaMTX control API and returns the parsed
+        object, or $null for every failure - relay down, path unknown, timeout,
+        garbage. A reachability probe must never throw into a caller that is
+        about to start a recording.
+
+        HttpWebRequest rather than Invoke-RestMethod: this needs a sub-second
+        timeout (Invoke-RestMethod's -TimeoutSec is whole seconds) and must
+        ignore any system proxy, which would otherwise be asked to route a
+        loopback call.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Route
+    )
+
+    $timeout = 1500
+    try { $timeout = [int]$Config.RelayProbeTimeoutMs } catch { }
+    if ($timeout -lt 100) { $timeout = 100 }
+
+    $uri = "{0}/{1}" -f ([string]$Config.RelayApiBase).TrimEnd('/'), $Route.TrimStart('/')
+
+    try {
+        $request = [System.Net.HttpWebRequest]::Create($uri)
+        $request.Method = 'GET'
+        $request.Proxy = $null
+        $request.Timeout = $timeout
+        $request.ReadWriteTimeout = $timeout
+
+        $response = $request.GetResponse()
+        try {
+            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+            try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        }
+        finally { $response.Dispose() }
+
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        return (ConvertFrom-Json -InputObject $text)
+    }
+    catch { return $null }
+}
+
+
+function Test-CamRelayPathReady {
+    <#
+        True only when MediaMTX is up AND this camera's path is actually
+        serving. The narrower question matters: a plain TCP connect to 8554
+        would pass while the camera behind the path is unreachable, and the
+        consumer would then sit on a dead relay instead of going direct.
+
+        Deliberately not an RTSP session - a probe that opened one would itself
+        consume a reader slot and add latency to every restart.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$PathName
+    )
+
+    $route = 'v3/paths/get/' + [System.Uri]::EscapeDataString($PathName)
+    $info = Get-CamRelayApiJson -Config $Config -Route $route
+    if (-not $info) { return $false }
+
+    $property = $info.PSObject.Properties['ready']
+    if (-not $property) { return $false }
+    return ([bool]$property.Value -eq $true)
+}
+
+
+function Get-CamInputUrl {
+    <#
+        Chooses the input for ONE consumer attempt: the relay when it is
+        serving this path, the direct camera URL otherwise.
+
+        Called per attempt - every recorder child start, every mpv pane
+        iteration - rather than once at startup. That is what makes a
+        restreamer that dies mid-run fall back on the next attempt instead of
+        being retried forever against a dead address, and what lets a consumer
+        return to the relay on its own once MediaMTX is back.
+
+        The returned Mode is logged by both consumers so the choice is always
+        visible after the fact.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [AllowEmptyString()][string]$RelayPathName,
+        [Parameter(Mandatory = $true)][string]$DirectUrl
+    )
+
+    if ((Get-CamRelayEnabled -Config $Config) -and -not [string]::IsNullOrEmpty($RelayPathName)) {
+        if (Test-CamRelayPathReady -Config $Config -PathName $RelayPathName) {
+            return [pscustomobject]@{
+                Mode = 'relay'
+                Url  = (Get-CamRelayUrl -Config $Config -PathName $RelayPathName)
+            }
+        }
+    }
+
+    return [pscustomobject]@{ Mode = 'direct'; Url = $DirectUrl }
+}
+
+
+function Get-CamRelayConfigText {
+    <#
+        Renders mediamtx.template.yml for the current camera list: one path per
+        camera, the addresses taken from recorder.config.json so they cannot
+        drift from the URLs the consumers probe.
+
+        No source URL is ever written here. Each path keeps source: publisher
+        in the file and is overridden at launch by MTX_PATHS_<NAME>_SOURCE,
+        which is the only reason the camera password stays off the disk.
+
+        Used by -InstallRestreamer to write the file and by the supervisor to
+        tell whether the file on disk still matches cameras.json.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$PathMap,
+        [string]$TemplatePath
+    )
+
+    if (-not $TemplatePath) {
+        $TemplatePath = Join-Path -Path $script:CamLibRoot -ChildPath 'mediamtx.template.yml'
+    }
+    if (-not (Test-Path -LiteralPath $TemplatePath)) {
+        throw "MediaMTX config template not found at '$TemplatePath'."
+    }
+
+    $lines = New-Object System.Collections.ArrayList
+    foreach ($path in $PathMap.Keys) {
+        $camera = $PathMap[$path]
+        $envName = Get-CamRelaySourceEnvName -PathName $path
+        [void]$lines.Add("  ${path}:")
+        [void]$lines.Add("    # $($camera.Name) at $($camera.IP) - source supplied at launch by $envName")
+        [void]$lines.Add('    source: publisher')
+    }
+
+    $text = [System.IO.File]::ReadAllText($TemplatePath)
+    $text = $text.Replace('__RTSP_ADDRESS__', (Get-CamRelayHostPort -Url ([string]$Config.RelayBase)))
+    $text = $text.Replace('__API_ADDRESS__', (Get-CamRelayHostPort -Url ([string]$Config.RelayApiBase)))
+    $text = $text.Replace('__PATHS__', ($lines -join "`r`n"))
+
+    # Normalised to CRLF: the generated file lands on NTFS and the Operator
+    # reads it in a Windows editor.
+    $text = [regex]::Replace($text, "`r`n|`n", "`r`n")
+    return $text
 }
 
 
