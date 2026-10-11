@@ -7,7 +7,7 @@
   "PruneHysteresisGB": 5,
   "PruneIntervalSeconds": 300,
   "MaxRetentionDays": null,
-  "HealthStripHeightPx": 140,
+  "HealthStripHeightPx": -1,
   "RestreamerEnabled": true,
   "RestreamerExePath": "C:\\mediamtx\\mediamtx.exe",
   "RestreamerConfigPath": "C:\\mediamtx\\mediamtx.yml",

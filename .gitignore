@@ -29,3 +29,6 @@ ehthumbs_vista.db
 *.stackdump
 [Dd]esktop.ini
 $RECYCLE.BIN/
+
+# Local design mockups, not part of the project
+mockups/

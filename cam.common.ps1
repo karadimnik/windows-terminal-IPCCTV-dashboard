@@ -184,7 +184,50 @@ function Get-CamConfigDefault {
         PruneHysteresisGB    = 5
         PruneIntervalSeconds = 300
         MaxRetentionDays     = $null
-        HealthStripHeightPx  = 140
+
+        # Dashboard layout. The strip the dashboard reserves along the bottom
+        # of the screen for cam.health.ps1:
+        #   -1  derive it from the video aspect - each pane is exactly as tall
+        #       as the video is at the pane width, and the strip takes every
+        #       pixel left over. This is what puts 640x360 video on a 1920 px
+        #       screen with six cameras.
+        #    0  no strip at all. The panes fill the screen exactly as they did
+        #       before the strip existed and no health window is launched.
+        #   >0  that many pixels, with the panes shrunk to fit.
+        HealthStripHeightPx  = -1
+        # Never give the strip less than this many pixels; shrink the panes
+        # instead. A strip too short to read is worse than slightly smaller
+        # video.
+        HealthStripMinPx     = 120
+        # Gutter BETWEEN the grid rows, and between the grid and the strip.
+        # Never at the screen edges: three 640 px panes fill a 1920 px screen
+        # exactly, so an edge gutter could only come out of the picture.
+        GridGutterPx         = 8
+        # Shape of the video, which fixes the pane height at a given pane
+        # width. These cameras are 16:9.
+        VideoAspectWidth     = 16
+        VideoAspectHeight    = 9
+        # Approximate cell size of the strip window's font. Used ONLY to ask
+        # Windows Terminal for a roughly right size at launch so it cannot
+        # flash up over the grid; the exact pixel geometry is applied with
+        # SetWindowPos afterwards and the renderer reads its real row and
+        # column count from the console it ends up with. Neither number can
+        # affect correctness.
+        HealthCellWidthPx    = 9
+        HealthCellHeightPx   = 22
+
+        # Sections the health strip renders, in this order. Remove a name to
+        # switch that section off; an empty list renders an empty strip.
+        #   status   one line - supervisor, relay, free space, days left
+        #   cameras  the per-camera table with its column header
+        #   events   the most recent supervisor events, newest first
+        #   archive  footage span and size, then the disk trend and pruning
+        HealthSections       = @('status', 'cameras', 'events', 'archive')
+        # Rows the events section occupies, its own label row included.
+        HealthEventRows      = 3
+        # How many of the supervisor log's most recent lines status.json
+        # publishes for the strip to read.
+        StatusEventCount     = 20
         # Local restreamer (MediaMTX). Transport fan-out only: it frees the
         # second camera slot, keeps the camera password out of every consumer's
         # command line, and halves the load on camera and network. The paths
@@ -989,6 +1032,60 @@ function Write-CamLog {
 }
 
 
+function Get-CamFileTailLines {
+    <#
+        The last $Count non-blank lines of a text file, oldest first, without
+        loading the whole file: a supervisor log runs up to LogMaxBytes and
+        this is read on every status write.
+
+        Opened with FileShare.ReadWrite so reading it can never block the
+        writer, and a missing or unreadable file returns nothing rather than
+        throwing - every caller is reporting on the log, not depending on it.
+
+        Returns a plain array. Wrap the call in @() if you need to index it.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 1000)][int]$Count,
+        # Tail window. 64 KB holds far more than Count lines of this log.
+        [ValidateRange(1024, 4194304)][int]$MaxBytes = 65536
+    )
+
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+
+    $buffer = $null
+    $read = 0
+    $partialFirstLine = $false
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $length = $stream.Length
+            $take = [int][math]::Min([long]$MaxBytes, $length)
+            if ($take -le 0) { return @() }
+            $partialFirstLine = ($take -lt $length)
+            [void]$stream.Seek(($length - $take), [System.IO.SeekOrigin]::Begin)
+            $buffer = New-Object byte[] $take
+            $read = $stream.Read($buffer, 0, $take)
+        }
+        finally { $stream.Dispose() }
+    }
+    catch { return @() }
+
+    if ($read -le 0) { return @() }
+
+    $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+    $lines = @($text -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+
+    # The first line is cut in half when the tail window started mid-line.
+    if ($partialFirstLine -and $lines.Count -gt 1) { $lines = @($lines[1..($lines.Count - 1)]) }
+    elseif ($partialFirstLine) { $lines = @() }
+
+    if ($lines.Count -le $Count) { return $lines }
+    return @($lines[($lines.Count - $Count)..($lines.Count - 1)])
+}
+
+
 function Get-CamFreeSpaceGB {
     <# Free space in GB on the volume holding $Path. #>
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -1212,4 +1309,153 @@ function Get-CamSupervisorState {
     $state.Running = $true
     $state.Reason = "pid $($state.Pid), heartbeat $($state.AgeSeconds)s old"
     return $state
+}
+
+
+# ---------------------------------------------------------------------------
+# Dashboard layout
+# ---------------------------------------------------------------------------
+# One function decides where every mpv pane and the health strip go, so the
+# geometry can be asserted by the test harness without opening a window.
+#
+# The grid is full-bleed: there is no gutter at the left, right or top edge of
+# the screen, because three 640 px panes fill a 1920 px screen exactly and any
+# edge gutter could only be taken out of the picture. The gutter sits BETWEEN
+# the rows and between the bottom row and the strip.
+
+function Get-CamDashboardLayout {
+    <#
+        Works out the pane grid and the health strip from the screen size, the
+        camera count and the config. Pure arithmetic: it opens nothing and
+        reads nothing but $Config.
+
+        The column and row counts come from the CAMERA COUNT ALONE. The health
+        strip is a reserved band, never a grid cell, so six cameras are a 3x2
+        grid whether the strip is there or not - putting the strip in the grid
+        would reshape it to 3x3 and shrink every feed.
+
+        Returns one object:
+          Columns, Rows                 grid shape, from the camera count
+          PaneWidth, PaneHeight         pixel size of one mpv window
+          GutterPx                      gutter between rows, 0 when disabled
+          GridHeight                    rows and gutters together
+          StripEnabled                  whether to launch a health window
+          StripLeft/Top/Width/Height    the reserved band
+          Mode                          off | aspect | fixed
+          Note                          why the panes are not aspect-exact,
+                                        or $null when they are
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 64)][int]$CameraCount,
+        [Parameter(Mandatory = $true)][ValidateRange(64, 16384)][int]$ScreenWidth,
+        [Parameter(Mandatory = $true)][ValidateRange(64, 16384)][int]$ScreenHeight,
+        [int]$ScreenLeft = 0,
+        [int]$ScreenTop = 0
+    )
+
+    # Camera count only. Unchanged from the original dashboard.
+    $columns = [int][math]::Ceiling([math]::Sqrt($CameraCount))
+    $rows = [int][math]::Ceiling($CameraCount / [double]$columns)
+    $paneWidth = [int][math]::Floor($ScreenWidth / $columns)
+
+    $stripSetting = [int]$Config.HealthStripHeightPx
+
+    if ($stripSetting -eq 0) {
+        # Exactly the original arithmetic, so turning the strip off restores
+        # the layout the dashboard had before it existed.
+        return [pscustomobject]@{
+            Columns      = $columns
+            Rows         = $rows
+            PaneWidth    = $paneWidth
+            PaneHeight   = [int][math]::Floor($ScreenHeight / $rows)
+            GutterPx     = 0
+            GridHeight   = ([int][math]::Floor($ScreenHeight / $rows)) * $rows
+            StripEnabled = $false
+            StripLeft    = $ScreenLeft
+            StripTop     = $ScreenTop + $ScreenHeight
+            StripWidth   = $ScreenWidth
+            StripHeight  = 0
+            Mode         = 'off'
+            Note         = $null
+        }
+    }
+
+    $gutter = [int]$Config.GridGutterPx
+    if ($gutter -lt 0) { $gutter = 0 }
+
+    $aspectWidth = [double]$Config.VideoAspectWidth
+    $aspectHeight = [double]$Config.VideoAspectHeight
+    if ($aspectWidth -le 0 -or $aspectHeight -le 0) {
+        throw "VideoAspectWidth and VideoAspectHeight must both be greater than zero, got $($Config.VideoAspectWidth)x$($Config.VideoAspectHeight)."
+    }
+
+    # Every row costs one gutter: rows-1 between the rows, plus one between the
+    # bottom row and the strip. So rows*paneHeight + rows*gutter + strip fills
+    # the screen, which is the identity both branches below are solved from.
+    $mode = 'aspect'
+    $note = $null
+    $paneHeight = [int][math]::Round($paneWidth * $aspectHeight / $aspectWidth)
+    $stripHeight = $ScreenHeight - ($rows * $paneHeight) - ($rows * $gutter)
+
+    if ($stripSetting -gt 0) {
+        $mode = 'fixed'
+        $stripHeight = $stripSetting
+        $paneHeight = [int][math]::Floor(($ScreenHeight - $stripHeight - ($rows * $gutter)) / $rows)
+        $note = 'pane height is set by the configured strip height, not by the video aspect'
+    }
+
+    $minStrip = [int]$Config.HealthStripMinPx
+    if ($minStrip -lt 0) { $minStrip = 0 }
+    if ($stripHeight -lt $minStrip) {
+        $stripHeight = $minStrip
+        $paneHeight = [int][math]::Floor(($ScreenHeight - $stripHeight - ($rows * $gutter)) / $rows)
+        $note = "panes shrunk below the video aspect so the strip keeps its $minStrip px floor"
+    }
+
+    if ($paneHeight -lt 1) {
+        throw ("A {0} px screen cannot fit {1} row(s) of panes plus a {2} px strip." -f $ScreenHeight, $rows, $stripHeight)
+    }
+
+    $gridHeight = ($rows * $paneHeight) + (($rows - 1) * $gutter)
+    $stripTop = $ScreenTop + $gridHeight + $gutter
+    # The strip absorbs whatever the pane rounding left over, so it always
+    # reaches the bottom edge of the screen exactly.
+    $stripHeight = ($ScreenTop + $ScreenHeight) - $stripTop
+
+    return [pscustomobject]@{
+        Columns      = $columns
+        Rows         = $rows
+        PaneWidth    = $paneWidth
+        PaneHeight   = $paneHeight
+        GutterPx     = $gutter
+        GridHeight   = $gridHeight
+        StripEnabled = ($stripHeight -gt 0)
+        StripLeft    = $ScreenLeft
+        StripTop     = $stripTop
+        StripWidth   = $ScreenWidth
+        StripHeight  = $stripHeight
+        Mode         = $mode
+        Note         = $note
+    }
+}
+
+
+function Get-CamPanePosition {
+    <# Top-left pixel of pane $Index in the layout's grid. #>
+    param(
+        [Parameter(Mandatory = $true)]$Layout,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [int]$ScreenLeft = 0,
+        [int]$ScreenTop = 0
+    )
+
+    $column = $Index % $Layout.Columns
+    $row = [int][math]::Floor($Index / $Layout.Columns)
+    return [pscustomobject]@{
+        Column = $column
+        Row    = $row
+        X      = $ScreenLeft + ($column * $Layout.PaneWidth)
+        Y      = $ScreenTop + ($row * ($Layout.PaneHeight + $Layout.GutterPx))
+    }
 }
