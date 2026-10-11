@@ -1,0 +1,33 @@
+{
+  "RootPath": "E:\\cameras",
+  "FfmpegPath": "C:\\ffmpeg\\bin\\ffmpeg.exe",
+  "FfprobePath": "C:\\ffmpeg\\bin\\ffprobe.exe",
+  "SegmentSeconds": 900,
+  "ReserveGB": 20,
+  "PruneHysteresisGB": 5,
+  "PruneIntervalSeconds": 300,
+  "MaxRetentionDays": null,
+  "HealthStripHeightPx": 140,
+  "Container": "mkv",
+  "ContainerProfiles": {
+    "mkv": {
+      "Extension": ".mkv",
+      "SegmentFormat": "matroska",
+      "AudioArgs": [],
+      "ExtraArgs": [],
+      "SegmentFormatOptions": ""
+    },
+    "fmp4": {
+      "Extension": ".mp4",
+      "SegmentFormat": "mp4",
+      "AudioArgs": [
+        "-c:a",
+        "aac",
+        "-b:a",
+        "64k"
+      ],
+      "SegmentFormatOptions": "movflags=+frag_keyframe+empty_moov+default_base_moof",
+      "ExtraArgs": []
+    }
+  }
+}
