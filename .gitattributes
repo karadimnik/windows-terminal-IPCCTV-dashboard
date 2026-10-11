@@ -1,0 +1,12 @@
+# Normalise line endings so a rewrite of one file cannot produce a whole-file
+# diff. The repo is LF throughout; PowerShell 5.1 reads LF .ps1 files fine
+# (verified: cam.recorder.ps1 is LF and -SelfTest passes 33/33 on PS 5.1).
+*.ps1  text eol=lf
+*.psm1 text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+.gitignore    text eol=lf
+.gitattributes text eol=lf

@@ -43,7 +43,7 @@ exact codec and consumer shape we have - so the restreamer must be proven, not a
       over time. Prefer MediaMTX over go2rtc on the documented-bug evidence. Fail = stay direct.
 - [x] **[21]** DECIDED 2026-10-11: MediaMTX with direct fallback. Connection model on [19] + [20], then implement. Restreamer is a transport
       fan-out ONLY - recording stays in our supervisor, never moved into the restreamer.
-- [ ] **[22]** If adopting a restreamer, give the dashboard a direct-connection fallback so a
+- [x] **[22]** If adopting a restreamer, give the dashboard a direct-connection fallback so a
       restreamer outage cannot take live viewing down with recording.
 
 ## Phase B - Control, status, retention
@@ -118,3 +118,53 @@ srt/moq - transport fan-out only, never a media server, never a recorder.
       `HealthyResetSeconds` backoff reset, the real 2250 s stall threshold, `MaxRetentionDays`.
 - [ ] **[25]** `recorder.config.example.json` lacks `StatusIntervalSeconds`, `ArchiveScanSeconds`,
       `StopTimeoutSeconds`. Document in the Phase D README.
+
+## Phase C1 delivered 2026-10-11 - advisor rulings
+
+**Finding that changed the design, measured not assumed:** MediaMTX **cannot take an underscore in a
+path name**. Its env-var key is cut at the first underscore (confirmed against
+`internal/conf/env/env.go`), so `MTX_PATHS_WORKSHOP_ENTRANCE_SOURCE` silently creates a stray
+`workshop` path and leaves the real one on `source: publisher`, with nothing logged. Path name is
+therefore the safe name **lowercased with all non-alphanumerics stripped**, collisions throwing.
+Accepted as a justified deviation from my brief's wording.
+
+**Rulings - KEEP all four unrequested additions.** None is speculative; each closes a real hole:
+- `Test-CamRestreamer` + self-test `(f)`: the Operator self-tests, and asserting the generated config
+  carries no credential is a security check worth automating.
+- `status.json` `Restreamer` block + per-camera `InputMode`: C2's health strip needs exactly this, and
+  `LastPid` is load-bearing for the orphan check.
+- `-Stop` mediamtx-orphan check: a leaked MediaMTX holds a session on ALL SIX cameras at once, the
+  worst possible leak. Keep without question.
+- **Relay startup wait**: prevents the cold-start deadlock where recorders grab the second slot
+  directly and MediaMTX can then never pull, stranding everything on direct with no way out.
+
+**Supervisor-as-parent for MediaMTX: CONFIRMED.** The consequence - a dashboard opened while the
+recorder is stopped runs on direct inputs - is correct rather than broken, because the fallback
+handles it, and the recorder runs from a logon task anyway so this is an edge case. One thing to
+autostart beats two.
+
+**Line endings fixed by advisor, not by restoring CRLF.** The original dashboard script was CRLF but
+all three new scripts are LF, so the repo is majority-LF; `.gitattributes` now pins LF for text files
+so a rewrite can never again produce a whole-file diff. PS 5.1 reads LF `.ps1` fine (proven: 33/33).
+
+## Carried forward
+
+- [x] **[23]** Camera-facing `-SelfTest` run by the Operator: **33 passed, 0 failed**, including the
+      three checks that had never run live - all six cameras probed (h264 + pcm_alaw), concurrency
+      confirmed at 2 on all six for the third independent time, and crash safety on real footage
+      (4 completed + 1 interrupted segment, all 5 readable with BOTH video and audio).
+- [ ] **[26]** Re-run the camera-dependent C1 criteria after the credential refresh: D2 (one-session
+      proof), D3 (relay MKV carries pcm_alaw), D6 (MediaMTX restart with backoff), and the relay-up
+      halves of D1 and D4.
+- [ ] **[27]** README must document the MediaMTX download and `C:\mediamtx\` placement, plus the
+      transition state in [28] below.
+- [ ] **[28]** README line: if the dashboard AND recorder are both already on direct inputs, both
+      camera slots are taken and MediaMTX can never pull. Restarting either consumer resolves it.
+- [ ] **[29]** TECHNICAL DEBT, after the feature is verified, never mid-feature: `cam.recorder.ps1` is
+      now 3,228 lines / 140 KB in one file and is a measurable tax on every edit (exact-match patching
+      cost the C1 agent turns). Split it in a dedicated commission once the feature is complete and
+      green. Do NOT refactor verified code while the feature is still being built.
+- [ ] **[30]** Commission deliverables should include a COMMITTED test harness rather than a
+      throwaway scratchpad one. Three agents rebuilt equivalent harnesses from scratch; the C1 agent
+      rebuilt what A2 had already written. A `tests/` script the next commission extends would have
+      saved more turns than any amount of re-scoping.
