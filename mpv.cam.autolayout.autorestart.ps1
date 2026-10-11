@@ -14,11 +14,27 @@
     keeps the credential out of the Windows Terminal and PowerShell command
     lines it would otherwise appear in.
 
+    A strip is reserved along the bottom of the screen for cam.health.ps1,
+    which is launched into a Windows Terminal window of its own. The strip is
+    never a grid cell: the column and row counts come from the CAMERA COUNT
+    ALONE, so six cameras are a 3x2 grid whether the strip is there or not.
+    Counting the health window as a seventh stream would reshape the grid to
+    3x3 and shrink every feed.
+
+    Set HealthStripHeightPx to 0 in recorder.config.json to turn the strip off
+    and get the original full-height layout back.
+
 .PARAMETER PrintUrls
-    Prints the input each camera would use right now, redacted, and exits
-    without opening any window.
+    Prints the input each camera would use right now, redacted, and the
+    computed layout, then exits without opening any window.
+
+.PARAMETER NoHealthStrip
+    Launches the grid with the strip reserved but no health window in it.
 #>
-param([switch]$PrintUrls)
+param(
+    [switch]$PrintUrls,
+    [switch]$NoHealthStrip
+)
 
 # 1. Define Paths and Settings
 # mpv.com path (adjust if your mpv installation is elsewhere)
@@ -91,10 +107,276 @@ foreach ($Stream in $Streams.GetEnumerator()) {
 }
 Write-Host ""
 
+# 3. Screen real estate and the reserved strip
+#
+# $Streams holds CAMERAS ONLY. The health window is placed into a reserved
+# band afterwards and is never added here: $Streams.Count drives --geometry,
+# so a seventh entry would turn a 3x2 grid into 3x3 and shrink every feed.
+Add-Type -AssemblyName System.Windows.Forms
+$Screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+
+$Layout = Get-CamDashboardLayout -Config $Config -CameraCount $Streams.Count `
+    -ScreenWidth $Screen.Width -ScreenHeight $Screen.Height `
+    -ScreenLeft $Screen.Left -ScreenTop $Screen.Top
+
+Write-Host "=== layout ===" -ForegroundColor Cyan
+Write-Host ("  screen       {0}x{1} at +{2}+{3} (working area)" -f $Screen.Width, $Screen.Height, $Screen.Left, $Screen.Top)
+Write-Host ("  cameras      {0} -> {1} column(s) x {2} row(s)" -f $Streams.Count, $Layout.Columns, $Layout.Rows)
+Write-Host ("  pane         {0}x{1}, gutter {2} px between rows only" -f $Layout.PaneWidth, $Layout.PaneHeight, $Layout.GutterPx)
+Write-Host ("  grid         {0} px tall, rows at y {1}" -f $Layout.GridHeight, `
+    ((0..($Layout.Rows - 1) | ForEach-Object { $Screen.Top + ($_ * ($Layout.PaneHeight + $Layout.GutterPx)) }) -join ', '))
+if ($Layout.StripEnabled) {
+    Write-Host ("  health strip {0}x{1} at +{2}+{3} (mode {4})" -f `
+        $Layout.StripWidth, $Layout.StripHeight, $Layout.StripLeft, $Layout.StripTop, $Layout.Mode) -ForegroundColor Green
+}
+else {
+    Write-Host '  health strip off - full-height panes, no health window' -ForegroundColor Yellow
+}
+if ($Layout.Note) { Write-Host ("  note         {0}" -f $Layout.Note) -ForegroundColor Yellow }
+Write-Host ""
+
 if ($PrintUrls) {
     Write-Host "-PrintUrls: nothing launched." -ForegroundColor Yellow
     exit
 }
+
+# Health strip window
+# -------------------
+# The strip is its own Windows Terminal window, not a pane of the grid, so the
+# camera geometry can never be affected by it.
+#
+# Windows Terminal's --size is in CHARACTER CELLS, not pixels, so it cannot be
+# asked for an exact pixel height. The window is placed with --pos, given a
+# rough cell size so it does not flash up over the grid, and then sized
+# exactly with SetWindowPos.
+
+$script:CamWinLoaded = $false
+
+function Import-CamWindowApi {
+    <#
+        The few user32/dwmapi calls needed to place one window by pixel.
+
+        FindByTitle enumerates top-level windows rather than reading
+        Process.MainWindowTitle, because Windows Terminal serves several
+        windows from ONE process: MainWindowHandle is then whichever window
+        Windows enumerates first, not the one whose title matched, and killing
+        the process would take every terminal window on the desktop with it.
+    #>
+
+    if ($script:CamWinLoaded) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class CamWin
+{
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr p);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr h);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    public static IntPtr[] FindByTitle(string title)
+    {
+        List<IntPtr> found = new List<IntPtr>();
+        EnumWindows(delegate(IntPtr h, IntPtr p) {
+            if (!IsWindowVisible(h)) { return true; }
+            int len = GetWindowTextLength(h);
+            if (len == 0) { return true; }
+            StringBuilder sb = new StringBuilder(len + 2);
+            GetWindowText(h, sb, sb.Capacity);
+            if (string.Equals(sb.ToString(), title, StringComparison.Ordinal)) { found.Add(h); }
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
+}
+'@
+    $script:CamWinLoaded = $true
+}
+
+
+function Get-CamWindowFrame {
+    <#
+        A window's rect and its VISIBLE frame.
+
+        They are not the same: a resizable window's rect includes an invisible
+        DWM resize border, measured at 7 px on each side and the bottom here,
+        so sizing the window rect to the strip would leave a visible gap along
+        the bottom of the screen. DWMWA_EXTENDED_FRAME_BOUNDS is 9.
+    #>
+    param([Parameter(Mandatory = $true)][IntPtr]$Hwnd)
+
+    $windowRect = New-Object CamWin+RECT
+    [void][CamWin]::GetWindowRect($Hwnd, [ref]$windowRect)
+    $frameRect = New-Object CamWin+RECT
+    $hr = [CamWin]::DwmGetWindowAttribute($Hwnd, 9, [ref]$frameRect,
+        [System.Runtime.InteropServices.Marshal]::SizeOf($frameRect))
+    if ($hr -ne 0) { $frameRect = $windowRect }
+
+    return [pscustomobject]@{
+        Window = $windowRect
+        Frame  = $frameRect
+        Left   = $frameRect.Left
+        Top    = $frameRect.Top
+        Width  = ($frameRect.Right - $frameRect.Left)
+        Height = ($frameRect.Bottom - $frameRect.Top)
+    }
+}
+
+
+function Set-CamWindowFrame {
+    <#
+        Moves a window so its VISIBLE frame lands on the given pixel rect.
+
+        Iterates on the measured error rather than assuming a border width, so
+        a different theme, DPI or Windows version corrects itself.
+
+        The window rect is clamped to the right edge of the screen. Measured:
+        Windows Terminal mis-sizes itself when the window rect runs past that
+        edge - a request for 1934x303 at x=-7 came back as 1936x563. The width
+        is what gets clamped, not the position, so no text is pushed off the
+        left edge of the screen.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][IntPtr]$Hwnd,
+        [Parameter(Mandatory = $true)][int]$X,
+        [Parameter(Mandatory = $true)][int]$Y,
+        [Parameter(Mandatory = $true)][int]$Width,
+        [Parameter(Mandatory = $true)][int]$Height,
+        [Parameter(Mandatory = $true)][int]$ScreenRight
+    )
+
+    # SWP_NOACTIVATE 0x0010 | SWP_SHOWWINDOW 0x0040. SWP_NOZORDER is left out
+    # and hwndInsertAfter is HWND_TOP, so the strip comes up above the grid's
+    # own terminal window without taking focus.
+    $flags = 0x0050
+    $measured = $null
+
+    for ($pass = 1; $pass -le 3; $pass++) {
+        $current = Get-CamWindowFrame -Hwnd $Hwnd
+        $insetLeft = $current.Frame.Left - $current.Window.Left
+        $insetTop = $current.Frame.Top - $current.Window.Top
+        $insetRight = $current.Window.Right - $current.Frame.Right
+        $insetBottom = $current.Window.Bottom - $current.Frame.Bottom
+
+        $windowX = $X - $insetLeft
+        $windowY = $Y - $insetTop
+        $windowWidth = $Width + $insetLeft + $insetRight
+        $windowHeight = $Height + $insetTop + $insetBottom
+        if (($windowX + $windowWidth) -gt $ScreenRight) { $windowWidth = $ScreenRight - $windowX }
+
+        [void][CamWin]::SetWindowPos($Hwnd, [IntPtr]::Zero, $windowX, $windowY, $windowWidth, $windowHeight, $flags)
+        Start-Sleep -Milliseconds 500
+
+        $measured = Get-CamWindowFrame -Hwnd $Hwnd
+        if ($measured.Left -eq $X -and $measured.Top -eq $Y -and
+            $measured.Width -eq $Width -and $measured.Height -eq $Height) { break }
+    }
+
+    return $measured
+}
+
+
+function Stop-CamHealthWindow {
+    <#
+        Closes any existing strip window, so relaunching the dashboard replaces
+        it instead of leaving two.
+
+        WM_CLOSE to that one window. Never Stop-Process: one Windows Terminal
+        process can own several windows, including the Operator's own.
+    #>
+    Import-CamWindowApi
+
+    $existing = @([CamWin]::FindByTitle('cam.health'))
+    if ($existing.Count -eq 0) { return 0 }
+
+    foreach ($hwnd in $existing) { [void][CamWin]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Milliseconds 400
+        if (@([CamWin]::FindByTitle('cam.health')).Count -eq 0) { break }
+    }
+    return $existing.Count
+}
+
+
+function Start-CamHealthWindow {
+    <#
+        Launches cam.health.ps1 into its own named Windows Terminal window and
+        sizes that window to the reserved strip.
+
+        The renderer is given no -Rows or -Width: it reads its real row and
+        column count from the console it ends up in, which is the only way to
+        know them once the window has been sized in pixels.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Layout,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$ScriptDir,
+        [Parameter(Mandatory = $true)][int]$ScreenRight
+    )
+
+    $healthPath = Join-Path -Path $ScriptDir -ChildPath 'cam.health.ps1'
+    if (-not (Test-Path -LiteralPath $healthPath)) {
+        Write-Host ("no health strip: {0} is missing" -f $healthPath) -ForegroundColor Yellow
+        return
+    }
+
+    Import-CamWindowApi
+    $closed = Stop-CamHealthWindow
+    if ($closed -gt 0) { Write-Host ("closed {0} earlier health window(s)" -f $closed) -ForegroundColor Yellow }
+
+    # The title is set here as well as inside cam.health.ps1, so the window can
+    # still be found and placed if the renderer fails on startup.
+    $template = @'
+$Host.UI.RawUI.WindowTitle = 'cam.health'
+& '__HEALTH__'
+'@
+    $script = $template.Replace('__HEALTH__', $healthPath.Replace("'", "''"))
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
+
+    # Cells, not pixels - a launch hint only. The exact size comes from
+    # SetWindowPos below.
+    $hintColumns = [int][math]::Max(40, [math]::Floor($Layout.StripWidth / [double]$Config.HealthCellWidthPx))
+    $hintRows = [int][math]::Max(4, [math]::Floor($Layout.StripHeight / [double]$Config.HealthCellHeightPx))
+
+    & wt.exe -w cctv-health --pos ("{0},{1}" -f $Layout.StripLeft, $Layout.StripTop) `
+        --size ("{0},{1}" -f $hintColumns, $hintRows) `
+        powershell.exe -NoExit -EncodedCommand $encoded
+
+    $hwnd = [IntPtr]::Zero
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 400
+        $found = @([CamWin]::FindByTitle('cam.health'))
+        if ($found.Count -ge 1) { $hwnd = $found[0]; break }
+    }
+    if ($hwnd -eq [IntPtr]::Zero) {
+        Write-Host 'the health window did not appear within 16 s, so it was not placed' -ForegroundColor Yellow
+        return
+    }
+
+    $measured = Set-CamWindowFrame -Hwnd $hwnd -X $Layout.StripLeft -Y $Layout.StripTop `
+        -Width $Layout.StripWidth -Height $Layout.StripHeight -ScreenRight $ScreenRight
+
+    $wanted = ("{0}x{1} at +{2}+{3}" -f $Layout.StripWidth, $Layout.StripHeight, $Layout.StripLeft, $Layout.StripTop)
+    $got = ("{0}x{1} at +{2}+{3}" -f $measured.Width, $measured.Height, $measured.Left, $measured.Top)
+    if ($wanted -eq $got) {
+        Write-Host ("health strip placed at {0}" -f $got) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("health strip wanted {0}, measured {1}" -f $wanted, $got) -ForegroundColor Yellow
+    }
+}
+
 
 # 2. Define the exact text overlay & flags
 $OverlayOpts = "--osd-level=1 --osd-msg1='Traffic: `${video-bitrate}'"
@@ -102,31 +384,26 @@ $OverlayOpts = "--osd-level=1 --osd-msg1='Traffic: `${video-bitrate}'"
 # Added stimeout=10000000 (10 seconds) to force MPV to exit if the stream freezes/drops
 $Flags = "--no-border --no-audio --profile=low-latency --rtsp-transport=tcp --correct-pts=no --display-fps-override=1 --network-timeout=3 --demuxer-lavf-o=timeout=5000000,stimeout=6000000 --force-window=immediate"
 
-# 3. Dynamically Calculate Screen Real Estate
-Add-Type -AssemblyName System.Windows.Forms
-$Screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-
-# Determine optimal grid size based on the number of active streams
+# The grid shape and pane size, from the camera count alone.
 $TotalStreams = $Streams.Count
-$Columns = [math]::Ceiling([math]::Sqrt($TotalStreams))
-$Rows = [math]::Ceiling($TotalStreams / $Columns)
-
-# Calculate exact pixel dimensions for each window to tile perfectly
-$WindowWidth = [math]::Floor($Screen.Width / $Columns)
-$WindowHeight = [math]::Floor($Screen.Height / $Rows)
+$Columns = $Layout.Columns
+$Rows = $Layout.Rows
+$WindowWidth = $Layout.PaneWidth
+$WindowHeight = $Layout.PaneHeight
 
 # 4. Build MPV commands and encode them for absolute safety
 $EncodedCommands = @()
 $i = 0
 
 foreach ($Stream in $Streams.GetEnumerator()) {
-    # Calculate grid position dynamically
-    $Col = $i % $Columns
-    $Row = [math]::Floor($i / $Columns)
-
-    # Calculate exact screen coordinates
-    $X = $Screen.Left + ($Col * $WindowWidth)
-    $Y = $Screen.Top + ($Row * $WindowHeight)
+    # Grid position and exact screen coordinates. The row pitch is the pane
+    # height plus the gutter, so the gutter falls BETWEEN the rows and never
+    # at the top or bottom edge of the grid.
+    $Position = Get-CamPanePosition -Layout $Layout -Index $i -ScreenLeft $Screen.Left -ScreenTop $Screen.Top
+    $Col = $Position.Column
+    $Row = $Position.Row
+    $X = $Position.X
+    $Y = $Position.Y
 
     $Geometry = "--geometry=${WindowWidth}x${WindowHeight}+$X+$Y"
 
@@ -211,3 +488,13 @@ for ($j = 1; $j -lt $EncodedCommands.Count; $j++) {
 
 # 6. Execute Windows Terminal directly
 & wt.exe $WtArgs
+
+# 7. The health strip, into its own window, after the grid so it comes up on
+#    top of the grid's terminal window rather than under it.
+if ($Layout.StripEnabled -and -not $NoHealthStrip) {
+    Start-CamHealthWindow -Layout $Layout -Config $Config -ScriptDir $ScriptDir `
+        -ScreenRight ($Screen.Left + $Screen.Width)
+}
+elseif ($NoHealthStrip) {
+    Write-Host '-NoHealthStrip: the strip is reserved but empty.' -ForegroundColor Yellow
+}
