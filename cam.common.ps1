@@ -143,6 +143,11 @@ function Get-CamConfigDefault {
         # Budget for one control-API probe. Spent once per recorder child
         # start and once per mpv pane attempt, both on loopback.
         RelayProbeTimeoutMs  = 1500
+        # How long the supervisor waits for the restreamer's paths to come up
+        # before it starts the recorders. Without the wait the recorders take a
+        # direct slot each at a cold start, and a camera already serving the
+        # dashboard would then have no slot left for the restreamer to pull.
+        RelayStartupWaitSeconds = 20
         Container            = 'mkv'
         ContainerProfiles    = @{
             mkv  = [pscustomobject]@{
@@ -602,6 +607,32 @@ function Test-CamRelayPathReady {
     $property = $info.PSObject.Properties['ready']
     if (-not $property) { return $false }
     return ([bool]$property.Value -eq $true)
+}
+
+
+function Get-CamRelayReadyPaths {
+    <#
+        The names of every path the relay is currently serving, in one call, or
+        an empty array when the relay is down.
+
+        One list query rather than a probe per camera: the supervisor asks this
+        on every status tick to see whether a camera still on its direct input
+        can move onto the relay, and six separate probes a tick would be
+        needless chatter.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $list = Get-CamRelayApiJson -Config $Config -Route 'v3/paths/list'
+    if (-not $list) { return @() }
+
+    $names = New-Object System.Collections.ArrayList
+    foreach ($item in @($list.items)) {
+        if (-not $item) { continue }
+        $property = $item.PSObject.Properties['ready']
+        if (-not $property) { continue }
+        if ([bool]$property.Value -eq $true) { [void]$names.Add([string]$item.name) }
+    }
+    return $names.ToArray()
 }
 
 

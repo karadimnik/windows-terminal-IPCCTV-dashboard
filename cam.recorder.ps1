@@ -12,6 +12,13 @@
     -List      Every camera with its Record state and stream quality.
     -Status    Renders status.json, saying so when it is stale.
     -Stop      Asks a running supervisor to shut down and waits for it.
+    -InstallRestreamer
+               Generates the MediaMTX config from cameras.json, one path per
+               camera, and checks the binary is in place. The supervisor then
+               owns the process. No credential is written to disk.
+    -RemoveRestreamer
+               Deletes that generated config. Recording and viewing continue on
+               the direct camera inputs.
     -SelfTest  Pre-flight report: tool check, per-camera RTSP probe, measured
                concurrent-connection limit, crash-safety proof, disk projection.
                Add -Offline to skip every check that touches a camera.
@@ -46,6 +53,12 @@ param(
 
     [Parameter(ParameterSetName = 'Stop')]
     [switch]$Stop,
+
+    [Parameter(ParameterSetName = 'InstallRestreamer')]
+    [switch]$InstallRestreamer,
+
+    [Parameter(ParameterSetName = 'RemoveRestreamer')]
+    [switch]$RemoveRestreamer,
 
     [Parameter(ParameterSetName = 'SelfTest')]
     [switch]$SelfTest,
@@ -413,6 +426,127 @@ function Set-CamRecordState {
     else {
         Write-CamHost -Message 'cameras.json updated. No supervisor is running, so start one with -Run.' -Colour 'Cyan'
     }
+}
+
+
+function Show-CamRestreamerPlan {
+    <# One line per camera: path name, the variable its URL arrives in, the URL consumers use. #>
+    param([Parameter(Mandatory = $true)]$Config, [Parameter(Mandatory = $true)]$PathMap)
+
+    foreach ($pathName in $PathMap.Keys) {
+        $camera = $PathMap[$pathName]
+        Write-CamHost -Message ("  {0,-20} {1,-18} {2,-40} {3}" -f `
+            $pathName, [string]$camera.IP, (Get-CamRelayUrl -Config $Config -PathName $pathName), (Get-CamRelaySourceEnvName -PathName $pathName))
+    }
+}
+
+
+function Invoke-CamInstallRestreamer {
+    <#
+        Generates the live MediaMTX config from cameras.json: one path per
+        camera, named by its safe name, addresses taken from recorder.config.json.
+
+        No credential is written. Every path keeps source: publisher in the file
+        and the supervisor supplies the real URL on the child's environment
+        block at launch, which is the only reason the camera password stays off
+        the disk.
+
+        The binary itself is not installed here. It is a 55 MB download that
+        must not live in the repository, so this command verifies it is in place
+        and says exactly what to do when it is not.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $exePath = [string]$Config.RestreamerExePath
+    $configPath = [string]$Config.RestreamerConfigPath
+
+    Write-CamHost -Message ''
+    Write-CamHost -Message '=== install the restreamer ===' -Colour 'Cyan'
+
+    if ($configPath -match '^\\\\wsl') {
+        throw "RestreamerConfigPath '$configPath' is on the WSL share. MediaMTX watches its config with ReadDirectoryChanges, which that share does not implement, and exits immediately with 'ReadDirectoryChanges: Incorrect function.' Use a local NTFS path such as C:\mediamtx\mediamtx.yml."
+    }
+
+    $rtspHost = Get-CamRelayHostPort -Url ([string]$Config.RelayBase)
+    if ($rtspHost -notmatch '^(127\.0\.0\.1|localhost|\[::1\])(:|$)') {
+        Write-CamHost -Message ("WARNING: RelayBase binds MediaMTX to {0}, not loopback. The generated config allows anonymous access, which is only acceptable because nothing off this machine can reach 127.0.0.1. Configure MediaMTX authentication before binding it to a LAN address." -f $rtspHost) -Colour 'Red'
+    }
+
+    $pathMap = Get-CamRelayPathMap -Cameras (Get-CamList)
+    $text = Get-CamRelayConfigText -Config $Config -PathMap $pathMap
+
+    $dir = Split-Path -Path $configPath -Parent
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+
+    # Temp-then-rename: MediaMTX watches this file and reloads on change, so it
+    # must never read a half-written one.
+    $temp = "$configPath.tmp"
+    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+    [System.IO.File]::WriteAllText($temp, $text, (New-Object System.Text.UTF8Encoding($false)))
+    Move-CamFileAtomic -TempPath $temp -Path $configPath
+
+    Write-CamHost -Message ("wrote {0} ({1} path(s), no credentials)" -f $configPath, $pathMap.Count) -Colour 'Green'
+    Write-CamHost -Message ''
+    Write-CamHost -Message ("  {0,-20} {1,-18} {2,-40} {3}" -f 'path', 'camera', 'consumers use', 'source arrives in')
+    Show-CamRestreamerPlan -Config $Config -PathMap $pathMap
+    Write-CamHost -Message ''
+
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        Write-CamHost -Message ("MediaMTX IS NOT INSTALLED at {0}." -f $exePath) -Colour 'Red'
+        Write-CamHost -Message '  Download mediamtx_<version>_windows_amd64.zip from'
+        Write-CamHost -Message '  https://github.com/bluenviron/mediamtx/releases and extract mediamtx.exe to that path.'
+        Write-CamHost -Message '  Verified on v1.21.2. Do not put it in Program Files: that needs administrator rights.'
+        Write-CamHost -Message '  The recorder and the dashboard keep working on their direct camera inputs until it is there.' -Colour 'Yellow'
+        return
+    }
+
+    $version = '(not reported)'
+    $probe = Invoke-CamNative -FilePath $exePath -Arguments @('--version')
+    if (-not [string]::IsNullOrWhiteSpace($probe)) {
+        $version = (($probe -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 1).Trim()
+    }
+    Write-CamHost -Message ("MediaMTX present: {0} {1}" -f $exePath, $version) -Colour 'Green'
+
+    if (-not (Get-CamRelayEnabled -Config $Config)) {
+        Write-CamHost -Message 'RestreamerEnabled is false in recorder.config.json, so nothing will start or use it. Set it to true.' -Colour 'Yellow'
+        return
+    }
+
+    Write-CamHost -Message 'The supervisor owns the process: cam.recorder.ps1 -Run starts it, -Stop stops it.' -Colour 'Cyan'
+}
+
+
+function Invoke-CamRemoveRestreamer {
+    <#
+        Deletes the generated config. The binary is deliberately left alone - it
+        is a download, not something this script put there - and so is
+        RestreamerEnabled in recorder.config.json, because silently rewriting a
+        file the Operator maintains is worse than printing the one line to
+        change.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $configPath = [string]$Config.RestreamerConfigPath
+
+    Write-CamHost -Message ''
+    Write-CamHost -Message '=== remove the restreamer ===' -Colour 'Cyan'
+
+    $state = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
+    if ($state.Running) {
+        Write-CamHost -Message ("A supervisor is running ({0}) and owns the MediaMTX process. Run -Stop first, or it will keep running until the supervisor shuts down." -f $state.Reason) -Colour 'Yellow'
+    }
+
+    if (Test-Path -LiteralPath $configPath) {
+        Remove-Item -LiteralPath $configPath -Force
+        Write-CamHost -Message ("removed {0}" -f $configPath) -Colour 'Green'
+    }
+    else {
+        Write-CamHost -Message ("nothing to remove: {0} does not exist" -f $configPath) -Colour 'Yellow'
+    }
+
+    Write-CamHost -Message ("the binary at {0} is left in place" -f [string]$Config.RestreamerExePath)
+    Write-CamHost -Message 'Set RestreamerEnabled to false in recorder.config.json to stop the supervisor trying to start it.'
+    Write-CamHost -Message 'Recording and viewing continue on the direct camera inputs.' -Colour 'Cyan'
 }
 
 
@@ -1093,6 +1227,64 @@ function Show-CamArchiveProjection {
 }
 
 
+function Test-CamRestreamer {
+    <#
+        Whether the relay is installed, current and serving. Touches no camera -
+        the only network call is to the loopback control API - so it runs in
+        -Offline mode too.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    if (-not (Get-CamRelayEnabled -Config $Config)) {
+        Add-CamTestResult -Check 'restreamer' -Status 'INFO' -Detail 'RestreamerEnabled is false: the recorder and the dashboard use the direct camera inputs'
+        return $false
+    }
+
+    $exePath = [string]$Config.RestreamerExePath
+    $configPath = [string]$Config.RestreamerConfigPath
+
+    $exeOk = Test-Path -LiteralPath $exePath
+    Add-CamTestResult -Check 'restreamer binary' -Status $(if ($exeOk) { 'PASS' } else { 'FAIL' }) `
+        -Detail $(if ($exeOk) { $exePath } else { "missing at $exePath - download it or set RestreamerEnabled to false" })
+
+    $pathMap = $null
+    try { $pathMap = Get-CamRelayPathMap -Cameras (Get-CamList) }
+    catch {
+        Add-CamTestResult -Check 'restreamer paths' -Status 'FAIL' -Detail $_.Exception.Message
+        return $false
+    }
+    Add-CamTestResult -Check 'restreamer paths' -Status 'PASS' -Detail (($pathMap.Keys | Sort-Object) -join ', ')
+
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        Add-CamTestResult -Check 'restreamer config' -Status 'FAIL' -Detail "missing at $configPath - run -InstallRestreamer"
+    }
+    else {
+        $expected = Get-CamRelayConfigText -Config $Config -PathMap $pathMap
+        $actual = ''
+        try { $actual = [System.IO.File]::ReadAllText($configPath) } catch { }
+        $current = ($actual -eq $expected)
+        Add-CamTestResult -Check 'restreamer config' -Status $(if ($current) { 'PASS' } else { 'FAIL' }) `
+            -Detail $(if ($current) { "$configPath matches cameras.json" } else { "$configPath is out of date with cameras.json - run -InstallRestreamer" })
+
+        # Only the password could leak here, and it is never written, so this
+        # asserts the shape the generated file must always have.
+        $hasUserinfo = [regex]::IsMatch($actual, '(?i)rtsp://[^/\s@]+@')
+        Add-CamTestResult -Check 'restreamer config has no credential' -Status $(if ($hasUserinfo) { 'FAIL' } else { 'PASS' }) `
+            -Detail $(if ($hasUserinfo) { 'a URL with userinfo is in the generated config' } else { 'no rtsp:// userinfo in the generated config' })
+    }
+
+    $ready = @(Get-CamRelayReadyPaths -Config $Config)
+    if ($ready.Count -eq 0) {
+        Add-CamTestResult -Check 'restreamer serving' -Status 'INFO' -Detail ("not reachable at {0}: consumers will use the direct camera inputs" -f [string]$Config.RelayApiBase)
+    }
+    else {
+        Add-CamTestResult -Check 'restreamer serving' -Status 'INFO' -Detail ("{0} of {1} path(s) ready: {2}" -f $ready.Count, $pathMap.Count, (($ready | Sort-Object) -join ', '))
+    }
+
+    return $true
+}
+
+
 function Invoke-CamSelfTest {
     param(
         [Parameter(Mandatory = $true)]$Config,
@@ -1147,22 +1339,25 @@ function Invoke-CamSelfTest {
             Show-CamArchiveProjection -Config $Config
         }
 
-        Write-CamHost -Message '(f) camera list' -Colour 'Cyan'
+        Write-CamHost -Message '(f) restreamer' -Colour 'Cyan'
+        [void](Test-CamRestreamer -Config $Config)
+
+        Write-CamHost -Message '(g) camera list' -Colour 'Cyan'
         [void](Test-CamListIntegrity -Config $Config)
 
-        Write-CamHost -Message '(g) Record flag round trip (on a copy)' -Colour 'Cyan'
+        Write-CamHost -Message '(h) Record flag round trip (on a copy)' -Colour 'Cyan'
         [void](Test-CamRecordRoundTrip -Config $Config -WorkDir $workDir)
 
-        Write-CamHost -Message '(h) atomic camera-list write' -Colour 'Cyan'
+        Write-CamHost -Message '(i) atomic camera-list write' -Colour 'Cyan'
         [void](Test-CamAtomicWrite -WorkDir $workDir)
 
-        Write-CamHost -Message '(i) pruner path guards' -Colour 'Cyan'
+        Write-CamHost -Message '(j) pruner path guards' -Colour 'Cyan'
         [void](Test-CamPruneGuards -Config $Config)
 
-        Write-CamHost -Message '(j) pruner dry run' -Colour 'Cyan'
+        Write-CamHost -Message '(k) pruner dry run' -Colour 'Cyan'
         [void](Show-CamPruneDryRun -Config $Config -WorkDir $workDir)
 
-        Write-CamHost -Message '(k) status file' -Colour 'Cyan'
+        Write-CamHost -Message '(l) status file' -Colour 'Cyan'
         [void](Test-CamStatusSurface -Config $Config)
     }
     finally {
@@ -1192,26 +1387,23 @@ function Invoke-CamSelfTest {
 # Supervisor
 # ===========================================================================
 
-function New-CamChildEntry {
+function New-CamProcessEntry {
+    <#
+        The fields the supervisor's start, read, backoff and stop machinery
+        touches, shared by the ffmpeg children and the restreamer child so both
+        are driven by exactly the same discipline.
+    #>
     param(
-        [Parameter(Mandatory = $true)]$Camera,
-        [Parameter(Mandatory = $true)][string]$CameraDir,
-        [Parameter(Mandatory = $true)][string]$LogPath,
-        [Parameter(Mandatory = $true)][string]$Pattern
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$LogPath
     )
 
     return @{
-        Name         = $Camera.Name
-        SafeName     = $Camera.SafeName
-        # Kept so a reconcile can tell a changed stream from an unchanged one
-        # without comparing URLs, which carry the password.
-        IP           = $Camera.IP
-        Quality      = $Camera.Quality
-        Url          = $Camera.Url
-        Dir          = $CameraDir
+        Name         = $Name
         LogPath      = $LogPath
-        Pattern      = $Pattern
         Process      = $null
+        # The pipe Read-CamChildOutput drains: ffmpeg's stderr, MediaMTX's stdout.
+        ReadStream   = $null
         ReadBuffer   = $null
         ReadTask     = $null
         Decoder      = $null
@@ -1222,15 +1414,45 @@ function New-CamChildEntry {
         NextStartAt  = [DateTime]::Now
         RestartCount = 0
         # The pid of the most recent child, kept after it exits so -Stop can
-        # tell an orphaned ffmpeg from a child that shut down with its parent.
+        # tell an orphan from a child that shut down with its parent.
         LastPid      = $null
         # Restart timestamps, so status.json can report restarts in the last hour
         # rather than only a total that never decays.
         Restarts     = New-Object System.Collections.ArrayList
         LastError    = ''
         LastErrorAt  = [DateTime]::MinValue
-        Scan         = $null
     }
+}
+
+
+function New-CamChildEntry {
+    param(
+        [Parameter(Mandatory = $true)]$Camera,
+        [Parameter(Mandatory = $true)][string]$CameraDir,
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [Parameter(Mandatory = $true)][string]$Pattern,
+        [AllowEmptyString()][string]$RelayPathName = ''
+    )
+
+    $entry = New-CamProcessEntry -Name $Camera.Name -LogPath $LogPath
+
+    $entry.SafeName = $Camera.SafeName
+    # Kept so a reconcile can tell a changed stream from an unchanged one
+    # without comparing URLs, which carry the password.
+    $entry.IP = $Camera.IP
+    $entry.Quality = $Camera.Quality
+    # The direct camera URL, with credentials. The relay URL has none and is
+    # rebuilt from RelayPath at every start.
+    $entry.Url = $Camera.Url
+    $entry.RelayPath = $RelayPathName
+    # Which input the most recent start actually used, for the log and for
+    # status.json. Empty until the child has been started once.
+    $entry.InputMode = ''
+    $entry.Dir = $CameraDir
+    $entry.Pattern = $Pattern
+    $entry.Scan = $null
+
+    return $entry
 }
 
 
@@ -1250,7 +1472,13 @@ function Start-CamChild {
         [Parameter(Mandatory = $true)][string]$SupervisorLog
     )
 
-    $arguments = Get-CamFfmpegArgs -Url $Entry.Url -OutputPattern $Entry.Pattern -Config $Config -ContainerProfile $ContainerProfile
+    # Chosen here rather than at reconcile time, so every restart re-decides:
+    # a child started while the restreamer was down moves onto the relay at its
+    # next restart, and one started on the relay goes direct if it has gone.
+    $choice = Get-CamInputUrl -Config $Config -RelayPathName $Entry.RelayPath -DirectUrl $Entry.Url
+    $Entry.InputMode = $choice.Mode
+
+    $arguments = Get-CamFfmpegArgs -Url $choice.Url -OutputPattern $Entry.Pattern -Config $Config -ContainerProfile $ContainerProfile
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $Config.FfmpegPath
@@ -1270,10 +1498,11 @@ function Start-CamChild {
     $Entry.TextBuffer = ''
     $Entry.Decoder = [System.Text.Encoding]::UTF8.GetDecoder()
     $Entry.ReadBuffer = New-Object byte[] 8192
-    $Entry.ReadTask = $process.StandardError.BaseStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
+    $Entry.ReadStream = $process.StandardError.BaseStream
+    $Entry.ReadTask = $Entry.ReadStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
 
-    Write-CamLog -Path $SupervisorLog -Message ("start {0} pid {1}: ffmpeg {2}" -f $Entry.Name, $process.Id, $startInfo.Arguments) -MaxBytes $Config.LogMaxBytes
-    Write-CamHost -Message ("start {0} pid {1}" -f $Entry.Name, $process.Id) -Colour 'Green'
+    Write-CamLog -Path $SupervisorLog -Message ("start {0} pid {1} on the {2} input: ffmpeg {3}" -f $Entry.Name, $process.Id, $choice.Mode, $startInfo.Arguments) -MaxBytes $Config.LogMaxBytes
+    Write-CamHost -Message ("start {0} pid {1} on the {2} input" -f $Entry.Name, $process.Id, $choice.Mode) -Colour 'Green'
 }
 
 
@@ -1328,12 +1557,15 @@ function Write-CamChildLine {
 }
 
 
-function Read-CamChildStderr {
+function Read-CamChildOutput {
     <#
-        Drains whatever stderr has produced since the last tick, without
-        blocking, and writes every complete line to the camera's own log through
+        Drains whatever the child has written since the last tick, without
+        blocking, and writes every complete line to that child's own log through
         the redaction helper. ffmpeg prints the full RTSP URL - password included
         - on a connection error, so redaction here is not optional.
+
+        The stream is whichever one the starter put on the entry: ffmpeg logs to
+        stderr, MediaMTX to stdout.
     #>
     param(
         [Parameter(Mandatory = $true)]$Entry,
@@ -1346,6 +1578,8 @@ function Read-CamChildStderr {
     $now = [DateTime]::Now
 
     while ($Entry.ReadTask) {
+        if (-not $Entry.ReadStream) { $Entry.ReadTask = $null; break }
+
         if (-not $Entry.ReadTask.IsCompleted) {
             if (-not $Final) { break }
             try { if (-not $Entry.ReadTask.Wait(2000)) { break } } catch { $Entry.ReadTask = $null; break }
@@ -1372,7 +1606,7 @@ function Read-CamChildStderr {
             }
         }
 
-        $Entry.ReadTask = $Entry.Process.StandardError.BaseStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
+        $Entry.ReadTask = $Entry.ReadStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
     }
 }
 
@@ -1482,11 +1716,12 @@ function Stop-CamChild {
         [void]$process.WaitForExit(10000)
     }
 
-    Read-CamChildStderr -Entry $Entry -Config $Config -Final
+    Read-CamChildOutput -Entry $Entry -Config $Config -Final
     try { $process.Dispose() } catch { }
 
     $Entry.Process = $null
     $Entry.ReadTask = $null
+    $Entry.ReadStream = $null
 
     Remove-CamEmptySegment -Entry $Entry -Config $Config -SupervisorLog $SupervisorLog
 }
@@ -1519,6 +1754,258 @@ function Set-CamChildBackoff {
     $Entry.Backoff = $next
     $Entry.NextStartAt = [DateTime]::Now.AddSeconds($next)
     return $next
+}
+
+
+# ===========================================================================
+# Restreamer child: MediaMTX as a transport fan-out
+# ===========================================================================
+# Owned by the supervisor as a child rather than by a Scheduled Task of its
+# own, so there is one thing to autostart and one place that logs. Every
+# consumer falls back to a direct camera connection while it is down, so its
+# downtime is degraded-but-working rather than an outage.
+
+function New-CamRelayEntry {
+    <# The restreamer's supervisor entry. One per supervisor, not per camera. #>
+    param([Parameter(Mandatory = $true)]$Paths)
+
+    $entry = New-CamProcessEntry -Name 'restreamer' -LogPath (Join-Path -Path $Paths.LogDir -ChildPath 'restreamer.log')
+    # Path name -> camera, read from cameras.json at every start so an
+    # -Enable or an IP change is picked up by the next restart.
+    $entry.PathMap = $null
+    return $entry
+}
+
+
+function Start-CamRelayChild {
+    <#
+        Launches MediaMTX with one path per camera in cameras.json - every
+        camera, not only the recorded ones, because the dashboard shares the
+        same relay.
+
+        Each camera URL is handed over in the child's environment block
+        (MTX_PATHS_<PATHNAME>_SOURCE), never in the config file and never on the
+        command line. That is the whole credential win: one readable copy in one
+        process's environment instead of one per consumer command line.
+
+        stdout is the log, piped line by line through the redactor, because
+        MediaMTX prints the source URL on a connection error. stderr is left
+        redirected but unread until exit: MediaMTX logs nothing there, and the
+        only thing that would arrive is a Go panic, which is read in
+        Write-CamRelayStderr once the process is gone and ReadToEnd cannot
+        block.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential,
+        [Parameter(Mandatory = $true)][string]$SupervisorLog
+    )
+
+    $exePath = [string]$Config.RestreamerExePath
+    $configPath = [string]$Config.RestreamerConfigPath
+
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        throw "MediaMTX is not installed at '$exePath'. Install the binary there, or set RestreamerEnabled to false in recorder.config.json to record and view directly."
+    }
+    if (-not (Test-Path -LiteralPath $configPath)) {
+        throw "MediaMTX config '$configPath' is missing. Run cam.recorder.ps1 -InstallRestreamer to generate it from cameras.json."
+    }
+
+    $pathMap = Get-CamRelayPathMap -Cameras (Get-CamList)
+    $Entry.PathMap = $pathMap
+
+    # The generated config is rendered from cameras.json, so re-rendering it is
+    # the whole staleness test - no YAML parsing, and one source of truth. A
+    # camera missing from the file would come up with no path at all and would
+    # quietly stay on the direct input, so this is said loudly and started
+    # anyway: a stale relay still serves the cameras it does know.
+    $expected = Get-CamRelayConfigText -Config $Config -PathMap $pathMap
+    $actual = ''
+    try { $actual = [System.IO.File]::ReadAllText($configPath) } catch { }
+    if ($actual -ne $expected) {
+        $message = "WARNING: '$configPath' no longer matches cameras.json. Run cam.recorder.ps1 -InstallRestreamer. Starting the restreamer with the file as it is."
+        Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
+        Write-CamHost -Message $message -Colour 'Yellow'
+    }
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $exePath
+    $startInfo.Arguments = Get-CamCommandLine -Arguments @($configPath)
+    $startInfo.WorkingDirectory = (Split-Path -Path $exePath -Parent)
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    foreach ($pathName in $pathMap.Keys) {
+        $url = Get-CamRtspUrl -Camera $pathMap[$pathName] -Credential $Credential
+        $startInfo.EnvironmentVariables[(Get-CamRelaySourceEnvName -PathName $pathName)] = $url
+    }
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    [void]$process.Handle
+
+    $Entry.Process = $process
+    $Entry.LastPid = $process.Id
+    $Entry.StartedAt = [DateTime]::Now
+    $Entry.TextBuffer = ''
+    $Entry.Decoder = [System.Text.Encoding]::UTF8.GetDecoder()
+    $Entry.ReadBuffer = New-Object byte[] 8192
+    $Entry.ReadStream = $process.StandardOutput.BaseStream
+    $Entry.ReadTask = $Entry.ReadStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
+
+    $message = "start restreamer pid {0}: {1} serving {2} path(s): {3}" -f `
+        $process.Id, $exePath, $pathMap.Count, (($pathMap.Keys | Sort-Object) -join ', ')
+    Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
+    Write-CamHost -Message ("start restreamer pid {0} serving {1} path(s)" -f $process.Id, $pathMap.Count) -Colour 'Green'
+
+    # Block here, bounded, until the paths are serving. This is what stops the
+    # recorders taking a direct camera slot each at a cold start: a camera
+    # already serving the dashboard has exactly one slot left, and if a recorder
+    # takes it the restreamer can never pull that camera at all, which would
+    # leave the whole arrangement stuck on direct inputs. Blocking is safe here
+    # because nothing else in the supervisor is due in the same instant.
+    $waitSeconds = 20
+    try { $waitSeconds = [int]$Config.RelayStartupWaitSeconds } catch { }
+    if ($waitSeconds -gt 0 -and $pathMap.Count -gt 0) {
+        $deadline = [DateTime]::Now.AddSeconds($waitSeconds)
+        $ready = @()
+        while ([DateTime]::Now -lt $deadline) {
+            if ($process.HasExited) { break }
+            $ready = @(Get-CamRelayReadyPaths -Config $Config)
+            if ($ready.Count -ge $pathMap.Count) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        $waited = ([DateTime]::Now - $Entry.StartedAt).TotalSeconds
+        $message = "restreamer serving {0} of {1} path(s) after {2}s: {3}" -f `
+            $ready.Count, $pathMap.Count, (Format-CamNumber -Value $waited -Format '0.0'), (($ready | Sort-Object) -join ', ')
+        Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
+        Write-CamHost -Message $message -Colour 'Cyan'
+    }
+}
+
+
+function Write-CamRelayStderr {
+    <#
+        Drains the restreamer's stderr after it has exited. Safe to call only
+        then: ReadToEnd on a live child would block the supervisor.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config
+    )
+
+    $process = $Entry.Process
+    if (-not $process) { return }
+    if (-not $process.HasExited) { return }
+
+    $text = ''
+    try { $text = $process.StandardError.ReadToEnd() } catch { return }
+    if ([string]::IsNullOrWhiteSpace($text)) { return }
+
+    foreach ($line in ($text -split "`r?`n")) {
+        if ($line.Trim().Length -eq 0) { continue }
+        Write-CamLog -Path $Entry.LogPath -Message ("stderr: " + $line) -MaxBytes $Config.LogMaxBytes
+    }
+}
+
+
+function Stop-CamRelayChild {
+    <#
+        Hard-kills the restreamer. Nothing is lost by a hard kill: it holds no
+        file and writes nothing to disk. Camera children are stopped before this
+        is called, so no recorder is left reading a relay that is going away.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$SupervisorLog,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $process = $Entry.Process
+    if (-not $process) { return }
+
+    if (-not $process.HasExited) {
+        $message = "kill restreamer pid {0}: {1}" -f $process.Id, $Reason
+        Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
+        Write-CamHost -Message $message -Colour 'Yellow'
+        try { $process.Kill() } catch { }
+        [void]$process.WaitForExit(10000)
+    }
+
+    Read-CamChildOutput -Entry $Entry -Config $Config -Final
+    Write-CamRelayStderr -Entry $Entry -Config $Config
+    try { $process.Dispose() } catch { }
+
+    $Entry.Process = $null
+    $Entry.ReadTask = $null
+    $Entry.ReadStream = $null
+}
+
+
+function Invoke-CamRelayTick {
+    <#
+        One supervisor cycle for the restreamer: drain its log, notice an exit,
+        restart it on the same backoff the camera children use.
+
+        No stall watchdog here. A camera child needs one because a wedged ffmpeg
+        keeps running while writing nothing, which only the archive can reveal.
+        The restreamer needs none, because every consumer asks the control API
+        whether its own path is serving before each attempt and goes direct when
+        the answer is no.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential,
+        [Parameter(Mandatory = $true)][string]$SupervisorLog,
+        [Parameter(Mandatory = $true)][DateTime]$Now
+    )
+
+    $maxBytes = [int]$Config.LogMaxBytes
+
+    if ($Entry.Process) {
+        Read-CamChildOutput -Entry $Entry -Config $Config
+        if (-not $Entry.Process.HasExited) { return }
+
+        $exitCode = $Entry.Process.ExitCode
+        $ranFor = ($Now - $Entry.StartedAt).TotalSeconds
+        Read-CamChildOutput -Entry $Entry -Config $Config -Final
+        Write-CamRelayStderr -Entry $Entry -Config $Config
+        try { $Entry.Process.Dispose() } catch { }
+        $Entry.Process = $null
+        $Entry.ReadTask = $null
+        $Entry.ReadStream = $null
+
+        $Entry.RestartCount = $Entry.RestartCount + 1
+        [void]$Entry.Restarts.Add($Now)
+        $Entry.LastError = "mediamtx exited with code $exitCode after $([int]$ranFor)s"
+        $Entry.LastErrorAt = $Now
+
+        $wait = Set-CamChildBackoff -Entry $Entry -Config $Config -RanForSeconds $ranFor
+        $message = "restreamer exit {0} after {1}s; restart #{2} in {3}s" -f `
+            $exitCode, [int]$ranFor, $Entry.RestartCount, $wait
+        Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $maxBytes
+        Write-CamHost -Message $message -Colour 'Yellow'
+        return
+    }
+
+    if ($Now -lt $Entry.NextStartAt) { return }
+
+    try {
+        Start-CamRelayChild -Entry $Entry -Config $Config -Credential $Credential -SupervisorLog $SupervisorLog
+    }
+    catch {
+        $Entry.LastError = "failed to start: $($_.Exception.Message)"
+        $Entry.LastErrorAt = $Now
+        $wait = Set-CamChildBackoff -Entry $Entry -Config $Config -RanForSeconds 0
+        Write-CamLog -Path $SupervisorLog -Message ("failed to start the restreamer: {0}; retry in {1}s. Consumers stay on the direct camera inputs until it is up." -f $_.Exception.Message, $wait) -MaxBytes $maxBytes
+        Write-CamHost -Message ("failed to start the restreamer: {0}; retry in {1}s" -f $_.Exception.Message, $wait) -Colour 'Red'
+    }
 }
 
 
@@ -1717,7 +2204,8 @@ function Write-CamStatusFile {
         [Parameter(Mandatory = $true)][DateTime]$StartedAt,
         [Parameter(Mandatory = $true)][ValidateSet('running', 'stopped')][string]$State,
         $Archive,
-        $PruneState
+        $PruneState,
+        $Relay
     )
 
     $now = [DateTime]::Now
@@ -1809,6 +2297,7 @@ function Write-CamStatusFile {
             CurrentSegment                = $currentSegment
             CurrentSegmentBytes           = $currentBytes
             SecondsSinceLastClosedSegment = $secondsSinceClosed
+            InputMode                     = [string]$(if ($entry) { $entry.InputMode } else { '' })
             RestartsLastHour              = $restartsLastHour
             RestartsTotal                 = $restartsTotal
             StartedAt                     = $startedAtCamera
@@ -1838,6 +2327,38 @@ function Write-CamStatusFile {
         }
     }
 
+    # Reported even when the restreamer is off, so a reader can tell "disabled"
+    # from "should be running and is not". LastPid is what -Stop uses to prove
+    # it left no mediamtx behind holding a session on every camera.
+    $restreamer = [pscustomobject]@{
+        Enabled       = (Get-CamRelayEnabled -Config $Config)
+        RelayBase     = [string]$Config.RelayBase
+        Pid           = $null
+        LastPid       = $null
+        Alive         = $false
+        StartedAt     = $null
+        RestartsTotal = 0
+        Paths         = @()
+        LastError     = ''
+        LastErrorAt   = $null
+    }
+    if ($Relay) {
+        $relayAlive = $false
+        if ($Relay.Process) { $relayAlive = (-not $Relay.Process.HasExited) }
+        $restreamer = [pscustomobject]@{
+            Enabled       = $true
+            RelayBase     = [string]$Config.RelayBase
+            Pid           = $(if ($relayAlive) { $Relay.Process.Id } else { $null })
+            LastPid       = $Relay.LastPid
+            Alive         = $relayAlive
+            StartedAt     = Format-CamTimestamp -Value $Relay.StartedAt
+            RestartsTotal = $Relay.RestartCount
+            Paths         = @($(if ($Relay.PathMap) { @($Relay.PathMap.Keys) } else { @() }))
+            LastError     = Get-CamRedacted -Text ([string]$Relay.LastError)
+            LastErrorAt   = Format-CamTimestamp -Value $Relay.LastErrorAt
+        }
+    }
+
     $document = [pscustomobject]@{
         Schema        = 1
         State         = $State
@@ -1862,6 +2383,7 @@ function Write-CamStatusFile {
             ScannedAt              = Format-CamTimestamp -Value $scannedAt
         }
         Prune         = $prune
+        Restreamer    = $restreamer
         Cameras       = $rows
     }
 
@@ -2266,6 +2788,20 @@ function Invoke-CamStopSupervisor {
         }
     }
 
+    # The same promise for the restreamer, and it matters more: one surviving
+    # mediamtx holds an RTSP session on every camera at once.
+    if ($final -and $final.PSObject.Properties['Restreamer'] -and $final.Restreamer.LastPid) {
+        $relayPid = [int]$final.Restreamer.LastPid
+        $relayProcess = Get-Process -Id $relayPid -ErrorAction SilentlyContinue
+        if ($relayProcess -and $relayProcess.Name -eq 'mediamtx') {
+            Write-CamHost -Message ("ORPHAN mediamtx pid {0} survived the shutdown; killing it" -f $relayPid) -Colour 'Red'
+            try { $relayProcess.Kill() } catch { }
+        }
+        else {
+            Write-CamHost -Message 'no mediamtx left behind' -Colour 'Green'
+        }
+    }
+
     if (Test-Path -LiteralPath $flag) { Remove-Item -LiteralPath $flag -Force -ErrorAction SilentlyContinue }
 }
 
@@ -2288,7 +2824,8 @@ function New-CamChildFor {
 
     return New-CamChildEntry -Camera $Camera -CameraDir $cameraDir `
         -LogPath (Join-Path -Path $Paths.LogDir -ChildPath "$($Camera.SafeName).log") `
-        -Pattern (Get-CamSegmentPattern -CameraDir $cameraDir -SafeName $Camera.SafeName -ContainerProfile $ContainerProfile)
+        -Pattern (Get-CamSegmentPattern -CameraDir $cameraDir -SafeName $Camera.SafeName -ContainerProfile $ContainerProfile) `
+        -RelayPathName (Get-CamRelayPathName -SafeName $Camera.SafeName)
 }
 
 
@@ -2405,6 +2942,12 @@ function Invoke-CamSupervisor {
     $archive = $null
     $pruneState = @{ LastRunAt = $null; DeletedTotal = 0; FreedBytes = 0; Blocked = $false; LastMessage = '' }
 
+    # The restreamer is a supervisor child like any other: one thing to
+    # autostart, one place that logs, the same backoff discipline. Every
+    # consumer falls back to a direct camera connection while it is down.
+    $relay = $null
+    if (Get-CamRelayEnabled -Config $Config) { $relay = New-CamRelayEntry -Paths $paths }
+
     $listStamp = [DateTime]::MinValue
     $lastReconcile = [DateTime]::MinValue
     $lastStatus = [DateTime]::MinValue
@@ -2466,7 +3009,19 @@ function Invoke-CamSupervisor {
                 }
             }
 
+            if ($relay) {
+                Invoke-CamRelayTick -Entry $relay -Config $Config -Credential $credential `
+                    -SupervisorLog $supervisorLog -Now $now
+                # A relay start waits for its paths, so the clock has moved.
+                $now = [DateTime]::Now
+            }
+
             $statusDue = (($now - $lastStatus).TotalSeconds -ge [double]$Config.StatusIntervalSeconds)
+
+            # One control-API list query per status tick, shared by every child,
+            # rather than one probe per camera per second.
+            $relayReady = $null
+            if ($relay -and $statusDue) { $relayReady = @(Get-CamRelayReadyPaths -Config $Config) }
 
             foreach ($entry in @($children.Values)) {
                 # One directory scan per cycle, shared by the status file and the
@@ -2474,15 +3029,16 @@ function Invoke-CamSupervisor {
                 if ($statusDue) { $entry.Scan = Get-CamDirScan -Path $entry.Dir }
 
                 if ($entry.Process) {
-                    Read-CamChildStderr -Entry $entry -Config $Config
+                    Read-CamChildOutput -Entry $entry -Config $Config
 
                     if ($entry.Process.HasExited) {
                         $exitCode = $entry.Process.ExitCode
                         $ranFor = ($now - $entry.StartedAt).TotalSeconds
-                        Read-CamChildStderr -Entry $entry -Config $Config -Final
+                        Read-CamChildOutput -Entry $entry -Config $Config -Final
                         try { $entry.Process.Dispose() } catch { }
                         $entry.Process = $null
                         $entry.ReadTask = $null
+                        $entry.ReadStream = $null
                         $entry.RestartCount = $entry.RestartCount + 1
                         [void]$entry.Restarts.Add($now)
                         $entry.LastError = "ffmpeg exited with code $exitCode after $([int]$ranFor)s"
@@ -2495,6 +3051,24 @@ function Invoke-CamSupervisor {
                         Write-CamHost -Message $message -Colour 'Yellow'
                     }
                     else {
+                        # A child that had to start on its direct input moves
+                        # onto the relay as soon as the relay is serving it,
+                        # which is what gives back the second camera slot after
+                        # a cold start or a restreamer outage. The other
+                        # direction needs no code: when the relay goes away its
+                        # reader loses the input, ffmpeg exits, and the restart
+                        # picks direct.
+                        if ($null -ne $relayReady -and $entry.InputMode -eq 'direct' -and `
+                                $entry.RelayPath -and ($relayReady -contains $entry.RelayPath)) {
+                            $reason = 'the restreamer is now serving this camera, moving it off the direct input'
+                            Stop-CamChild -Entry $entry -Config $Config -SupervisorLog $supervisorLog -Reason $reason
+                            # Not a failure, so neither the restart count nor
+                            # the backoff is touched - the next tick starts it.
+                            $entry.NextStartAt = $now
+                            Write-CamLog -Path $supervisorLog -Message ("{0}: {1}" -f $entry.Name, $reason) -MaxBytes $maxBytes
+                            continue
+                        }
+
                         $newestWrite = $null
                         if ($entry.Scan) {
                             $newestWrite = $entry.Scan.NewestClosedWrite
@@ -2555,7 +3129,7 @@ function Invoke-CamSupervisor {
 
                 try {
                     Write-CamStatusFile -Config $Config -Path $statusPath -Cameras $cameras -Children $children `
-                        -StartedAt $startedAt -State 'running' -Archive $archive -PruneState $pruneState
+                        -StartedAt $startedAt -State 'running' -Archive $archive -PruneState $pruneState -Relay $relay
                 }
                 catch {
                     Write-CamLog -Path $supervisorLog -Message ("status write failed: {0}" -f $_.Exception.Message) -MaxBytes $maxBytes
@@ -2583,11 +3157,19 @@ function Invoke-CamSupervisor {
             catch { Write-CamLog -Path $supervisorLog -Message ("failed to stop {0}: {1}" -f $entry.Name, $_.Exception.Message) -MaxBytes $maxBytes }
         }
 
+        # After the recorders, never before: a relay torn down first would make
+        # every child lose its input and log a failure on the way out. A
+        # surviving mediamtx would hold a session on all six cameras.
+        if ($relay) {
+            try { Stop-CamRelayChild -Entry $relay -Config $Config -SupervisorLog $supervisorLog -Reason $reason }
+            catch { Write-CamLog -Path $supervisorLog -Message ("failed to stop the restreamer: {0}" -f $_.Exception.Message) -MaxBytes $maxBytes }
+        }
+
         # A final status file, so -Status and the health strip can say "stopped
         # cleanly at T" instead of showing a snapshot they cannot account for.
         try {
             Write-CamStatusFile -Config $Config -Path $statusPath -Cameras $cameras -Children $children `
-                -StartedAt $startedAt -State 'stopped' -Archive $archive -PruneState $pruneState
+                -StartedAt $startedAt -State 'stopped' -Archive $archive -PruneState $pruneState -Relay $relay
         }
         catch { }
 
@@ -2623,6 +3205,12 @@ elseif ($Status) {
 elseif ($Stop) {
     Invoke-CamStopSupervisor -Config $config
 }
+elseif ($InstallRestreamer) {
+    Invoke-CamInstallRestreamer -Config $config
+}
+elseif ($RemoveRestreamer) {
+    Invoke-CamRemoveRestreamer -Config $config
+}
 elseif ($Run) {
     Invoke-CamSupervisor -Config $config
 }
@@ -2635,4 +3223,6 @@ else {
     Write-CamHost -Message '  cam.recorder.ps1 -Status               health, disk and projection'
     Write-CamHost -Message '  cam.recorder.ps1 -Stop                 stop a running supervisor'
     Write-CamHost -Message '  cam.recorder.ps1 -SelfTest [-Offline]  pre-flight checks'
+    Write-CamHost -Message '  cam.recorder.ps1 -InstallRestreamer    generate the MediaMTX config from cameras.json'
+    Write-CamHost -Message '  cam.recorder.ps1 -RemoveRestreamer     delete it again'
 }
