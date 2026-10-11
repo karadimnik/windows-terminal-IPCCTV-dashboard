@@ -37,11 +37,11 @@ exactly 2 RTSP sessions per camera, so dashboard + recorder leaves zero headroom
 open bug where long-running RTSP consumers of a relayed G.711 stream progressively lose audio - the
 exact codec and consumer shape we have - so the restreamer must be proven, not assumed.
 
-- [ ] **[19]** Measure slot-release time: hold one session, hard-kill a recorder child, count backoff
+- [x] **[19]** RESOLVED. Measured slot-release time: hold one session, hard-kill a recorder child, count backoff
       cycles before it reconnects. If release is prompt, direct connection needs no restreamer.
-- [ ] **[20]** MediaMTX G.711 soak: 1 h, two long-running consumers, audio packet continuity sampled
+- [x] **[20]** RESOLVED. MediaMTX G.711 soak: 1 h, two long-running consumers, audio packet continuity sampled
       over time. Prefer MediaMTX over go2rtc on the documented-bug evidence. Fail = stay direct.
-- [ ] **[21]** Decide the connection model on [19] + [20], then implement. Restreamer is a transport
+- [x] **[21]** DECIDED 2026-10-11: MediaMTX with direct fallback. Connection model on [19] + [20], then implement. Restreamer is a transport
       fan-out ONLY - recording stays in our supervisor, never moved into the restreamer.
 - [ ] **[22]** If adopting a restreamer, give the dashboard a direct-connection fallback so a
       restreamer outage cannot take live viewing down with recording.
@@ -79,3 +79,42 @@ exact codec and consumer shape we have - so the restreamer must be proven, not a
 
 - [ ] **[18]** 24 h soak - unbroken footage, free space never below 20 GB, `-Status` restart counts
       consistent with the logs.
+
+## Decisions and state as of 2026-10-11 15:10 (session ended on usage limit)
+
+**[19] Slot release after hard kill: 0.02-0.32 s, `attempts=1`, ZERO refusals** (6 reps cam .16,
+3 reps cam .10). The 2.4-3.3 s completion figure matches the no-sessions-held baseline, so it is
+ordinary RTSP setup, not contention. Direct connection has NO restart penalty. The reliability
+argument for a restreamer is refuted by measurement.
+
+**[20] MediaMTX v1.21.2 G.711 passthrough is clean.** Eight consecutive complete 5-min segments,
+audio packets: 4293 4290 4276 4305 4266 4305 4277 4289 - flat to +/-0.5% over 35 min, two consumers
+in lockstep (10 segments each), codec stayed `pcm_alaw`, A/V end-drift under 6 ms. go2rtc's reported
+defect degrades within minutes; this does not. NOTE: soak was torn down at 35 of 60 min when the
+session hit its usage limit, so the full hour is unfinished. Evidence was already conclusive.
+MediaMTX held ONE camera session while serving 2 readers; the 3rd overall consumer was refused.
+
+**[21] Operator decided: MediaMTX with direct fallback.** Working config preserved at
+`reference/phaseC-mediamtx.yml`. It supplies the camera URL via the `MTX_PATHS_*_SOURCE` env var so
+no password is written to disk, binds RTSP to 127.0.0.1:8554 TCP-only, and disables rtmp/hls/webrtc/
+srt/moq - transport fan-out only, never a media server, never a recorder.
+
+**Advisor rulings on Phase B's open questions:**
+- Accept the `cameras.json` whole-file reformat on first `-Enable`. Values, order and BOM survive and
+  it is stable afterwards. Hand-rolling a JSON formatter is speculative complexity.
+- KEEP all three unrequested additions: `-Offline` (makes self-test runnable while the dashboard holds
+  a slot), the single-instance guard (two supervisors would double children against a 2-session
+  ceiling), restart-on-IP/Quality-change (otherwise a child silently records a stale address).
+- The executor was RIGHT to make the supervisor stay up when no camera is enabled; the brief was
+  wrong. Exiting would make `-Enable` unreachable from a cold start and kill the logon task at boot.
+- Phase C must move `Format-CamTimestamp`, `Get-CamDateTimeOrNull`, `Format-CamNumber`,
+  `Get-CamStatusSnapshot`, `Get-CamSupervisorState` into `cam.common.ps1` when `cam.health.ps1`
+  becomes their second consumer. They are grouped under one section header for a clean cut-and-paste.
+
+**Open, carried forward:**
+- [ ] **[23]** Operator to run camera-facing `-SelfTest` (checks b/c/d) with the dashboard CLOSED.
+      Never executed - the Phase B agent was forbidden from touching cameras.
+- [ ] **[24]** Untested over time: log rotation at `LogMaxBytes`, the 900 s production segment path,
+      `HealthyResetSeconds` backoff reset, the real 2250 s stall threshold, `MaxRetentionDays`.
+- [ ] **[25]** `recorder.config.example.json` lacks `StatusIntervalSeconds`, `ArchiveScanSeconds`,
+      `StopTimeoutSeconds`. Document in the Phase D README.
