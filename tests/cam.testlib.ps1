@@ -509,6 +509,24 @@ function Stop-CamTestSupervisor {
 }
 
 
+function Remove-CamTestCredential {
+    <#
+        Deletes the sandbox's copy of the DPAPI credential store.
+
+        A live check has to copy it so the product can authenticate against the
+        real cameras, and the sandbox is deliberately left behind afterwards for
+        inspection - but there is no reason for a second copy of the credential
+        store to outlive the run, so every live check calls this when it is
+        done. The logs and the status files it captured are unaffected.
+    #>
+    param([Parameter(Mandatory = $true)]$Sandbox)
+
+    $path = Join-Path -Path $Sandbox.Dir -ChildPath 'camera_creds.xml'
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+    return (-not (Test-Path -LiteralPath $path))
+}
+
+
 function Get-CamTestStatusJson {
     <# The sandbox status file as text and as an object. #>
     param([Parameter(Mandatory = $true)]$Sandbox)

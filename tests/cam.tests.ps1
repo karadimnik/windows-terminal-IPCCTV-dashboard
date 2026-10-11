@@ -389,6 +389,8 @@ function Invoke-CamCheckRelay {
         $evidence += @($scan.PasswordHits | ForEach-Object { 'PASSWORD HIT ' + $_ })
         $evidence += @($scan.UserinfoHits | ForEach-Object { 'USERINFO HIT ' + $_ })
         if (-not $scan.Ok) { $ok = $false }
+
+        $evidence += ("sandbox credential copy removed: {0}" -f (Remove-CamTestCredential -Sandbox $sandbox))
     }
 
     Add-CamTestResult -Run $Run -Check 'relay' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
