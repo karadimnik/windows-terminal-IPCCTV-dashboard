@@ -94,19 +94,6 @@ function Write-CamHost {
 }
 
 
-function Format-CamNumber {
-    <#
-        Formats a number with an invariant decimal point. The machine's locale
-        uses a comma, which makes measurements awkward to read and compare.
-    #>
-    param(
-        [Parameter(Mandatory = $true)][double]$Value,
-        [string]$Format = '0.00'
-    )
-    return $Value.ToString($Format, [System.Globalization.CultureInfo]::InvariantCulture)
-}
-
-
 function Invoke-CamNative {
     <#
         Runs a native command and returns its combined stdout and stderr as one
@@ -188,103 +175,6 @@ function Start-CamProcess {
         -WindowStyle Hidden -PassThru
     [void]$process.Handle
     return $process
-}
-
-
-function Format-CamTimestamp {
-    <# Round-trippable local timestamp, or $null for "never". #>
-    param($Value)
-
-    if ($null -eq $Value) { return $null }
-    $when = [DateTime]$Value
-    if ($when -eq [DateTime]::MinValue) { return $null }
-    return $when.ToString('o')
-}
-
-
-function Get-CamDateTimeOrNull {
-    <# Parses a timestamp written by Format-CamTimestamp. #>
-    param($Value)
-
-    if ($null -eq $Value) { return $null }
-    $text = [string]$Value
-    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-    try { return [DateTime]::Parse($text, [System.Globalization.CultureInfo]::InvariantCulture) }
-    catch { return $null }
-}
-
-
-# ===========================================================================
-# Status file: written by the supervisor, read by everything else
-# ===========================================================================
-
-function Get-CamStatusSnapshot {
-    <#
-        Reads status.json, or $null when there is nothing readable there. Never
-        throws: every caller has something sensible to say about absence.
-    #>
-    param([Parameter(Mandatory = $true)]$Config)
-
-    $path = Get-CamStatusFilePath -Config $Config
-    if (-not (Test-Path -LiteralPath $path)) { return $null }
-
-    try { $text = Get-CamFileText -Path $path }
-    catch { return $null }
-
-    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-    try { return (ConvertFrom-Json -InputObject $text) }
-    catch { return $null }
-}
-
-
-function Get-CamSupervisorState {
-    <#
-        Decides whether the supervisor behind a snapshot is actually running.
-
-        Both signals must agree: the heartbeat has to be fresh AND the recorded
-        process has to still exist. A heartbeat alone would believe a supervisor
-        that was killed a second ago; a live PID alone would believe a PID that
-        the machine has since reused.
-    #>
-    param(
-        [Parameter(Mandatory = $true)]$Config,
-        $Snapshot
-    )
-
-    $state = @{ Running = $false; Reason = 'no status file has been written yet'; AgeSeconds = $null; Pid = $null }
-
-    if (-not $Snapshot) { return $state }
-
-    $state.Pid = $Snapshot.SupervisorPid
-    $updated = Get-CamDateTimeOrNull -Value $Snapshot.UpdatedAt
-    if ($updated) { $state.AgeSeconds = [math]::Round(([DateTime]::Now - $updated).TotalSeconds, 1) }
-
-    if ([string]$Snapshot.State -ne 'running') {
-        $state.Reason = "the supervisor recorded a clean shutdown at $($Snapshot.UpdatedAt)"
-        return $state
-    }
-
-    $limit = [double]$Config.StatusIntervalSeconds * 3
-    if ($limit -lt 15) { $limit = 15 }
-    if ($null -eq $state.AgeSeconds) {
-        $state.Reason = 'the status file carries no usable heartbeat'
-        return $state
-    }
-    if ($state.AgeSeconds -gt $limit) {
-        $state.Reason = "the heartbeat is $($state.AgeSeconds)s old (limit $([int]$limit)s)"
-        return $state
-    }
-
-    $process = $null
-    if ($state.Pid) { $process = Get-Process -Id ([int]$state.Pid) -ErrorAction SilentlyContinue }
-    if (-not $process) {
-        $state.Reason = "process $($state.Pid) is no longer running"
-        return $state
-    }
-
-    $state.Running = $true
-    $state.Reason = "pid $($state.Pid), heartbeat $($state.AgeSeconds)s old"
-    return $state
 }
 
 
@@ -2597,17 +2487,6 @@ function Invoke-CamPrune {
 # ===========================================================================
 # CLI: -Status, -Stop
 # ===========================================================================
-
-function Format-CamAgeText {
-    param($Seconds)
-
-    if ($null -eq $Seconds) { return '-' }
-    $value = [double]$Seconds
-    if ($value -lt 120) { return ("{0}s" -f [int]$value) }
-    if ($value -lt 7200) { return ("{0}m" -f [int]($value / 60)) }
-    return ("{0}h" -f [int]($value / 3600))
-}
-
 
 function Show-CamStatus {
     <#
