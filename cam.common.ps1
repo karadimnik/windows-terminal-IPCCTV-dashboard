@@ -223,8 +223,11 @@ function Get-CamConfigDefault {
         #   events   the most recent supervisor events, newest first
         #   archive  footage span and size, then the disk trend and pruning
         HealthSections       = @('status', 'cameras', 'events', 'archive')
-        # Rows the events section occupies, its own label row included.
-        HealthEventRows      = 3
+        # Rows the events section occupies, its own label row included. Five
+        # fills the Operator's 15-row strip exactly alongside six cameras:
+        # 1 status + 1 header + 6 cameras + 5 events + 2 archive. The camera
+        # table absorbs any difference at another camera count.
+        HealthEventRows      = 5
         # How many of the supervisor log's most recent lines status.json
         # publishes for the strip to read.
         StatusEventCount     = 20

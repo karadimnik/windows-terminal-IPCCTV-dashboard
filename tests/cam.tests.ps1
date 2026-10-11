@@ -19,7 +19,7 @@
     .\tests\cam.tests.ps1
 
 .EXAMPLE
-    .\tests\cam.tests.ps1 -Checks parse,strip
+    .\tests\cam.tests.ps1 -Checks parse,layout,strip,sections
 
 .EXAMPLE
     .\tests\cam.tests.ps1 -Live -Checks relay
@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'selftest', 'strip', 'leak', 'procs', 'relay')]
+    [ValidateSet('parse', 'cameralist', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs', 'relay')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'selftest', 'strip', 'leak', 'procs')
+$cameraFree = @('parse', 'cameralist', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -89,6 +89,317 @@ function Invoke-CamCheckSelfTest {
     Add-CamTestResult -Run $Run -Check 'selftest' -Status $(if ($result.ExitCode -eq 0) { 'PASS' } else { 'FAIL' }) `
         -Message ("cam.recorder.ps1 -SelfTest -Offline exited {0}" -f $result.ExitCode) `
         -Evidence @($summary | Select-Object -Last 6)
+}
+
+
+function Invoke-CamCheckLayout {
+    <#
+        The dashboard geometry, asserted without opening a window.
+
+        The constraint that matters most is the one in the middle: the grid
+        shape comes from the CAMERA COUNT ALONE, so reserving the strip must
+        not change $Columns or $Rows. If it ever did, six cameras would tile
+        3x3 instead of 3x2 and every feed would shrink.
+    #>
+    param($Run)
+
+    $config = Get-CamConfigDefault
+    $evidence = @()
+    $ok = $true
+
+    function Assert-Layout {
+        param([string]$Label, $Actual, $Expected)
+        $bad = @()
+        foreach ($key in $Expected.Keys) {
+            if ([string]$Actual.$key -ne [string]$Expected[$key]) {
+                $bad += ("{0}={1} want {2}" -f $key, $Actual.$key, $Expected[$key])
+            }
+        }
+        $script:CamLayoutLine = ("{0}: cols={1} rows={2} pane={3}x{4} gutter={5} grid={6} strip=({7},{8}) {9}x{10} mode={11}" -f `
+            $Label, $Actual.Columns, $Actual.Rows, $Actual.PaneWidth, $Actual.PaneHeight, $Actual.GutterPx, `
+            $Actual.GridHeight, $Actual.StripLeft, $Actual.StripTop, $Actual.StripWidth, $Actual.StripHeight, $Actual.Mode)
+        if ($bad.Count -gt 0) { $script:CamLayoutLine += ('  MISMATCH: ' + ($bad -join '; ')) }
+        return ($bad.Count -eq 0)
+    }
+
+    # The Operator's screen, six cameras, the strip derived from the aspect.
+    $config.HealthStripHeightPx = -1
+    $auto = Get-CamDashboardLayout -Config $config -CameraCount 6 -ScreenWidth 1920 -ScreenHeight 1032
+    if (-not (Assert-Layout -Label 'auto, 6 cameras, 1920x1032' -Actual $auto -Expected @{
+        Columns = 3; Rows = 2; PaneWidth = 640; PaneHeight = 360; GutterPx = 8
+        GridHeight = 728; StripLeft = 0; StripTop = 736; StripWidth = 1920; StripHeight = 296
+        StripEnabled = $true; Mode = 'aspect' })) { $ok = $false }
+    $evidence += $script:CamLayoutLine
+
+    # Full-bleed: the panes start at the top-left corner and the right-hand
+    # column ends exactly on the screen edge, with the gutter only between the
+    # two rows.
+    $positions = @()
+    for ($i = 0; $i -lt 6; $i++) {
+        $position = Get-CamPanePosition -Layout $auto -Index $i
+        $positions += ("+{0}+{1}" -f $position.X, $position.Y)
+    }
+    $evidence += ('pane positions: ' + ($positions -join ' '))
+    $expectedPositions = '+0+0 +640+0 +1280+0 +0+368 +640+368 +1280+368'
+    if (($positions -join ' ') -ne $expectedPositions) {
+        $ok = $false
+        $evidence += ("FAIL: want {0}" -f $expectedPositions)
+    }
+    $rightEdge = (Get-CamPanePosition -Layout $auto -Index 2).X + $auto.PaneWidth
+    $evidence += ("right-hand column ends at x={0}, screen is 1920 wide; row 1 starts at y={1}, row 0 is {2} tall, so the gutter is {3} px and sits between the rows only" -f `
+        $rightEdge, (Get-CamPanePosition -Layout $auto -Index 3).Y, $auto.PaneHeight, `
+        ((Get-CamPanePosition -Layout $auto -Index 3).Y - $auto.PaneHeight))
+    if ($rightEdge -ne 1920) { $ok = $false; $evidence += 'FAIL: the grid does not reach the right edge of the screen' }
+
+    # The strip switched off restores the original full-height arithmetic.
+    $config.HealthStripHeightPx = 0
+    $off = Get-CamDashboardLayout -Config $config -CameraCount 6 -ScreenWidth 1920 -ScreenHeight 1032
+    if (-not (Assert-Layout -Label 'strip off, 6 cameras' -Actual $off -Expected @{
+        Columns = 3; Rows = 2; PaneWidth = 640; PaneHeight = 516; GutterPx = 0
+        GridHeight = 1032; StripHeight = 0; StripEnabled = $false; Mode = 'off' })) { $ok = $false }
+    $evidence += $script:CamLayoutLine
+    $offPositions = @()
+    for ($i = 0; $i -lt 6; $i++) {
+        $position = Get-CamPanePosition -Layout $off -Index $i
+        $offPositions += ("+{0}+{1}" -f $position.X, $position.Y)
+    }
+    $evidence += ('pane positions with the strip off: ' + ($offPositions -join ' '))
+    if (($offPositions -join ' ') -ne '+0+0 +640+0 +1280+0 +0+516 +640+516 +1280+516') {
+        $ok = $false
+        $evidence += 'FAIL: the original full-height layout was not restored'
+    }
+
+    # THE constraint: the strip never reshapes the grid.
+    if ($auto.Columns -ne $off.Columns -or $auto.Rows -ne $off.Rows) {
+        $ok = $false
+        $evidence += 'FAIL: reserving the strip changed the grid shape'
+    }
+    $evidence += ("grid shape with the strip {0}x{1}, without it {2}x{3} - the camera count alone decides it" -f `
+        $auto.Columns, $auto.Rows, $off.Columns, $off.Rows)
+
+    # A fixed strip height shrinks the panes rather than the grid.
+    $config.HealthStripHeightPx = 200
+    $fixed = Get-CamDashboardLayout -Config $config -CameraCount 6 -ScreenWidth 1920 -ScreenHeight 1032
+    if (-not (Assert-Layout -Label 'strip fixed at 200 px' -Actual $fixed -Expected @{
+        Columns = 3; Rows = 2; PaneWidth = 640; PaneHeight = 408; StripHeight = 200; Mode = 'fixed' })) { $ok = $false }
+    $evidence += $script:CamLayoutLine
+
+    # Nine cameras on the same screen: aspect-exact panes would overflow, so
+    # the floor takes over and the panes shrink instead of the strip.
+    $config.HealthStripHeightPx = -1
+    $nine = Get-CamDashboardLayout -Config $config -CameraCount 9 -ScreenWidth 1920 -ScreenHeight 1032
+    if (-not (Assert-Layout -Label 'auto, 9 cameras' -Actual $nine -Expected @{
+        Columns = 3; Rows = 3; PaneWidth = 640; PaneHeight = 296; StripHeight = 120 })) { $ok = $false }
+    $evidence += $script:CamLayoutLine
+    if (-not $nine.Note) { $ok = $false; $evidence += 'FAIL: shrinking the panes was not reported' }
+    else { $evidence += ('note: ' + $nine.Note) }
+
+    Add-CamTestResult -Run $Run -Check 'layout' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'the dashboard reserves the strip without ever reshaping the grid, and a strip height of 0 restores the original full-height layout' `
+        -Evidence $evidence
+}
+
+
+function Invoke-CamCheckSections {
+    <#
+        Every strip section can be switched off, including all of them.
+
+        Rendered through the product script with a sandbox config, because
+        HealthSections is a config key and a test that called the renderer's
+        internals would not prove the config reaches it.
+    #>
+    param($Run)
+
+    $cameras = @(
+        [pscustomobject]@{ Name = 'Front Entrance'; IP = '10.254.254.254'; Quality = 'stream1'; Record = $true }
+    )
+    $evidence = @()
+    $ok = $true
+
+    function Invoke-SectionRender {
+        param([string]$Name, $Sections, [hashtable]$Extra = @{})
+
+        $settings = @{ HealthSections = $Sections }
+        foreach ($key in $Extra.Keys) { $settings[$key] = $Extra[$key] }
+        $sandbox = New-CamTestSandbox -Name ("sections-" + $Name) -Cameras $cameras -Config $settings
+
+        $statusPath = Get-CamStatusFilePath -Config $sandbox.Config
+        [void](New-Item -ItemType Directory -Path (Split-Path -Path $statusPath -Parent) -Force)
+        $now = [DateTime]::Now
+        $document = [pscustomobject]@{
+            Schema = 1; State = 'running'; SupervisorPid = $PID
+            StartedAt = (Format-CamTimestamp -Value $now.AddHours(-1)); UpdatedAt = (Format-CamTimestamp -Value $now)
+            UptimeSeconds = 3600.0; RootPath = $sandbox.Root; Container = 'mkv'; SegmentSeconds = 900
+            Disk = [pscustomobject]@{ FreeGB = 301.37; ReserveGB = 20.0; PruneHysteresisGB = 5.0
+                ArchiveGB = 88.4; ArchiveBytes = 94908000000; ArchiveFiles = 412
+                OldestSegment = (Format-CamTimestamp -Value $now.AddDays(-2.2))
+                NewestSegment = (Format-CamTimestamp -Value $now.AddMinutes(-3))
+                MeasuredGBPerDay = 99.7; ProjectedDaysRemaining = 2.82; ScannedAt = (Format-CamTimestamp -Value $now) }
+            Prune = [pscustomobject]@{ LastRunAt = $null; DeletedTotal = 0; FreedGBTotal = 0; Blocked = $false; LastMessage = '' }
+            Restreamer = [pscustomobject]@{ Enabled = $true; RelayBase = 'rtsp://127.0.0.1:8554'; Pid = 9100; LastPid = 9100
+                Alive = $true; StartedAt = $null; RestartsTotal = 0; Paths = @('frontentrance'); LastError = ''; LastErrorAt = $null }
+            Events = @([pscustomobject]@{ At = (Format-CamTimestamp -Value $now.AddSeconds(-30)); Text = 'start Front Entrance pid 4000 on the relay input' })
+            Cameras = @([pscustomobject]@{ Name = 'Front Entrance'; SafeName = 'Front_Entrance'; Record = $true
+                Pid = 4000; LastPid = 4000; Alive = $true; CurrentSegment = 'seg.mkv'; CurrentSegmentBytes = 1
+                SecondsSinceLastClosedSegment = 42; InputMode = 'relay'; RestartsLastHour = 0; RestartsTotal = 0
+                StartedAt = $null; NextStartAt = $null; LastError = ''; LastErrorAt = $null
+                ArchiveFiles = 412; ArchiveBytes = 1; ConfigError = '' })
+        }
+        [System.IO.File]::WriteAllText($statusPath, (ConvertTo-Json -InputObject $document -Depth 6), (New-Object System.Text.UTF8Encoding($false)))
+
+        $render = Invoke-CamTestScript -Path $sandbox.Health -Arguments @('-Once', '-Rows', '15', '-Width', '207')
+        $lines = @($render.Output -split "`r?`n")
+        if ($lines.Count -gt 0 -and $lines[-1] -eq '') { $lines = $lines[0..($lines.Count - 2)] }
+        return [pscustomobject]@{ ExitCode = $render.ExitCode; Lines = $lines; Text = ($lines -join "`n"); Output = $render.Output }
+    }
+
+    # Each section alone, so "switched off" is proven section by section
+    # rather than inferred from one combined render.
+    $markers = @{
+        status  = '(?m)^RUNNING pid '
+        cameras = '(?m)^CAMERA\s+REC\s+ALIVE'
+        events  = '(?m)^EVENTS\s+\d{2}:\d{2}:\d{2} '
+        archive = '(?m)^ARCHIVE\s+\d{2}-\d{2} '
+    }
+    foreach ($only in @('status', 'cameras', 'events', 'archive')) {
+        $result = Invoke-SectionRender -Name $only -Sections @($only)
+        if ($result.ExitCode -ne 0 -or $result.Lines.Count -ne 15) { $ok = $false }
+        $present = @()
+        foreach ($name in $markers.Keys) {
+            if ($result.Text -match $markers[$name]) { $present += $name }
+        }
+        # TREND is the archive section's second row and must not appear alone.
+        if ($only -ne 'archive' -and $result.Text -match '(?m)^TREND ') { $present += 'archive-trend' }
+        # Both sides into variables first: -join binds tighter than -ne, so
+        # comparing them inline silently compares the wrong things.
+        $presentText = (@($present | Sort-Object) -join ',')
+        $wantedText = $only
+        if ($presentText -ne $wantedText) {
+            $ok = $false
+            $evidence += ("FAIL: HealthSections=[{0}] rendered sections [{1}]" -f $only, $presentText)
+        }
+        $evidence += ("HealthSections=[{0}] -> {1} row(s), sections present: [{2}]" -f $only, $result.Lines.Count, $presentText)
+    }
+
+    # Every section off: fifteen rows of nothing.
+    $empty = Invoke-SectionRender -Name 'empty' -Sections @()
+    $blank = @($empty.Lines | Where-Object { $_.Trim().Length -eq 0 }).Count
+    $evidence += ("HealthSections=[] -> exit {0}, {1} row(s), {2} of them blank" -f $empty.ExitCode, $empty.Lines.Count, $blank)
+    if ($empty.ExitCode -ne 0 -or $empty.Lines.Count -ne 15 -or $blank -ne 15) {
+        $ok = $false
+        $evidence += 'FAIL: an empty HealthSections did not render an empty strip'
+    }
+
+    # Order is the config's, not the renderer's.
+    $reordered = Invoke-SectionRender -Name 'reordered' -Sections @('archive', 'status')
+    $firstLine = ''
+    if ($reordered.Lines.Count -gt 0) { $firstLine = $reordered.Lines[0] }
+    $evidence += ("HealthSections=[archive,status] -> first row: " + $firstLine.TrimEnd())
+    if ($firstLine -notmatch '^ARCHIVE ') { $ok = $false; $evidence += 'FAIL: the configured order was not honoured' }
+
+    # A typo is loud, not silently dropped.
+    $typo = Invoke-SectionRender -Name 'typo' -Sections @('status', 'camera')
+    $evidence += ("HealthSections=[status,camera] -> exit {0}" -f $typo.ExitCode)
+    if ($typo.ExitCode -eq 0) { $ok = $false; $evidence += 'FAIL: an unknown section name was accepted' }
+
+    Add-CamTestResult -Run $Run -Check 'sections' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'every strip section can be switched off independently, all of them at once gives an empty strip, and the configured order is honoured' `
+        -Evidence $evidence
+}
+
+
+function Invoke-CamCheckAutostart {
+    <#
+        The logon Scheduled Task, end to end: install, reinstall, remove,
+        remove again.
+
+        Skipped rather than run if a task of that name already exists, because
+        that would be the Operator's real autostart and this check would
+        rewrite and then delete it.
+    #>
+    param($Run)
+
+    $taskName = 'IPCCTV-Recorder'
+
+    if (-not (Get-Command -Name 'Get-ScheduledTask' -ErrorAction SilentlyContinue)) {
+        Add-CamTestResult -Run $Run -Check 'autostart' -Status 'SKIP' `
+            -Message 'the ScheduledTasks module is not available on this machine'
+        return
+    }
+    if (@(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).Count -gt 0) {
+        Add-CamTestResult -Run $Run -Check 'autostart' -Status 'SKIP' `
+            -Message ("a task named {0} is already registered, which would be the Operator's own autostart" -f $taskName)
+        return
+    }
+
+    $cameras = @([pscustomobject]@{ Name = 'Front Entrance'; IP = '10.254.254.254'; Quality = 'stream1'; Record = $false })
+    $sandbox = New-CamTestSandbox -Name 'autostart' -Cameras $cameras
+    $evidence = @()
+    $ok = $true
+
+    try {
+        $before = @(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).Count
+        $evidence += ("before install: {0} task(s) named {1}" -f $before, $taskName)
+
+        # A no-op removal first: it must not be an error to remove nothing.
+        $noop = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-RemoveAutostart')
+        $evidence += ("-RemoveAutostart with nothing installed: exit {0}" -f $noop.ExitCode)
+        $evidence += @($noop.Output -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object { '  ' + $_.TrimEnd() })
+        if ($noop.ExitCode -ne 0) { $ok = $false; $evidence += 'FAIL: removing nothing was not a clean no-op' }
+
+        $install = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-InstallAutostart')
+        $evidence += ("-InstallAutostart: exit {0}" -f $install.ExitCode)
+        $evidence += @($install.Output -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object { '  ' + $_.TrimEnd() })
+        if ($install.ExitCode -ne 0) { $ok = $false }
+
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if (-not $task) {
+            $ok = $false
+            $evidence += 'FAIL: no task was registered'
+        }
+        else {
+            $xml = Export-ScheduledTask -TaskName $taskName
+            $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+            $evidence += ("registered: state {0}, {1} trigger(s)" -f $task.State, @($task.Triggers).Count)
+            foreach ($needle in @('<LogonTrigger>', ('<UserId>' + $account + '</UserId>'), '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>',
+                    '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>', 'cam.recorder.ps1', '-Run')) {
+                $found = ($xml -like ('*' + $needle + '*'))
+                $evidence += ("  task XML contains {0}: {1}" -f $needle, $found)
+                if (-not $found) { $ok = $false }
+            }
+            # It must run unelevated: HighestAvailable would mean a UAC prompt
+            # at every logon, which is not an autostart.
+            if ($xml -like '*<RunLevel>HighestAvailable</RunLevel>*') {
+                $ok = $false
+                $evidence += 'FAIL: the task asks for elevation'
+            }
+        }
+
+        $again = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-InstallAutostart')
+        $count = @(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).Count
+        $evidence += ("-InstallAutostart a second time: exit {0}, {1} task(s) registered" -f $again.ExitCode, $count)
+        if ($again.ExitCode -ne 0 -or $count -ne 1) { $ok = $false; $evidence += 'FAIL: reinstalling was not idempotent' }
+
+        $remove = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-RemoveAutostart')
+        $left = @(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).Count
+        $evidence += ("-RemoveAutostart: exit {0}, {1} task(s) left" -f $remove.ExitCode, $left)
+        if ($remove.ExitCode -ne 0 -or $left -ne 0) { $ok = $false; $evidence += 'FAIL: the task was not removed' }
+
+        $twice = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-RemoveAutostart')
+        $evidence += ("-RemoveAutostart again: exit {0}" -f $twice.ExitCode)
+        if ($twice.ExitCode -ne 0) { $ok = $false; $evidence += 'FAIL: removing twice was not a clean no-op' }
+    }
+    finally {
+        # Never leave a task behind, whatever failed above.
+        if (@(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).Count -gt 0) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            $evidence += 'cleanup: unregistered a task the check left behind'
+        }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'autostart' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'the logon task installs unelevated, is idempotent on reinstall, and removing it is a clean no-op when it is not there' `
+        -Evidence $evidence
 }
 
 
@@ -148,16 +459,22 @@ function Invoke-CamCheckStrip {
             Disk           = [pscustomobject]@{
                 FreeGB = 301.37; ReserveGB = 20.0; PruneHysteresisGB = 5.0
                 ArchiveGB = 88.4; ArchiveBytes = 94908000000; ArchiveFiles = 412
-                OldestSegment = $null; NewestSegment = $null
-                MeasuredGBPerDay = 99.7; ProjectedDaysRemaining = 2.82; ScannedAt = $null
+                OldestSegment = (Format-CamTimestamp -Value $UpdatedAt.AddDays(-2.2))
+                NewestSegment = (Format-CamTimestamp -Value $UpdatedAt.AddMinutes(-3))
+                MeasuredGBPerDay = 99.7; ProjectedDaysRemaining = 2.82; ScannedAt = (Format-CamTimestamp -Value $UpdatedAt)
             }
-            Prune          = [pscustomobject]@{ LastRunAt = $null; DeletedTotal = 0; FreedGBTotal = 0; Blocked = $false; LastMessage = '' }
+            Prune          = [pscustomobject]@{ LastRunAt = (Format-CamTimestamp -Value $UpdatedAt); DeletedTotal = 128; FreedGBTotal = 234.117; Blocked = $false; LastMessage = 'deleted 1 file, freed 1.83 GB' }
             Restreamer     = [pscustomobject]@{
                 Enabled = $true; RelayBase = 'rtsp://127.0.0.1:8554'
                 Pid = $(if ($RelayAlive) { 9100 } else { $null }); LastPid = 9100; Alive = $RelayAlive
                 StartedAt = $null; RestartsTotal = 1; Paths = @('frontentrance', 'rearbalcony', 'fieldfront', 'cargarage', 'workshopentrance', 'workshop')
                 LastError = ''; LastErrorAt = $null
             }
+            Events         = @(
+                [pscustomobject]@{ At = (Format-CamTimestamp -Value $UpdatedAt.AddSeconds(-12)); Text = 'prune: deleted workshop_2026-10-09_1400+0300.mkv, freed 1.83 GB' }
+                [pscustomobject]@{ At = (Format-CamTimestamp -Value $UpdatedAt.AddSeconds(-95)); Text = 'watchdog Car Garage: no segment growth for 2250s, killing pid 4003' }
+                [pscustomobject]@{ At = (Format-CamTimestamp -Value $UpdatedAt.AddSeconds(-220)); Text = 'Car Garage: ffmpeg exit 1 after 63s; restart #7 in 3s' }
+            )
             Cameras        = $rows
         }
     }
@@ -170,17 +487,19 @@ function Invoke-CamCheckStrip {
     $evidence = @()
     $ok = $true
 
-    # --- healthy
+    # --- healthy, at the size the dashboard's own strip window measures:
+    #     1913x296 px of Windows Terminal in focus mode is 208x15 cells, and
+    #     the renderer leaves one column spare so a full-width line cannot wrap.
     Set-Fixture -Document (New-Fixture -State 'running' -UpdatedAt ([DateTime]::Now) -SupervisorPid $PID -RelayAlive $true)
-    $render = Invoke-CamTestScript -Path $sandbox.Health -Arguments @('-Once', '-Rows', '8', '-Width', '120')
+    $render = Invoke-CamTestScript -Path $sandbox.Health -Arguments @('-Once', '-Rows', '15', '-Width', '207')
     $lines = @($render.Output -split "`r?`n")
     if ($lines.Count -gt 0 -and $lines[-1] -eq '') { $lines = $lines[0..($lines.Count - 2)] }
     $widest = 0
     foreach ($line in $lines) { if ($line.Length -gt $widest) { $widest = $line.Length } }
 
     if ($render.ExitCode -ne 0) { $ok = $false }
-    if ($lines.Count -ne 8) { $ok = $false }
-    if ($widest -gt 120) { $ok = $false }
+    if ($lines.Count -ne 15) { $ok = $false }
+    if ($widest -gt 207) { $ok = $false }
     if ($lines[0] -notmatch '^RUNNING pid') { $ok = $false }
     # The state line has to still END with its last segment, which is what
     # proves the whole line fits the width instead of being cut short.
@@ -191,15 +510,23 @@ function Invoke-CamCheckStrip {
     if ($joined -notmatch 'relay UP') { $ok = $false }
     if ($joined -notmatch '(?m)^\S.*\s+relay\s') { $ok = $false }
     if ($joined -notmatch '(?m)^\S.*\s+direct\s') { $ok = $false }
+    # The two sections C2b added have to actually be on the strip, with their
+    # figures, not just their labels.
+    if ($joined -notmatch '(?m)^EVENTS\s+\d{2}:\d{2}:\d{2} ') { $ok = $false }
+    if ($joined -notmatch '(?m)^ARCHIVE\s+\d{2}-\d{2} \d{2}:\d{2} -> \d{2}-\d{2} \d{2}:\d{2} \(2\.2d\)\s+88\.4 GB in 412 file') { $ok = $false }
+    if ($joined -notmatch '(?m)^TREND\s+99\.7 GB/day\s+2\.8d left\s+pruned 128 file') { $ok = $false }
+    # An event older than the newest must come second: newest first is what
+    # makes a three-line window worth reading.
+    if ($joined -notmatch '(?ms)^EVENTS\s+\d{2}:\d{2}:\d{2} prune:.*\n\s+\d{2}:\d{2}:\d{2} watchdog ') { $ok = $false }
     $evidence += ("healthy: exit {0}, {1} row(s), widest {2} col(s)" -f $render.ExitCode, $lines.Count, $widest)
     $evidence += @($lines | ForEach-Object { '  ' + $_.TrimEnd() })
 
     # --- stale: a clean shutdown is recorded, so no supervisor is behind it
     Set-Fixture -Document (New-Fixture -State 'stopped' -UpdatedAt ([DateTime]::Now.AddMinutes(-9)) -SupervisorPid $PID -RelayAlive $false)
-    $render = Invoke-CamTestScript -Path $sandbox.Health -Arguments @('-Once', '-Rows', '8', '-Width', '120')
+    $render = Invoke-CamTestScript -Path $sandbox.Health -Arguments @('-Once', '-Rows', '15', '-Width', '207')
     $staleLines = @($render.Output -split "`r?`n")
     if ($staleLines.Count -gt 0 -and $staleLines[-1] -eq '') { $staleLines = $staleLines[0..($staleLines.Count - 2)] }
-    if ($staleLines.Count -ne 8) { $ok = $false }
+    if ($staleLines.Count -ne 15) { $ok = $false }
     if ($staleLines[0] -notmatch '^STALE - NO SUPERVISOR') { $ok = $false }
     if ($staleLines[0].TrimEnd() -notmatch 'last known free [\d.]+ GB \(reserve [\d.]+\)$') { $ok = $false }
     $evidence += ("stale: exit {0}, {1} row(s)" -f $render.ExitCode, $staleLines.Count)
@@ -207,13 +534,13 @@ function Invoke-CamCheckStrip {
 
     # --- no status file at all
     Remove-Item -LiteralPath $statusPath -Force
-    $render = Invoke-CamTestScript -Path $sandbox.Health -Arguments @('-Once', '-Rows', '8', '-Width', '120')
+    $render = Invoke-CamTestScript -Path $sandbox.Health -Arguments @('-Once', '-Rows', '15', '-Width', '207')
     $missingLines = @($render.Output -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
     if ($missingLines.Count -eq 0 -or $missingLines[0] -notmatch '^NO STATUS FILE') { $ok = $false }
     $evidence += ("no status file: {0}" -f $missingLines[0].TrimEnd())
 
     Add-CamTestResult -Run $Run -Check 'strip' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
-        -Message 'cam.health.ps1 renders 8 rows within 120 columns, and says so when the snapshot is stale or absent' `
+        -Message 'cam.health.ps1 renders 15 rows within 207 columns with every section, and says so when the snapshot is stale or absent' `
         -Evidence $evidence
 }
 
@@ -409,7 +736,10 @@ foreach ($check in $Checks) {
         'parse'      { Invoke-CamCheckParse      -Run $run }
         'cameralist' { Invoke-CamCheckCameraList -Run $run }
         'selftest'   { Invoke-CamCheckSelfTest   -Run $run }
+        'layout'     { Invoke-CamCheckLayout     -Run $run }
         'strip'      { Invoke-CamCheckStrip      -Run $run }
+        'sections'   { Invoke-CamCheckSections   -Run $run }
+        'autostart'  { Invoke-CamCheckAutostart  -Run $run }
         'leak'       { Invoke-CamCheckLeak       -Run $run }
         'procs'      { Invoke-CamCheckProcs      -Run $run }
         'relay'      { Invoke-CamCheckRelay      -Run $run }
