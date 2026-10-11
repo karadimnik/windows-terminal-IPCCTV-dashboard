@@ -175,7 +175,7 @@ Segments are 15 minutes and aligned to the clock, give or take: a stream copy ca
 
 The pruner runs every `PruneIntervalSeconds` and watches free space rather than age. When free space falls below `ReserveGB` it deletes oldest-first until `ReserveGB + PruneHysteresisGB` is free, which stops it thrashing at the boundary. It never deletes the segment being written. Set `MaxRetentionDays` if you also want an age cap.
 
-Six cameras at `stream1` measured about 92.6 GB per day here, so plan on roughly three days per 300 GB of free space. `-Status` and the health strip both print the measured rate and the days of headroom left.
+Six cameras at `stream1` measured between 92 and 100 GB per day here, so plan on roughly three days per 300 GB of free space. `-Status` and the health strip both print the measured rate and the days of headroom left.
 
 ### Transport: the relay
 

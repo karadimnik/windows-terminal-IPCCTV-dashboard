@@ -69,7 +69,8 @@ exact codec and consumer shape we have - so the restreamer must be proven, not a
 
 ## Phase D - Documentation and handover
 
-- [ ] **[14]** README recording section incl. self-test procedure and all known limitations.
+- [x] **[14]** DONE Phase D. README rewritten end to end: install order, command reference for all
+      four entry points, how it works, every config key, twelve known limitations, the screenshot.
 - [ ] **[15]** Commit to `executor/recording-feature`. No merge, no push without approval.
 
 ## Deferred
@@ -121,8 +122,9 @@ srt/moq - transport fan-out only, never a media server, never a recorder.
       Never executed - the Phase B agent was forbidden from touching cameras.
 - [ ] **[24]** Untested over time: log rotation at `LogMaxBytes`, the 900 s production segment path,
       `HealthyResetSeconds` backoff reset, the real 2250 s stall threshold, `MaxRetentionDays`.
-- [ ] **[25]** `recorder.config.example.json` lacks `StatusIntervalSeconds`, `ArchiveScanSeconds`,
-      `StopTimeoutSeconds`. Document in the Phase D README.
+- [x] **[25]** DONE Phase D: the README's configuration tables list every key with its default and
+      mark the ones absent from `recorder.config.example.json` with a star, including
+      `StatusIntervalSeconds`, `ArchiveScanSeconds` and `StopTimeoutSeconds`.
 
 ## Phase C1 delivered 2026-10-11 - advisor rulings
 
@@ -161,9 +163,9 @@ so a rewrite can never again produce a whole-file diff. PS 5.1 reads LF `.ps1` f
 - [x] **[26]** DONE C2a, and the premise was wrong: **the DPAPI credential works**. MediaMTX pulled
       all six cameras (`stream is available and online, 2 tracks (H264, G711)`), so D1/D2/D3/D6 are
       proven - see "Phase C2a delivered" below. Nothing is credential-blocked.
-- [ ] **[27]** README must document the MediaMTX download and `C:\mediamtx\` placement, plus the
-      transition state in [28] below.
-- [ ] **[28]** README line: if the dashboard AND recorder are both already on direct inputs, both
+- [x] **[27]** DONE Phase D. Prerequisites document the download, the `C:\mediamtx\` placement, the
+      verified v1.21.2 and why it must not go in Program Files.
+- [x] **[28]** DONE Phase D, known limitation 2: if the dashboard AND recorder are both already on direct inputs, both
       camera slots are taken and MediaMTX can never pull. Restarting either consumer resolves it.
 - [ ] **[29]** TECHNICAL DEBT, after the feature is verified, never mid-feature: `cam.recorder.ps1` is
       now 3,228 lines / 140 KB in one file and is a measurable tax on every edit (exact-match patching
@@ -215,7 +217,7 @@ strip drift. Flagged as a deliberate deviation.
       reports it as `N path(s)` and tells relay from direct per camera with `InputMode`, which is
       honest, but a reader could misread the count as readiness. Consider a `ReadyPaths` count in a
       later phase; do not have the strip probe the API for it.
-- [ ] **[33]** The harness leaves its sandbox under `%TEMP%\cam-tests\<name>` and its evidence under
+- [x] **[33]** DONE Phase D, known limitation 9. The harness leaves its sandbox under `%TEMP%\cam-tests\<name>` and its evidence under
       `%TEMP%\cam-tests\evidence` on purpose, for inspection. The credential copy is deleted; real
       footage from a live run is not. Mention the cleanup in the Phase D README.
 
@@ -252,13 +254,54 @@ sites would have been forty edits for a worse result. The strip still reads exac
 
 ## Carried forward after C2b
 
-- [ ] **[34]** COSMETIC: the strip paints x 6..1906 of 1920, so about 6 px of desktop shows at its
+- [x] **[34]** NOT FIXED, DOCUMENTED Phase D as known limitation 11. The Operator accepted the
+      sliver rather than replacing the terminal with a custom window host. The strip paints
+      x 6..1906 of 1920, so about 6 px of desktop shows at its
       left edge and 13 px at its right. Top and bottom are exact and no video is affected. It cannot
       be closed while the strip is a Windows Terminal window, because covering the full width needs
       a window rect wider than the screen and that is exactly what makes WT mis-size itself.
-- [ ] **[35]** The autostart task points at `\\wsl.localhost\...` when the repo lives in WSL, and that
+- [x] **[35]** DONE Phase D, and the repo does NOT move. `-InstallAutostart` now writes a launcher
+      at `%LOCALAPPDATA%\IPCCTV\start-recorder.ps1` that polls for the recorder path for up to
+      300 s, logs to `autostart.log` beside it, then forwards to `cam.recorder.ps1 -Run`. It
+      never copies the scripts. The task points at the launcher and `-RemoveAutostart` deletes
+      both. Known limitation 10 states the remaining WSL dependency. Original note: the task
+      points at `\\wsl.localhost\...` when the repo lives in WSL, and that
       path does not exist until WSL is running. `-InstallAutostart` warns about it. The README should
       tell the Operator to copy the scripts to a local drive before relying on autostart.
-- [ ] **[36]** The logon task has no restart-on-failure: if the supervisor process dies the task does
+- [x] **[36]** DONE Phase D: the task registers `-RestartCount 3 -RestartInterval 1 minute`,
+      verified in the exported XML (`<RestartOnFailure><Interval>PT1M</Interval><Count>3</Count>`).
+      Original note: the logon task had no restart-on-failure, so if the supervisor process died the task did
       not bring it back until the next logon. Deliberately out of C2b's scope. Consider
       `-RestartCount`/`-RestartInterval` in a later phase.
+
+
+## Phase D delivered 2026-10-11 - the fixes and the README
+
+**mpv is quiet and `stimeout` is gone.** `--msg-level=all=error` keeps mpv's chatter out of the 8 px
+gutter, which shows the terminal window behind the feeds; real errors and the pane loop's `Stream
+interrupted` message still print. `stimeout=6000000` was removed from `$Flags` because it never did
+anything: libavformat renamed it to `timeout` at ffmpeg 5.0, mpv ships `avformat-63.dll`, and the
+option was silently dropped. The comment claiming it was what made mpv exit on a frozen stream is
+corrected in the script and in the README - `timeout=5000000` plus `--network-timeout=3` are what
+protect. Before and after are visible in the same 50 px crop of the gutter: the old shot reads
+`File tags:` and `VO: [gpu-next] 2560x1440 yuv420p`, the new one is a clean dark band.
+
+**Autostart goes through a launcher now.** The task points at
+`%LOCALAPPDATA%\IPCCTV\start-recorder.ps1`, generated at install, which polls for the recorder's
+path for up to 300 s, logs to `autostart.log` beside it, then forwards to `cam.recorder.ps1 -Run`.
+It forwards and never copies, so it cannot drift. Giving up with exit 2 is deliberate: that is what
+hands the problem to the task's new restart-on-failure policy. The repo did not move.
+
+**The screenshot is real, not a fixture.** `docs/dashboard.png` was taken with a live supervisor:
+six recorders writing off the relay, the strip reporting that supervisor's own state, events and
+archive. Reduced to a 256-colour palette, 894 KB instead of 2.4 MB, strip text unchanged.
+
+## Carried forward after Phase D
+
+- [ ] **[29]** TECHNICAL DEBT, unchanged and now due: `cam.recorder.ps1` is 3,432 lines. The feature
+      is complete and green, so the split can be commissioned.
+- [ ] **[32]** `Restreamer.Paths` still counts CONFIGURED paths, not READY ones. Documented as README
+      limitation 12 rather than fixed.
+- [ ] **[23]/[24]** The long-run paths named in [24] remain unexercised: log rotation at
+      `LogMaxBytes`, the full 900 s segment, `HealthyResetSeconds`, the 2250 s stall watchdog,
+      `MaxRetentionDays`. README limitation 7 says so plainly.
