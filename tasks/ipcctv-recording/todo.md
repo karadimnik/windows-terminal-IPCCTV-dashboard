@@ -60,9 +60,12 @@ exact codec and consumer shape we have - so the restreamer must be proven, not a
 - [x] **[11]** `cam.health.ps1` strip renderer. Delivered C2a: 8 rows x 120 cols, reads only
       `status.json`, per-camera `InputMode`, explicit staleness warning. Rendered against a real
       live status file and against a stopped one.
-- [ ] **[12]** Modify `mpv.cam.autolayout.autorestart.ps1` - reserve the strip, launch the named
-      health window, keep camera geometry derived from camera count only, reuse `cam.common.ps1`.
-- [ ] **[13]** `-InstallAutostart` / `-RemoveAutostart` logon Scheduled Task.
+- [x] **[12]** DONE C2b. `Get-CamDashboardLayout` in `cam.common.ps1` decides the grid and the strip;
+      the dashboard launches `cam.health.ps1` into its own `cctv-health` Windows Terminal window and
+      sizes it with `SetWindowPos`. Measured on screen: 640x360 panes, 8 px gutter between the rows
+      only, strip 1913x296 at y 736.
+- [x] **[13]** DONE C2b. `-InstallAutostart` / `-RemoveAutostart`, unelevated, idempotent, covered by
+      the `autostart` harness check.
 
 ## Phase D - Documentation and handover
 
@@ -205,9 +208,9 @@ strip drift. Flagged as a deliberate deviation.
 
 ## Carried forward after C2a
 
-- [ ] **[31]** The strip truncates the stale reason mid-word at 42 chars
-      (`the supervisor recorded a clean shutdow...`). Cosmetic, inside a 120-column budget that is
-      otherwise exact. Fix only if C2b's real strip width differs from 120.
+- [x] **[31]** DONE C2b. The real strip is 207 columns, not 120, so the stale reason now gets
+      whatever the fixed parts of the state line leave rather than a fixed 42 chars. The whole
+      sentence is readable.
 - [ ] **[32]** `Restreamer.Paths` in `status.json` lists CONFIGURED paths, not READY ones. The strip
       reports it as `N path(s)` and tells relay from direct per camera with `InputMode`, which is
       honest, but a reader could misread the count as readiness. Consider a `ReadyPaths` count in a
@@ -215,3 +218,47 @@ strip drift. Flagged as a deliberate deviation.
 - [ ] **[33]** The harness leaves its sandbox under `%TEMP%\cam-tests\<name>` and its evidence under
       `%TEMP%\cam-tests\evidence` on purpose, for inspection. The credential copy is deleted; real
       footage from a live run is not. Mention the cleanup in the Phase D README.
+
+
+## Phase C2b delivered 2026-10-11 - the strip is reserved, placed and measured on screen
+
+**Geometry, measured from a screenshot of the running dashboard, not computed.** Video ends at
+y=359, a uniform 8 px band runs y=360..367, video resumes at y=368 and ends at y=727; another 8 px
+band to y=735; the strip's painted top border is at y=736 and its bottom at y=1031, which is the
+last row of the 1032 px working area. All six mpv windows report `vis == winrect == 640x360` at
+(0,0) (640,0) (1280,0) (0,368) (640,368) (1280,368) - `--no-border` mpv has no DWM inset, so the
+feeds really are full-bleed with no gap at the left, right or top edge.
+
+**Three Windows mechanics that had to be measured, and are now encoded in the script:**
+- A resizable window's rect includes an invisible DWM resize border, 7 px here on each side and the
+  bottom. Sizing the window rect to the strip leaves a visible gap along the bottom of the screen.
+  The placement iterates on the difference between `GetWindowRect` and
+  `DWMWA_EXTENDED_FRAME_BOUNDS`, so it also self-corrects under a different theme or DPI.
+- Windows Terminal mis-sizes itself when the window rect runs past the right edge of the screen: a
+  request for 1934x303 at x=-7 came back as 1936x563. The width is clamped to the screen edge, not
+  the position, so no text is pushed off the left. The cost is the one open cosmetic item below.
+- `wt --focus` drops the tab bar and is worth two text rows: the same 1913x296 window carries 208x15
+  cells with it and 208x13 without.
+
+**`schtasks /create /sc onlogon` is denied to a standard user**, in the root folder and in a
+subfolder alike. `Register-ScheduledTask` with a per-user `LogonTrigger` and an interactive, limited
+principal succeeds unelevated, which is what `-InstallAutostart` uses. `schtasks /query` reads it
+back fine either way.
+
+**The events section reads the supervisor log's tail, published by `Write-CamStatusFile`**, rather
+than a new in-memory ring. The log is already timestamped and redacted, is only written when
+something happens, and survives a supervisor restart; instrumenting the forty `Write-CamLog` call
+sites would have been forty edits for a worse result. The strip still reads exactly one file.
+
+## Carried forward after C2b
+
+- [ ] **[34]** COSMETIC: the strip paints x 6..1906 of 1920, so about 6 px of desktop shows at its
+      left edge and 13 px at its right. Top and bottom are exact and no video is affected. It cannot
+      be closed while the strip is a Windows Terminal window, because covering the full width needs
+      a window rect wider than the screen and that is exactly what makes WT mis-size itself.
+- [ ] **[35]** The autostart task points at `\\wsl.localhost\...` when the repo lives in WSL, and that
+      path does not exist until WSL is running. `-InstallAutostart` warns about it. The README should
+      tell the Operator to copy the scripts to a local drive before relying on autostart.
+- [ ] **[36]** The logon task has no restart-on-failure: if the supervisor process dies the task does
+      not bring it back until the next logon. Deliberately out of C2b's scope. Consider
+      `-RestartCount`/`-RestartInterval` in a later phase.
