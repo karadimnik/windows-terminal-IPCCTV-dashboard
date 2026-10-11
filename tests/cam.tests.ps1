@@ -311,15 +311,18 @@ function Invoke-CamCheckSections {
 function Invoke-CamCheckAutostart {
     <#
         The logon Scheduled Task, end to end: install, reinstall, remove,
-        remove again.
+        remove again - plus the launcher stub the task actually points at.
 
-        Skipped rather than run if a task of that name already exists, because
-        that would be the Operator's real autostart and this check would
-        rewrite and then delete it.
+        Skipped rather than run if a task of that name, or a launcher at that
+        path, already exists: that would be the Operator's real autostart and
+        this check would rewrite and then delete it.
     #>
     param($Run)
 
     $taskName = 'IPCCTV-Recorder'
+    $stubDir = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'IPCCTV'
+    $stubPath = Join-Path -Path $stubDir -ChildPath 'start-recorder.ps1'
+    $stubLogPath = Join-Path -Path $stubDir -ChildPath 'autostart.log'
 
     if (-not (Get-Command -Name 'Get-ScheduledTask' -ErrorAction SilentlyContinue)) {
         Add-CamTestResult -Run $Run -Check 'autostart' -Status 'SKIP' `
@@ -329,6 +332,11 @@ function Invoke-CamCheckAutostart {
     if (@(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).Count -gt 0) {
         Add-CamTestResult -Run $Run -Check 'autostart' -Status 'SKIP' `
             -Message ("a task named {0} is already registered, which would be the Operator's own autostart" -f $taskName)
+        return
+    }
+    if (Test-Path -LiteralPath $stubPath) {
+        Add-CamTestResult -Run $Run -Check 'autostart' -Status 'SKIP' `
+            -Message ("a launcher already exists at {0}, which would be the Operator's own autostart" -f $stubPath)
         return
     }
 
@@ -362,7 +370,9 @@ function Invoke-CamCheckAutostart {
             $account = [Security.Principal.WindowsIdentity]::GetCurrent().Name
             $evidence += ("registered: state {0}, {1} trigger(s)" -f $task.State, @($task.Triggers).Count)
             foreach ($needle in @('<LogonTrigger>', ('<UserId>' + $account + '</UserId>'), '<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>',
-                    '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>', 'cam.recorder.ps1', '-Run')) {
+                    '<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
+                    '<RestartOnFailure>', '<Count>3</Count>', '<Interval>PT1M</Interval>',
+                    'start-recorder.ps1')) {
                 $found = ($xml -like ('*' + $needle + '*'))
                 $evidence += ("  task XML contains {0}: {1}" -f $needle, $found)
                 if (-not $found) { $ok = $false }
@@ -373,6 +383,65 @@ function Invoke-CamCheckAutostart {
                 $ok = $false
                 $evidence += 'FAIL: the task asks for elevation'
             }
+            # The task must NOT point at the recorder directly any more: a
+            # \\wsl.localhost path is not resolvable at logon, which is the
+            # whole reason the launcher exists.
+            if ($xml -like '*cam.recorder.ps1*') {
+                $ok = $false
+                $evidence += 'FAIL: the task points straight at cam.recorder.ps1 instead of the launcher'
+            }
+        }
+
+        # The launcher itself: present, forwarding to this sandbox's recorder,
+        # and a forwarder rather than a copy of it.
+        if (-not (Test-Path -LiteralPath $stubPath)) {
+            $ok = $false
+            $evidence += ("FAIL: no launcher was written at {0}" -f $stubPath)
+        }
+        else {
+            $stub = Get-Content -LiteralPath $stubPath -Raw
+            $stubBytes = (Get-Item -LiteralPath $stubPath).Length
+            $evidence += ("launcher written: {0} ({1} bytes)" -f $stubPath, $stubBytes)
+            foreach ($needle in @($sandbox.Recorder, '-Run', 'Test-StubTarget', 'Start-Sleep')) {
+                $found = ($stub -like ('*' + $needle + '*'))
+                $evidence += ("  launcher contains {0}: {1}" -f $needle, $found)
+                if (-not $found) { $ok = $false }
+            }
+            if ($stubBytes -gt 8KB) {
+                $ok = $false
+                $evidence += 'FAIL: the launcher is big enough to be a copy of the recorder rather than a forwarder'
+            }
+
+            # The retry path, exercised rather than read: pointed at a path that
+            # does not exist, with the wait collapsed, it must give up non-zero
+            # after polling instead of hanging or sailing on.
+            $retryStub = Join-Path -Path $sandbox.Dir -ChildPath 'retry-stub.ps1'
+            $missing = Join-Path -Path $sandbox.Dir -ChildPath 'not-there\cam.recorder.ps1'
+            $retryLog = Join-Path -Path $sandbox.Dir -ChildPath 'retry.log'
+            # The copy logs into the sandbox, not into the Operator's own
+            # launcher log: a test must not write to the file he reads when
+            # autostart failed for real.
+            $retryBody = $stub.
+                Replace(("'" + $sandbox.Recorder + "'"), ("'" + $missing + "'")).
+                Replace(("'" + $stubLogPath + "'"), ("'" + $retryLog + "'")).
+                Replace('$TimeoutSeconds = 300', '$TimeoutSeconds = 6').
+                Replace('$PollSeconds    = 5', '$PollSeconds    = 2')
+            if ($retryBody -like ('*' + $stubLogPath + '*')) {
+                $ok = $false
+                $evidence += 'FAIL: the retry copy still points at the real launcher log'
+            }
+            Set-Content -LiteralPath $retryStub -Value $retryBody -Encoding UTF8
+            $retry = Invoke-CamTestScript -Path $retryStub -Arguments @()
+            $evidence += ("launcher against a missing target: exit {0}" -f $retry.ExitCode)
+            $evidence += @($retry.Output -split "`r?`n" | Where-Object { $_.Trim() } | ForEach-Object { '  ' + $_.TrimEnd() })
+            if ($retry.ExitCode -ne 2) {
+                $ok = $false
+                $evidence += 'FAIL: the launcher did not give up with exit 2 after its bounded wait'
+            }
+            if ($retry.Output -notlike '*did not appear within 6s*') {
+                $ok = $false
+                $evidence += 'FAIL: the launcher did not report the bounded wait it gave up on'
+            }
         }
 
         $again = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-InstallAutostart')
@@ -382,8 +451,10 @@ function Invoke-CamCheckAutostart {
 
         $remove = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-RemoveAutostart')
         $left = @(Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue).Count
-        $evidence += ("-RemoveAutostart: exit {0}, {1} task(s) left" -f $remove.ExitCode, $left)
+        $stubLeft = Test-Path -LiteralPath $stubPath
+        $evidence += ("-RemoveAutostart: exit {0}, {1} task(s) left, launcher still there: {2}" -f $remove.ExitCode, $left, $stubLeft)
         if ($remove.ExitCode -ne 0 -or $left -ne 0) { $ok = $false; $evidence += 'FAIL: the task was not removed' }
+        if ($stubLeft) { $ok = $false; $evidence += 'FAIL: the launcher was not removed' }
 
         $twice = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-RemoveAutostart')
         $evidence += ("-RemoveAutostart again: exit {0}" -f $twice.ExitCode)
@@ -395,10 +466,14 @@ function Invoke-CamCheckAutostart {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             $evidence += 'cleanup: unregistered a task the check left behind'
         }
+        if (Test-Path -LiteralPath $stubPath) {
+            Remove-Item -LiteralPath $stubPath -Force -ErrorAction SilentlyContinue
+            $evidence += 'cleanup: deleted a launcher the check left behind'
+        }
     }
 
     Add-CamTestResult -Run $Run -Check 'autostart' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
-        -Message 'the logon task installs unelevated, is idempotent on reinstall, and removing it is a clean no-op when it is not there' `
+        -Message 'the logon task installs unelevated with restart-on-failure, points at a launcher that waits for the recorder path and gives up non-zero, is idempotent on reinstall, and removing it takes the launcher with it' `
         -Evidence $evidence
 }
 

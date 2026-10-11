@@ -463,6 +463,21 @@ function Invoke-CamRemoveRestreamer {
 
 $script:CamAutostartTaskName = 'IPCCTV-Recorder'
 
+# The Scheduled Task does not point at cam.recorder.ps1 directly. It points at a
+# small generated launcher on a local Windows path, because the repo can live on
+# \\wsl.localhost, which does not resolve until WSL's file server is up - and
+# that is not true at logon. A task cannot wait for a path; the stub can.
+$script:CamAutostartStubDir = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'IPCCTV'
+$script:CamAutostartStubPath = Join-Path -Path $script:CamAutostartStubDir -ChildPath 'start-recorder.ps1'
+$script:CamAutostartStubLogPath = Join-Path -Path $script:CamAutostartStubDir -ChildPath 'autostart.log'
+# How long the stub waits for the recorder's path, and how often it looks.
+$script:CamAutostartWaitSeconds = 300
+$script:CamAutostartPollSeconds = 5
+# Restart-on-failure for the task itself: a supervisor that dies should come
+# back without waiting for the next logon.
+$script:CamAutostartRestartCount = 3
+$script:CamAutostartRestartMinutes = 1
+
 
 function Get-CamAutostartTask {
     <# The registered task, or $null. Never throws. #>
@@ -480,6 +495,112 @@ function Get-CamAutostartAccount {
 }
 
 
+function New-CamAutostartStub {
+    <#
+        Writes the launcher the Scheduled Task runs, and returns its path.
+
+        The stub polls for the real cam.recorder.ps1 until its path resolves,
+        logs what happened, then invokes it. It FORWARDS, never copies: a local
+        copy of the scripts would drift from the repo silently.
+
+        Overwritten on every install, deleted by -RemoveAutostart, and not
+        meant to be edited by hand.
+
+        Exiting non-zero when the wait runs out is deliberate. It is what lets
+        the task's restart-on-failure policy try the whole thing again, which is
+        the right answer when WSL simply was not up yet.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$TargetScript
+    )
+
+    # Every substituted value lands inside a single-quoted literal in the
+    # generated file, so a single quote in a path has to be doubled.
+    $template = @'
+# IPCCTV recorder autostart launcher - GENERATED FILE, do not edit.
+# Written by cam.recorder.ps1 -InstallAutostart, deleted by -RemoveAutostart.
+#
+# Why it exists: the recorder can live on a path that is not there yet when the
+# logon task fires (\\wsl.localhost resolves only once WSL is running). This
+# waits for the path, then forwards to the real script. It holds no copy of it.
+
+$Target         = '__TARGET__'
+$LogPath        = '__LOG__'
+$TimeoutSeconds = __TIMEOUT__
+$PollSeconds    = __POLL__
+
+function Write-StubLog {
+    param([string]$Message)
+    $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+    try {
+        $dir = Split-Path -Path $LogPath -Parent
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+    }
+    catch { }
+    Write-Host $line
+}
+
+function Test-StubTarget {
+    # A path on a share that is not up can fail rather than answer false.
+    try { return [bool](Test-Path -LiteralPath $Target) } catch { return $false }
+}
+
+Write-StubLog ('launcher starting, waiting up to {0}s for {1}' -f $TimeoutSeconds, $Target)
+
+$waited = 0
+while (-not (Test-StubTarget)) {
+    if ($waited -ge $TimeoutSeconds) {
+        Write-StubLog ('FAILED: {0} did not appear within {1}s. If that is a \\wsl.localhost path, WSL was not running. Exiting 2 so the task restart policy tries again.' -f $Target, $TimeoutSeconds)
+        exit 2
+    }
+    Start-Sleep -Seconds $PollSeconds
+    $waited += $PollSeconds
+}
+
+Write-StubLog ('target resolved after {0}s, starting the supervisor' -f $waited)
+
+& $Target -Run
+$code = $LASTEXITCODE
+if ($null -eq $code) { $code = 0 }
+Write-StubLog ('the supervisor exited with {0}' -f $code)
+exit $code
+'@
+
+    $body = $template.
+        Replace('__TARGET__', $TargetScript.Replace("'", "''")).
+        Replace('__LOG__', $script:CamAutostartStubLogPath.Replace("'", "''")).
+        Replace('__TIMEOUT__', [string]$script:CamAutostartWaitSeconds).
+        Replace('__POLL__', [string]$script:CamAutostartPollSeconds)
+
+    if (-not (Test-Path -LiteralPath $script:CamAutostartStubDir)) {
+        New-Item -ItemType Directory -Path $script:CamAutostartStubDir -Force | Out-Null
+    }
+    Set-Content -LiteralPath $script:CamAutostartStubPath -Value $body -Encoding UTF8
+    return $script:CamAutostartStubPath
+}
+
+
+function Remove-CamAutostartStub {
+    <#
+        Deletes the generated launcher. Returns $true if there was one.
+
+        The launcher's log is deliberately left behind: it is the only record of
+        a logon start that failed, and it is the first thing to read when
+        autostart did not work. Its folder goes only when it is empty, so an
+        install and removal with nothing logged leaves no trace at all.
+    #>
+    if (-not (Test-Path -LiteralPath $script:CamAutostartStubPath)) { return $false }
+    Remove-Item -LiteralPath $script:CamAutostartStubPath -Force
+    if (-not @(Get-ChildItem -LiteralPath $script:CamAutostartStubDir -Force -ErrorAction SilentlyContinue).Count) {
+        Remove-Item -LiteralPath $script:CamAutostartStubDir -Force -ErrorAction SilentlyContinue
+    }
+    return $true
+}
+
+
 function Invoke-CamInstallAutostart {
     <#
         Registers a Scheduled Task that starts the supervisor at logon as the
@@ -488,11 +609,15 @@ function Invoke-CamInstallAutostart {
         Idempotent: -Force replaces the registration rather than adding a
         second task, so running this twice leaves exactly one.
 
-        Two settings are not defaults and are load-bearing for a 24/7 recorder:
-        ExecutionTimeLimit zero, because the default three-day limit would
-        otherwise kill the supervisor on day three, and MultipleInstances
+        Three settings are not defaults and are load-bearing for a 24/7
+        recorder: ExecutionTimeLimit zero, because the default three-day limit
+        would otherwise kill the supervisor on day three; MultipleInstances
         IgnoreNew, so a second logon cannot start a second supervisor competing
-        for the same two camera slots.
+        for the same two camera slots; and restart-on-failure, so a supervisor
+        that dies comes back in a minute instead of at the next logon.
+
+        The task runs the generated launcher, not cam.recorder.ps1 itself. See
+        New-CamAutostartStub for why.
     #>
     param([Parameter(Mandatory = $true)]$Config)
 
@@ -508,8 +633,10 @@ function Invoke-CamInstallAutostart {
         throw "Cannot find $scriptPath to point the task at."
     }
 
+    $stubPath = New-CamAutostartStub -TargetScript $scriptPath
+
     $powershell = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -Run' -f $scriptPath)
+    $arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $stubPath)
     $account = Get-CamAutostartAccount
 
     $existing = Get-CamAutostartTask
@@ -518,7 +645,9 @@ function Invoke-CamInstallAutostart {
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
     $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
+        -RestartCount $script:CamAutostartRestartCount `
+        -RestartInterval (New-TimeSpan -Minutes $script:CamAutostartRestartMinutes)
 
     $task = Register-ScheduledTask -TaskName $script:CamAutostartTaskName -Action $action `
         -Trigger $trigger -Principal $principal -Settings $settings `
@@ -532,18 +661,23 @@ function Invoke-CamInstallAutostart {
     }
 
     Write-CamHost -Message ("  runs      {0} {1}" -f $powershell, $arguments)
+    Write-CamHost -Message ("  launcher  {0}" -f $stubPath)
+    Write-CamHost -Message ("  forwards  {0} -Run (waits up to {1}s for that path)" -f $scriptPath, $script:CamAutostartWaitSeconds)
+    Write-CamHost -Message ("  log       {0}" -f $script:CamAutostartStubLogPath)
     Write-CamHost -Message ("  as        {0} (interactive token, no elevation)" -f $account)
     Write-CamHost -Message ("  trigger   at logon of {0}" -f $account)
-    Write-CamHost -Message  '  limits    no execution time limit, a second instance is ignored'
+    Write-CamHost -Message ("  limits    no execution time limit, a second instance is ignored, restart up to {0}x every {1} min on failure" -f $script:CamAutostartRestartCount, $script:CamAutostartRestartMinutes)
     Write-CamHost -Message ("  state     {0}" -f $task.State)
     Write-CamHost -Message ("  registered task(s) with this name: {0}" -f @(Get-ScheduledTask -TaskName $script:CamAutostartTaskName -ErrorAction SilentlyContinue).Count)
 
     if ($scriptPath.StartsWith('\\')) {
         Write-CamHost -Message ''
-        Write-CamHost -Message ("WARNING: the task points at a network path ({0})." -f $scriptPath) -Colour 'Yellow'
-        Write-CamHost -Message '         A \\wsl.localhost path exists only while WSL is running, so at logon the' -Colour 'Yellow'
-        Write-CamHost -Message '         task can start before the share is there and fail. Copy the scripts to a' -Colour 'Yellow'
-        Write-CamHost -Message '         local drive before relying on autostart.' -Colour 'Yellow'
+        Write-CamHost -Message ("WARNING: the recorder lives on a network path ({0})." -f $scriptPath) -Colour 'Yellow'
+        Write-CamHost -Message '         A \\wsl.localhost path exists only while WSL is running, so at logon it may' -Colour 'Yellow'
+        Write-CamHost -Message ("         not be there yet. The launcher polls for it for up to {0}s and the task" -f $script:CamAutostartWaitSeconds) -Colour 'Yellow'
+        Write-CamHost -Message '         retries after that, but recording only starts once WSL is up. Nothing' -Colour 'Yellow'
+        Write-CamHost -Message '         records while that path is unreachable, and the wait is logged at' -Colour 'Yellow'
+        Write-CamHost -Message ("         {0}." -f $script:CamAutostartStubLogPath) -Colour 'Yellow'
     }
 
     Write-CamHost -Message ''
@@ -554,9 +688,12 @@ function Invoke-CamInstallAutostart {
 
 function Invoke-CamRemoveAutostart {
     <#
-        Unregisters the logon task. A clean no-op when nothing is installed:
-        Unregister-ScheduledTask throws on a missing task, so the task is
-        looked up first.
+        Unregisters the logon task and deletes the generated launcher. A clean
+        no-op when neither is there: Unregister-ScheduledTask throws on a
+        missing task, so the task is looked up first.
+
+        The launcher's log file is left behind on purpose - see
+        Remove-CamAutostartStub.
     #>
     param([Parameter(Mandatory = $true)]$Config)
 
@@ -564,18 +701,31 @@ function Invoke-CamRemoveAutostart {
     Write-CamHost -Message '=== remove the logon autostart task ===' -Colour 'Cyan'
 
     $existing = Get-CamAutostartTask
-    if (-not $existing) {
-        Write-CamHost -Message ("nothing to remove: no task named '{0}' is registered" -f $script:CamAutostartTaskName) -Colour 'Yellow'
-        return
+    if ($existing) {
+        Unregister-ScheduledTask -TaskName $script:CamAutostartTaskName -Confirm:$false
+        $left = @(Get-ScheduledTask -TaskName $script:CamAutostartTaskName -ErrorAction SilentlyContinue).Count
+        if ($left -ne 0) {
+            throw "Unregistered '$($script:CamAutostartTaskName)' but $left task(s) with that name are still registered."
+        }
+        Write-CamHost -Message ("removed the task '{0}'" -f $script:CamAutostartTaskName) -Colour 'Green'
+    }
+    else {
+        Write-CamHost -Message ("no task named '{0}' is registered" -f $script:CamAutostartTaskName) -Colour 'Yellow'
     }
 
-    Unregister-ScheduledTask -TaskName $script:CamAutostartTaskName -Confirm:$false
-    $left = @(Get-ScheduledTask -TaskName $script:CamAutostartTaskName -ErrorAction SilentlyContinue).Count
-    if ($left -ne 0) {
-        throw "Unregistered '$($script:CamAutostartTaskName)' but $left task(s) with that name are still registered."
+    if (Remove-CamAutostartStub) {
+        Write-CamHost -Message ("removed the launcher '{0}'" -f $script:CamAutostartStubPath) -Colour 'Green'
+    }
+    else {
+        Write-CamHost -Message ("no launcher at '{0}'" -f $script:CamAutostartStubPath) -Colour 'Yellow'
     }
 
-    Write-CamHost -Message ("removed the task '{0}'" -f $script:CamAutostartTaskName) -Colour 'Green'
+    if (Test-Path -LiteralPath $script:CamAutostartStubLogPath) {
+        Write-CamHost -Message ("kept the launcher log '{0}' - delete it by hand if you do not want it" -f $script:CamAutostartStubLogPath)
+    }
+
+    if (-not $existing) { return }
+
     Write-CamHost -Message 'A supervisor that is running now keeps running. Stop it with -Stop.'
 }
 
