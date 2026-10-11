@@ -384,8 +384,18 @@ $Host.UI.RawUI.WindowTitle = 'cam.health'
 # 2. Define the exact text overlay & flags
 $OverlayOpts = "--osd-level=1 --osd-msg1='Traffic: `${video-bitrate}'"
 
-# Added stimeout=10000000 (10 seconds) to force MPV to exit if the stream freezes/drops
-$Flags = "--no-border --no-audio --profile=low-latency --rtsp-transport=tcp --correct-pts=no --display-fps-override=1 --network-timeout=3 --demuxer-lavf-o=timeout=5000000,stimeout=6000000 --force-window=immediate"
+# A frozen or dropped stream is caught by two timeouts, and neither of them is
+# stimeout. libavformat renamed stimeout to timeout at ffmpeg 5.0, mpv ships
+# avformat-63.dll, and its RTSP demuxer has no -stimeout option at all - passing
+# it was silently dropped, with the connection using only timeout=5000000. So the
+# protection is --demuxer-lavf-o=timeout=5000000 (5 s socket timeout, microseconds)
+# plus mpv's own --network-timeout=3; when they fire, mpv exits and the restart
+# loop below reconnects.
+#
+# --msg-level=all=error keeps mpv's routine chatter (file tags, the VO line) out of
+# the gutter between the grid rows, which shows the terminal window behind the
+# feeds. Real errors still print, which --really-quiet would also have hidden.
+$Flags = "--no-border --no-audio --profile=low-latency --rtsp-transport=tcp --correct-pts=no --display-fps-override=1 --network-timeout=3 --demuxer-lavf-o=timeout=5000000 --msg-level=all=error --force-window=immediate"
 
 # The grid shape and pane size, from the camera count alone.
 $TotalStreams = $Streams.Count
