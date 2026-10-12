@@ -1625,6 +1625,14 @@ function New-CamChildEntry {
     # rebuilt from RelayPath at every start.
     $entry.Url = $Camera.Url
     $entry.RelayPath = $RelayPathName
+    # The bounded wait for this camera's OWN relay path, spent across the
+    # supervisor's cycles rather than blocking inside one - which is what
+    # keeps an offline camera, whose path can never become ready, from holding
+    # up every other child. FIRST START ONLY: a restart has to fall straight
+    # through to direct, because that is what leaves a relay that died mid-run
+    # behind instead of retrying against a dead address.
+    $entry.RelayWait = ($RelayPathName -ne '')
+    $entry.RelayWaitUntil = $null
     # Which input the most recent start actually used, for the log and for
     # status.json. Empty until the child has been started once.
     $entry.InputMode = ''
@@ -1649,13 +1657,19 @@ function Start-CamChild {
         [Parameter(Mandatory = $true)]$Entry,
         [Parameter(Mandatory = $true)]$Config,
         [Parameter(Mandatory = $true)]$ContainerProfile,
-        [Parameter(Mandatory = $true)][string]$SupervisorLog
+        [Parameter(Mandatory = $true)][string]$SupervisorLog,
+        # The serving set the supervisor's cycle fetched ONCE for every child.
+        # Null means ask for this one path, which is what a lone restart
+        # between cycles wants.
+        [AllowNull()][string[]]$ReadyPaths
     )
 
     # Chosen here rather than at reconcile time, so every restart re-decides:
     # a child started while the restreamer was down moves onto the relay at its
     # next restart, and one started on the relay goes direct if it has gone.
-    $choice = Get-CamInputUrl -Config $Config -RelayPathName $Entry.RelayPath -DirectUrl $Entry.Url
+    $choiceArgs = @{ Config = $Config; RelayPathName = $Entry.RelayPath; DirectUrl = $Entry.Url }
+    if ($null -ne $ReadyPaths) { $choiceArgs['ReadyPaths'] = @($ReadyPaths) }
+    $choice = Get-CamInputUrl @choiceArgs
     $Entry.InputMode = $choice.Mode
 
     $arguments = Get-CamFfmpegArgs -Url $choice.Url -OutputPattern $Entry.Pattern -Config $Config -ContainerProfile $ContainerProfile
@@ -2042,26 +2056,35 @@ function Start-CamRelayChild {
     Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
     Write-CamHost -Message ("start restreamer pid {0} serving {1} path(s)" -f $process.Id, $pathMap.Count) -Colour 'Green'
 
-    # Block here, bounded, until the paths are serving. This is what stops the
-    # recorders taking a direct camera slot each at a cold start: a camera
+    # Block here, bounded, until the control API answers. This is what stops
+    # the recorders taking a direct camera slot each at a cold start: a camera
     # already serving the dashboard has exactly one slot left, and if a recorder
     # takes it the restreamer can never pull that camera at all, which would
     # leave the whole arrangement stuck on direct inputs. Blocking is safe here
     # because nothing else in the supervisor is due in the same instant.
+    #
+    # It waits for the API, NOT for every path to be serving. A camera that is
+    # simply offline has a path that can never become ready, so waiting for the
+    # whole set spent the entire budget on every cold start and delayed all the
+    # healthy recorders behind the broken one. Each child waits for its own path
+    # instead, in the supervisor's loop, where waiting costs nothing.
     $waitSeconds = 20
     try { $waitSeconds = [int]$Config.RelayStartupWaitSeconds } catch { }
     if ($waitSeconds -gt 0 -and $pathMap.Count -gt 0) {
         $deadline = [DateTime]::Now.AddSeconds($waitSeconds)
-        $ready = @()
+        $answered = $false
         while ([DateTime]::Now -lt $deadline) {
             if ($process.HasExited) { break }
-            $ready = @(Get-CamRelayReadyPaths -Config $Config)
-            if ($ready.Count -ge $pathMap.Count) { break }
+            if ($null -ne (Get-CamRelayApiJson -Config $Config -Route 'v3/paths/list')) { $answered = $true; break }
             Start-Sleep -Milliseconds 500
         }
+        $ready = @()
+        if ($answered) { $ready = @(Get-CamRelayReadyPaths -Config $Config) }
         $waited = ([DateTime]::Now - $Entry.StartedAt).TotalSeconds
-        $message = "restreamer serving {0} of {1} path(s) after {2}s: {3}" -f `
-            $ready.Count, $pathMap.Count, (Format-CamNumber -Value $waited -Format '0.0'), (($ready | Sort-Object) -join ', ')
+        $message = "restreamer control API {0} after {1}s, serving {2} of {3} path(s): {4}" -f `
+            $(if ($answered) { 'answered' } else { 'did not answer' }), `
+            (Format-CamNumber -Value $waited -Format '0.0'), `
+            $ready.Count, $pathMap.Count, (($ready | Sort-Object) -join ', ')
         Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
         Write-CamHost -Message $message -Colour 'Cyan'
     }
@@ -3120,6 +3143,16 @@ function Invoke-CamSupervisor {
     $camerasPath = Join-Path -Path (Get-CamLibRoot) -ChildPath 'cameras.json'
     $maxBytes = [int]$Config.LogMaxBytes
 
+    # Batch-startup tuning, read once: how long a child waits for its own relay
+    # path before taking a direct slot, and the gap left between consecutive
+    # child starts.
+    $relayReadyWait = 15
+    try { $relayReadyWait = [int]$Config.RelayReadyWaitSeconds } catch { }
+    if ($relayReadyWait -lt 0) { $relayReadyWait = 0 }
+    $staggerMs = 300
+    try { $staggerMs = [int]$Config.StartStaggerMs } catch { }
+    if ($staggerMs -lt 0) { $staggerMs = 0 }
+
     # One supervisor per archive. Two would each start a child per camera, and
     # these cameras serve only two RTSP sessions each - the second supervisor
     # would take the dashboard's slot and neither set would be healthy.
@@ -3216,10 +3249,20 @@ function Invoke-CamSupervisor {
 
             $statusDue = (($now - $lastStatus).TotalSeconds -ge [double]$Config.StatusIntervalSeconds)
 
-            # One control-API list query per status tick, shared by every child,
-            # rather than one probe per camera per second.
+            # ONE control-API list query per cycle, shared by every child,
+            # rather than one probe per camera. Asked on a status tick, and
+            # also whenever a child is due to start: six children deciding
+            # relay-or-direct used to fire six near-simultaneous probes, and a
+            # single flake among them put that camera on a direct connection
+            # for its whole run.
+            $pendingStart = $false
+            foreach ($candidate in @($children.Values)) {
+                if (-not $candidate.Process -and $now -ge $candidate.NextStartAt) { $pendingStart = $true; break }
+            }
             $relayReady = $null
-            if ($relay -and $statusDue) { $relayReady = @(Get-CamRelayReadyPaths -Config $Config) }
+            if ($relay -and ($statusDue -or $pendingStart)) { $relayReady = @(Get-CamRelayReadyPaths -Config $Config) }
+
+            $startedThisCycle = 0
 
             foreach ($entry in @($children.Values)) {
                 # One directory scan per cycle, shared by the status file and the
@@ -3302,8 +3345,39 @@ function Invoke-CamSupervisor {
                 }
                 else {
                     if ($now -ge $entry.NextStartAt) {
+                        # A camera starting for the FIRST time waits, bounded,
+                        # for its own relay path to come up before it decides.
+                        # Waiting here rather than inside the decision costs
+                        # nothing and blocks nobody: this cycle simply moves on
+                        # to the next child, so the five healthy cameras start
+                        # while the offline one is still being waited for.
+                        if ($relay -and $entry.RelayWait) {
+                            if ($null -eq $entry.RelayWaitUntil) {
+                                $entry.RelayWaitUntil = $now.AddSeconds($relayReadyWait)
+                            }
+                            $pathServing = ($null -ne $relayReady -and @($relayReady) -contains $entry.RelayPath)
+                            if (-not $pathServing -and $now -lt $entry.RelayWaitUntil) { continue }
+                            if (-not $pathServing) {
+                                $message = "{0}: the restreamer is still not serving '{1}' after {2}s, starting it on the direct input" -f `
+                                    $entry.Name, $entry.RelayPath, $relayReadyWait
+                                Write-CamLog -Path $supervisorLog -Message $message -MaxBytes $maxBytes
+                                Write-CamHost -Message $message -Colour 'Yellow'
+                            }
+                            $entry.RelayWait = $false
+                        }
+
+                        # Stagger: six ffmpeg children opening their inputs in
+                        # the same instant is a burst the relay and the cameras
+                        # do not need, and the Operator asked for the spacing.
+                        if ($startedThisCycle -gt 0 -and $staggerMs -gt 0) {
+                            Start-Sleep -Milliseconds $staggerMs
+                            $now = [DateTime]::Now
+                        }
+                        $startedThisCycle = $startedThisCycle + 1
+
                         try {
-                            Start-CamChild -Entry $entry -Config $Config -ContainerProfile $containerProfile -SupervisorLog $supervisorLog
+                            Start-CamChild -Entry $entry -Config $Config -ContainerProfile $containerProfile `
+                                -SupervisorLog $supervisorLog -ReadyPaths $relayReady
                         }
                         catch {
                             $entry.LastError = "failed to start: $($_.Exception.Message)"
