@@ -3,9 +3,16 @@
     Continuous RTSP recorder for the IPCCTV dashboard cameras.
 
 .DESCRIPTION
+    -Nvr       Opens the NVR: one Windows Terminal window of its own, titled
+               cam.nvr, running the supervisor as its only pane with the log on
+               screen. Closing that window stops the supervisor, MediaMTX, every
+               ffmpeg and the viewers. Closing any other terminal does nothing.
+               This is what the logon task runs.
     -Run       Supervises one ffmpeg child per camera whose Record flag is true in
                cameras.json, writing clock-aligned segments with audio. Picks up
                Record changes live, writes status.json, and prunes the archive.
+               This is what runs inside the NVR window; run it directly and the
+               terminal you run it in becomes the window that owns it.
     -Enable    Sets Record to true for one camera or for all of them. A running
                supervisor starts recording it within ReconcileSeconds.
     -Disable   Sets Record to false. The child stops without a restart.
@@ -20,8 +27,8 @@
                Deletes that generated config. Recording and viewing continue on
                the direct camera inputs.
     -InstallAutostart
-               Registers a Scheduled Task that runs -Run at logon as the current
-               user. Needs no elevation and is idempotent.
+               Registers a Scheduled Task that opens the NVR window at logon as
+               the current user. Needs no elevation and is idempotent.
     -RemoveAutostart
                Unregisters that task. A no-op when it is not installed.
     -SelfTest  Pre-flight report: tool check, per-camera RTSP probe, measured
@@ -37,12 +44,15 @@
     .\cam.recorder.ps1 -Enable "Front Entrance"
 
 .EXAMPLE
-    .\cam.recorder.ps1 -Run
+    .\cam.recorder.ps1 -Nvr
 #>
 [CmdletBinding(DefaultParameterSetName = 'Run')]
 param(
     [Parameter(ParameterSetName = 'Run')]
     [switch]$Run,
+
+    [Parameter(ParameterSetName = 'Nvr')]
+    [switch]$Nvr,
 
     [Parameter(ParameterSetName = 'Enable', Mandatory = $true, Position = 0)]
     [string]$Enable,
@@ -469,17 +479,60 @@ $script:CamAutostartWaitSeconds = 300
 $script:CamAutostartPollSeconds = 5
 
 
+function Invoke-CamStartNvr {
+    <#
+        Opens the NVR window and reports what it got. The mechanism is all in
+        Start-CamNvrWindow; this is the CLI face of it.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    Write-CamHost -Message ''
+    Write-CamHost -Message '=== the NVR window ===' -Colour 'Cyan'
+
+    $report = Start-CamNvrWindow -Config $Config
+
+    if ($report.AlreadyOpen) {
+        Write-CamHost -Message ("a window titled '{0}' is already open - that window IS the NVR, so there is nothing to do." -f `
+                $report.Title) -Colour 'Green'
+        Write-CamHost -Message 'Stop it by closing that window, or with cam.ps1 -Stop.' -Colour 'DarkGray'
+        return
+    }
+
+    Write-CamHost -Message ("  warden    pid {0}, owns the job '{1}'" -f $report.WardenPid, $report.JobName)
+    Write-CamHost -Message ("  window    titled '{0}', wt.exe -w {1}" -f $report.Title, (Get-CamNvrWtWindowName))
+
+    if (-not $report.JobReady) {
+        Write-CamHost -Message ("the warden did not create the job '{0}' in time. The NVR window will still open and record, but CLOSING IT WILL NOT STOP ANYTHING - use cam.ps1 -Stop." -f `
+                $report.JobName) -Colour 'Red'
+    }
+    if (-not $report.WindowFound) {
+        Write-CamHost -Message ("no window titled '{0}' appeared. wt.exe can fail silently; check that Windows Terminal is installed." -f `
+                $report.Title) -Colour 'Red'
+        return
+    }
+
+    Write-CamHost -Message 'the NVR is open. Closing that window stops the supervisor, MediaMTX, every ffmpeg and the viewers.' -Colour 'Green'
+    Write-CamHost -Message 'Closing any other terminal does nothing.' -Colour 'DarkGray'
+}
+
+
 function Invoke-CamInstallAutostart {
     <#
-        Registers a Scheduled Task that starts the supervisor at logon as the
+        Registers a Scheduled Task that opens the NVR window at logon as the
         current user, with no elevation anywhere in the path.
+
+        It forwards -Nvr, not -Run. A task that ran the supervisor directly
+        gave it a console created by the Task Scheduler, and on this machine
+        such a console is adopted as a tab in whatever Windows Terminal window
+        already exists - after which closing that window killed the recorder.
+        -Nvr gives the supervisor a window of its own instead.
 
         Idempotent: a second install replaces the registration rather than
         adding a second task.
 
-        The task runs a generated launcher that forwards to this script with
-        -Run, rather than pointing at this script directly. See
-        New-CamLauncherStub for why.
+        The task runs a generated launcher that forwards to this script,
+        rather than pointing at this script directly. See New-CamLauncherStub
+        for why.
     #>
     param([Parameter(Mandatory = $true)]$Config)
 
@@ -492,7 +545,7 @@ function Invoke-CamInstallAutostart {
     }
 
     $stubPath = New-CamLauncherStub -StubPath $script:CamAutostartStubPath `
-        -TargetScript $scriptPath -TargetArgument @('-Run') `
+        -TargetScript $scriptPath -TargetArgument @('-Nvr') `
         -LogPath $script:CamAutostartStubLogPath `
         -TimeoutSeconds $script:CamAutostartWaitSeconds -PollSeconds $script:CamAutostartPollSeconds
 
@@ -508,7 +561,7 @@ function Invoke-CamInstallAutostart {
 
     Write-CamHost -Message ("  runs      {0} {1}" -f $registration.Executable, $registration.Arguments)
     Write-CamHost -Message ("  launcher  {0}" -f $stubPath)
-    Write-CamHost -Message ("  forwards  {0} -Run (waits up to {1}s for that path)" -f $scriptPath, $script:CamAutostartWaitSeconds)
+    Write-CamHost -Message ("  forwards  {0} -Nvr (waits up to {1}s for that path)" -f $scriptPath, $script:CamAutostartWaitSeconds)
     Write-CamHost -Message ("  log       {0}" -f $script:CamAutostartStubLogPath)
     Write-CamHost -Message ("  as        {0} (interactive token, no elevation)" -f $registration.Account)
     Write-CamHost -Message ("  trigger   at logon of {0}" -f $registration.Account)
@@ -1741,7 +1794,6 @@ function Stop-CamChild {
 
     if (-not $process.HasExited) {
         Write-CamLog -Path $SupervisorLog -Message ("kill {0} pid {1}: {2}" -f $Entry.Name, $process.Id, $Reason) -MaxBytes $Config.LogMaxBytes
-        Write-CamHost -Message ("kill {0} pid {1}: {2}" -f $Entry.Name, $process.Id, $Reason) -Colour 'Yellow'
         try { $process.Kill() } catch { }
         [void]$process.WaitForExit(10000)
     }
@@ -1856,7 +1908,6 @@ function Start-CamRelayChild {
     if ($actual -ne $expected) {
         $message = "WARNING: '$configPath' no longer matches cameras.json. Run cam.recorder.ps1 -InstallRestreamer. Starting the restreamer with the file as it is."
         Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
-        Write-CamHost -Message $message -Colour 'Yellow'
     }
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -1922,7 +1973,6 @@ function Start-CamRelayChild {
             (Format-CamNumber -Value $waited -Format '0.0'), `
             $ready.Count, $pathMap.Count, (($ready | Sort-Object) -join ', ')
         Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
-        Write-CamHost -Message $message -Colour 'Cyan'
     }
 }
 
@@ -1971,7 +2021,6 @@ function Stop-CamRelayChild {
     if (-not $process.HasExited) {
         $message = "kill restreamer pid {0}: {1}" -f $process.Id, $Reason
         Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
-        Write-CamHost -Message $message -Colour 'Yellow'
         try { $process.Kill() } catch { }
         [void]$process.WaitForExit(10000)
     }
@@ -2029,7 +2078,6 @@ function Invoke-CamRelayTick {
         $message = "restreamer exit {0} after {1}s; restart #{2} in {3}s" -f `
             $exitCode, [int]$ranFor, $Entry.RestartCount, $wait
         Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $maxBytes
-        Write-CamHost -Message $message -Colour 'Yellow'
         return
     }
 
@@ -2912,7 +2960,6 @@ function Invoke-CamReconcile {
     foreach ($camera in @($resolved | Where-Object { $_.Error })) {
         $message = "skipping {0}: {1}" -f $camera.Name, $camera.Error
         Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $maxBytes
-        Write-CamHost -Message $message -Colour 'Red'
     }
 
     $enabled = @($resolved | Where-Object { $_.Record -and -not $_.Error })
@@ -2931,7 +2978,6 @@ function Invoke-CamReconcile {
             $Children.Remove($key)
             $message = "reconcile: {0} is no longer set to record, stopped it" -f $entry.Name
             Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $maxBytes
-            Write-CamHost -Message $message -Colour 'Yellow'
             continue
         }
 
@@ -2943,7 +2989,6 @@ function Invoke-CamReconcile {
             $Children.Remove($key)
             $message = "reconcile: {0} address or stream changed, restarting it" -f $entry.Name
             Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $maxBytes
-            Write-CamHost -Message $message -Colour 'Yellow'
         }
     }
 
@@ -2959,7 +3004,6 @@ function Invoke-CamReconcile {
         if (-not $First) {
             $message = "reconcile: {0} is now set to record, starting it" -f $camera.Name
             Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $maxBytes
-            Write-CamHost -Message $message -Colour 'Green'
         }
     }
 
@@ -2974,6 +3018,12 @@ function Invoke-CamSupervisor {
     $containerProfile = Get-CamContainerProfile -Config $Config
     $paths = Get-CamPaths -Config $Config
     $supervisorLog = Join-Path -Path $paths.LogDir -ChildPath 'recorder.log'
+
+    # The NVR window is this console, and the Operator asked to see the log in
+    # it. Every line Write-CamLog puts in recorder.log is echoed here from now
+    # on, with its timestamp and already redacted. Only this file: the
+    # per-camera logs carry raw ffmpeg stderr and would bury it.
+    Set-CamLogEcho -Path $supervisorLog
     $statusPath = Get-CamStatusFilePath -Config $Config
     $stopFlag = Get-CamStopFlagPath -Config $Config
     $camerasPath = Join-Path -Path (Get-CamLibRoot) -ChildPath 'cameras.json'
@@ -3062,7 +3112,6 @@ function Invoke-CamSupervisor {
                         $message = "reconcile: {0} of {1} camera(s) set to record, {2} child(ren) managed" -f `
                             $recording, @($cameras).Count, $children.Count
                         Write-CamLog -Path $supervisorLog -Message $message -MaxBytes $maxBytes
-                        Write-CamHost -Message $message -Colour 'Cyan'
 
                         if ($children.Count -eq 0) {
                             Write-CamHost -Message 'No camera has Record set to true, so nothing is being recorded. Waiting for -Enable.' -Colour 'Yellow'
@@ -3147,7 +3196,6 @@ function Invoke-CamSupervisor {
                         $message = "exit {0} after {1}s for {2}; restart #{3} in {4}s" -f `
                             $exitCode, [int]$ranFor, $entry.Name, $entry.RestartCount, $wait
                         Write-CamLog -Path $supervisorLog -Message $message -MaxBytes $maxBytes
-                        Write-CamHost -Message $message -Colour 'Yellow'
                     }
                     else {
                         # A child that had to start on its direct input moves
@@ -3197,7 +3245,6 @@ function Invoke-CamSupervisor {
                             $wait = Set-CamChildBackoff -Entry $entry -Config $Config -RanForSeconds $ranFor
                             $message = "watchdog restart #{0} for {1} in {2}s" -f $entry.RestartCount, $entry.Name, $wait
                             Write-CamLog -Path $supervisorLog -Message $message -MaxBytes $maxBytes
-                            Write-CamHost -Message $message -Colour 'Yellow'
                         }
                     }
                 }
@@ -3221,7 +3268,6 @@ function Invoke-CamSupervisor {
                                     $message = "{0}: the restreamer did not serve '{1}' within {2}s, starting it on the direct input" -f `
                                         $entry.Name, $entry.RelayPath, $relayReadyWait
                                     Write-CamLog -Path $supervisorLog -Message $message -MaxBytes $maxBytes
-                                    Write-CamHost -Message $message -Colour 'Yellow'
                                 }
                                 $entry.RelayHeldSince = $null
                             }
@@ -3346,6 +3392,9 @@ elseif ($InstallRestreamer) {
 elseif ($RemoveRestreamer) {
     Invoke-CamRemoveRestreamer -Config $config
 }
+elseif ($Nvr) {
+    Invoke-CamStartNvr -Config $config
+}
 elseif ($InstallAutostart) {
     Invoke-CamInstallAutostart -Config $config
 }
@@ -3357,6 +3406,7 @@ elseif ($Run) {
 }
 else {
     Write-CamHost -Message 'Usage:' -Colour 'Cyan'
+    Write-CamHost -Message '  cam.recorder.ps1 -Nvr                  open the NVR window and supervise in it'
     Write-CamHost -Message '  cam.recorder.ps1 -Run                  supervise every camera with Record=true'
     Write-CamHost -Message '  cam.recorder.ps1 -Enable  <name|all>   set Record=true, picked up live'
     Write-CamHost -Message '  cam.recorder.ps1 -Disable <name|all>   set Record=false, picked up live'
@@ -3366,6 +3416,6 @@ else {
     Write-CamHost -Message '  cam.recorder.ps1 -SelfTest [-Offline]  pre-flight checks'
     Write-CamHost -Message '  cam.recorder.ps1 -InstallRestreamer    generate the MediaMTX config from cameras.json'
     Write-CamHost -Message '  cam.recorder.ps1 -RemoveRestreamer     delete it again'
-    Write-CamHost -Message '  cam.recorder.ps1 -InstallAutostart     run -Run at logon as this user'
+    Write-CamHost -Message '  cam.recorder.ps1 -InstallAutostart     open the NVR window at logon as this user'
     Write-CamHost -Message '  cam.recorder.ps1 -RemoveAutostart      remove that logon task'
 }
