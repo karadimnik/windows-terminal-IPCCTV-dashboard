@@ -40,11 +40,20 @@
 .PARAMETER Dashboard
     Limits the action to the viewer panes, their mpv and the health strip.
 
+.PARAMETER InstallDashboardAutostart
+    Registers a logon task that opens the dashboard, and leaves the
+    recorder's own task completely alone. Idempotent, unelevated.
+
+.PARAMETER RemoveDashboardAutostart
+    Removes that task and its launcher. A clean no-op when they are not
+    there, and it never touches the recorder's task either.
+
 .EXAMPLE
     .\cam.ps1
     .\cam.ps1 -Stop
     .\cam.ps1 -Stop -Dashboard
     .\cam.ps1 -Start
+    .\cam.ps1 -InstallDashboardAutostart
 #>
 param(
     [Parameter(ParameterSetName = 'Status')]
@@ -55,6 +64,12 @@ param(
 
     [Parameter(ParameterSetName = 'Stop')]
     [switch]$Stop,
+
+    [Parameter(ParameterSetName = 'InstallDashboardAutostart')]
+    [switch]$InstallDashboardAutostart,
+
+    [Parameter(ParameterSetName = 'RemoveDashboardAutostart')]
+    [switch]$RemoveDashboardAutostart,
 
     # Scope. Neither given means everything, which is the point of the script.
     [Parameter(ParameterSetName = 'Start')]
@@ -75,7 +90,18 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }
 
 $RecorderScript = Join-Path -Path $ScriptDir -ChildPath 'cam.recorder.ps1'
 $DashboardScript = Join-Path -Path $ScriptDir -ChildPath 'mpv.cam.autolayout.autorestart.ps1'
-$AutostartTaskName = 'IPCCTV-Recorder'
+
+# Two logon tasks, one per side. The recorder's is registered and removed by
+# cam.recorder.ps1 -InstallAutostart / -RemoveAutostart and is NEVER touched
+# from here; this script only reads its state and runs it. The dashboard's is
+# registered and removed here.
+$RecorderTaskName = 'IPCCTV-Recorder'
+$DashboardTaskName = 'IPCCTV-Dashboard'
+$DashboardStubPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'start-dashboard.ps1'
+$DashboardStubLogPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'autostart-dashboard.log'
+# How long the launcher waits for this script's path, and how often it looks.
+$DashboardStubWaitSeconds = 300
+$DashboardStubPollSeconds = 5
 
 # Neither scope switch means both, so the bare verb always means everything.
 $WantRecorder = $Recorder -or -not ($Recorder -or $Dashboard)
@@ -88,6 +114,39 @@ function Write-CamSection {
     param([Parameter(Mandatory = $true)][string]$Title)
     Write-Host ''
     Write-Host ("=== {0} ===" -f $Title) -ForegroundColor Cyan
+}
+
+
+function Get-CamLogonTaskReport {
+    <#
+        Both logon tasks, whether each is registered, and the launcher it
+        points at. Reads only - nothing here registers or removes anything.
+    #>
+
+    $rows = @(
+        [pscustomobject]@{
+            Name      = $RecorderTaskName
+            What      = 'the 24/7 recorder'
+            Launcher  = (Join-Path -Path (Get-CamAutostartDir) -ChildPath 'start-recorder.ps1')
+            InstallBy = '.\cam.recorder.ps1 -InstallAutostart'
+        },
+        [pscustomobject]@{
+            Name      = $DashboardTaskName
+            What      = 'the viewer dashboard'
+            Launcher  = $DashboardStubPath
+            InstallBy = '.\cam.ps1 -InstallDashboardAutostart'
+        }
+    )
+
+    foreach ($row in $rows) {
+        $task = Get-CamLogonTask -TaskName $row.Name
+        $state = 'not registered'
+        if ($task) { $state = [string]$task.State }
+        Add-Member -InputObject $row -NotePropertyName 'Registered' -NotePropertyValue ([bool]$task)
+        Add-Member -InputObject $row -NotePropertyName 'State' -NotePropertyValue $state
+        Add-Member -InputObject $row -NotePropertyName 'LauncherExists' -NotePropertyValue (Test-Path -LiteralPath $row.Launcher)
+    }
+    return $rows
 }
 
 
@@ -116,6 +175,7 @@ function Get-CamComponentState {
         Pane            = @($inventory | Where-Object { $_.Role -eq 'Pane' })
         Viewer          = @($inventory | Where-Object { $_.Role -eq 'Viewer' })
         Health          = @($inventory | Where-Object { $_.Role -eq 'Health' })
+        LogonTasks      = @(Get-CamLogonTaskReport)
         SupervisorState = (Get-CamSupervisorState -Config $Config -Snapshot $snapshot)
         JobExists       = [CamJob]::Exists((Get-CamDashboardJobName))
         GridWindows     = @(Get-CamTerminalWindow -Title (Get-CamDashboardWindowTitle)).Count
@@ -179,6 +239,20 @@ function Show-CamStatus {
     $unowned = @($State.Viewer | Where-Object { $_.Detail -eq 'no pane owns it' })
     if ($unowned.Count -gt 0) {
         Write-Host ("  ORPHANS      {0} mpv with no pane: {1}" -f $unowned.Count, (($unowned.ProcessId | Sort-Object) -join ', ')) -ForegroundColor Red
+    }
+
+    Write-CamSection 'logon tasks'
+    foreach ($task in $State.LogonTasks) {
+        $colour = 'Green'
+        if (-not $task.Registered) { $colour = 'Yellow' }
+        Write-Host ("  {0,-17} {1,-15} {2}" -f $task.Name, $task.State, $task.What) -ForegroundColor $colour
+        if ($task.Registered) {
+            Write-Host ("  {0,-17} launcher {1}{2}" -f '', $task.Launcher,
+                $(if ($task.LauncherExists) { '' } else { '  MISSING - reinstall the task' })) -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host ("  {0,-17} install it with {1}" -f '', $task.InstallBy) -ForegroundColor DarkGray
+        }
     }
 
     Write-CamSection 'processes'
@@ -337,14 +411,14 @@ function Invoke-CamStartAll {
             Write-Host ("  already running - {0}" -f $state.Reason) -ForegroundColor Green
         }
         else {
-            $task = Get-ScheduledTask -TaskName $AutostartTaskName -ErrorAction SilentlyContinue
+            $task = Get-ScheduledTask -TaskName $RecorderTaskName -ErrorAction SilentlyContinue
             if (-not $task) {
-                Write-Host ("  the '{0}' task is not registered. Install it with:" -f $AutostartTaskName) -ForegroundColor Yellow
+                Write-Host ("  the '{0}' task is not registered. Install it with:" -f $RecorderTaskName) -ForegroundColor Yellow
                 Write-Host ("    .\cam.recorder.ps1 -InstallAutostart") -ForegroundColor Yellow
             }
             else {
-                Write-Host ("  starting the '{0}' task" -f $AutostartTaskName)
-                & schtasks.exe /run /tn $AutostartTaskName | Out-Null
+                Write-Host ("  starting the '{0}' task" -f $RecorderTaskName)
+                & schtasks.exe /run /tn $RecorderTaskName | Out-Null
                 for ($wait = 0; $wait -lt 40; $wait++) {
                     Start-Sleep -Milliseconds 500
                     $state = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
@@ -385,9 +459,108 @@ function Invoke-CamStartAll {
 }
 
 
+function Invoke-CamInstallDashboardAutostart {
+    <#
+        Registers the logon task that opens the dashboard.
+
+        Why a SECOND task rather than a switch on the recorder's: the recorder
+        is a headless service that must run whether anybody is logged on or
+        not, and the dashboard is a desktop artifact that needs an interactive
+        session - one task for both would couple the two. And -Start here runs
+        the recorder's task by name, so a task pointing at this script with no
+        scope would invoke itself.
+
+        It registers IPCCTV-Dashboard and nothing else. The recorder's task is
+        not read, not re-registered and not removed by this.
+
+        No ordering is coordinated with the recorder's task. Both fire at
+        logon, and each pane waits up to RelayReadyWaitSeconds for its own
+        relay path before settling for a direct camera connection, which is
+        the same wait that covers a cold relay at any other time.
+    #>
+
+    Write-CamSection 'install the dashboard logon task'
+
+    $stubPath = New-CamLauncherStub -StubPath $DashboardStubPath `
+        -TargetScript (Join-Path -Path $ScriptDir -ChildPath 'cam.ps1') `
+        -TargetArgument @('-Start', '-Dashboard') -LogPath $DashboardStubLogPath `
+        -TimeoutSeconds $DashboardStubWaitSeconds -PollSeconds $DashboardStubPollSeconds
+
+    $registration = Register-CamLogonTask -TaskName $DashboardTaskName -StubPath $stubPath `
+        -Description 'Opens the IPCCTV viewer dashboard at logon.'
+
+    if ($registration.Existed) {
+        Write-Host ("  updated the existing task '{0}'" -f $DashboardTaskName) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("  created the task '{0}'" -f $DashboardTaskName) -ForegroundColor Green
+    }
+    Write-Host ("  runs      {0} {1}" -f $registration.Executable, $registration.Arguments)
+    Write-Host ("  launcher  {0}" -f $stubPath)
+    Write-Host ("  forwards  {0} -Start -Dashboard (waits up to {1}s for that path)" -f `
+        (Join-Path -Path $ScriptDir -ChildPath 'cam.ps1'), $DashboardStubWaitSeconds)
+    Write-Host ("  log       {0}" -f $DashboardStubLogPath)
+    Write-Host ("  as        {0} (interactive token, no elevation)" -f $registration.Account)
+    Write-Host ("  trigger   at logon of {0}" -f $registration.Account)
+    Write-Host ("  limits    {0}" -f $registration.Policy)
+    Write-Host ("  state     {0}" -f $registration.Task.State)
+    Write-Host ("  registered task(s) with this name: {0}" -f `
+        @(Get-ScheduledTask -TaskName $DashboardTaskName -ErrorAction SilentlyContinue).Count)
+    $recorderTask = Get-CamLogonTask -TaskName $RecorderTaskName
+    $recorderState = 'not registered'
+    if ($recorderTask) { $recorderState = [string]$recorderTask.State }
+    Write-Host ("  the '{0}' task is untouched by this: {1}" -f $RecorderTaskName, $recorderState) -ForegroundColor DarkGray
+
+    Write-Host ''
+    Write-Host 'Verify it with:  schtasks /query /tn IPCCTV-Dashboard /fo list' -ForegroundColor Cyan
+    Write-Host 'Remove it with:  .\cam.ps1 -RemoveDashboardAutostart' -ForegroundColor Cyan
+    return 0
+}
+
+
+function Invoke-CamRemoveDashboardAutostart {
+    <#
+        Unregisters the dashboard's logon task and deletes its launcher. A
+        clean no-op when neither is there, and it never touches the
+        recorder's task.
+    #>
+
+    Write-CamSection 'remove the dashboard logon task'
+
+    if (Unregister-CamLogonTask -TaskName $DashboardTaskName) {
+        Write-Host ("  removed the task '{0}'" -f $DashboardTaskName) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("  no task named '{0}' is registered" -f $DashboardTaskName) -ForegroundColor Yellow
+    }
+
+    if (Remove-CamLauncherStub -StubPath $DashboardStubPath) {
+        Write-Host ("  removed the launcher '{0}'" -f $DashboardStubPath) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("  no launcher at '{0}'" -f $DashboardStubPath) -ForegroundColor Yellow
+    }
+
+    if (Test-Path -LiteralPath $DashboardStubLogPath) {
+        Write-Host ("  kept the launcher log '{0}' - delete it by hand if you do not want it" -f $DashboardStubLogPath)
+    }
+
+    $recorderTask = Get-CamLogonTask -TaskName $RecorderTaskName
+    $recorderState = 'not registered'
+    if ($recorderTask) { $recorderState = [string]$recorderTask.State }
+    Write-Host ("  the '{0}' task is untouched by this: {1}" -f $RecorderTaskName, $recorderState) -ForegroundColor DarkGray
+
+    Write-Host ''
+    Write-Host 'A dashboard that is open now stays open. Close it with:  .\cam.ps1 -Stop -Dashboard' -ForegroundColor Cyan
+    return 0
+}
+
+
 switch ($PSCmdlet.ParameterSetName) {
     'Stop' { exit (Invoke-CamStopAll) }
     'Start' { exit (Invoke-CamStartAll) }
+    'InstallDashboardAutostart' { exit (Invoke-CamInstallDashboardAutostart) }
+    'RemoveDashboardAutostart' { exit (Invoke-CamRemoveDashboardAutostart) }
     default {
         # -Status, and the bare invocation, which is the same question.
         Show-CamStatus -State (Get-CamComponentState)

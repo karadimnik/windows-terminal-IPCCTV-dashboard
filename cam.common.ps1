@@ -2590,3 +2590,258 @@ function Stop-CamHealthStrip {
     [void](Stop-CamTerminalWindow -Title 'cam.health')
     return $strips.Count
 }
+
+
+# ===========================================================================
+# Logon tasks and the launcher stubs they point at
+#
+# Two things run at logon: the recorder, which is a headless 24/7 service,
+# and the dashboard, which is a desktop artifact needing an interactive
+# session. They are two Scheduled Tasks on purpose - folding them into one
+# would couple a service to a session, and cam.ps1 -Start already runs the
+# recorder's task, so a single task pointing at cam.ps1 would invoke itself.
+#
+# Both are registered through the ScheduledTasks module rather than
+# schtasks.exe. Measured on this machine: schtasks /create /sc onlogon fails
+# with "Access is denied" for a standard user, in the root folder and in a
+# subfolder alike, while Register-ScheduledTask with a per-user LogonTrigger
+# and an interactive, limited principal succeeds unelevated. Reading a task
+# back with schtasks /query needs no elevation either way.
+#
+# Neither task points at a script in the repo. The repo can live on
+# \\wsl.localhost, which resolves only once WSL's file server is up, and that
+# is not true at logon. A task cannot wait for a path; a launcher stub on a
+# local path can, so each task runs one of those and the stub forwards.
+# ===========================================================================
+
+# Restart-on-failure, applied to both tasks: a logon start that failed
+# because WSL was not up yet should try again rather than wait for the next
+# logon. Accepted unelevated; lands in the exported XML as RestartOnFailure.
+$script:CamLogonTaskRestartCount = 3
+$script:CamLogonTaskRestartMinutes = 1
+
+
+function Get-CamAutostartDir {
+    <#
+        Where the generated launchers and their logs live: a local path that
+        is present at logon, which the repo may not be.
+    #>
+    return (Join-Path -Path $env:LOCALAPPDATA -ChildPath 'IPCCTV')
+}
+
+
+function Get-CamLogonTask {
+    <# The registered task of this name, or $null. Never throws. #>
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    if (-not (Get-Command -Name 'Get-ScheduledTask' -ErrorAction SilentlyContinue)) { return $null }
+    return (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+
+function Get-CamLogonTaskAccount {
+    <# DOMAIN\user for the account a task will run as - the current user. #>
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    if ($identity) { return $identity }
+    return ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME)
+}
+
+
+function New-CamLauncherStub {
+    <#
+        Writes the launcher a logon task runs, and returns its path.
+
+        The stub polls for the real script until its path resolves, logs what
+        happened, then invokes it with the arguments given. It FORWARDS, never
+        copies: a local copy of the scripts would drift from the repo
+        silently.
+
+        Overwritten on every install, deleted by the matching remove switch,
+        and not meant to be edited by hand.
+
+        Exiting non-zero when the wait runs out is deliberate. It is what lets
+        the task's restart-on-failure policy try the whole thing again, which
+        is the right answer when WSL simply was not up yet.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$StubPath,
+        [Parameter(Mandatory = $true)][string]$TargetScript,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$TargetArgument,
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [int]$TimeoutSeconds = 300,
+        [int]$PollSeconds = 5
+    )
+
+    # Every substituted value lands inside a single-quoted literal in the
+    # generated file, so a single quote in a path has to be doubled.
+    $template = @'
+# IPCCTV autostart launcher - GENERATED FILE, do not edit.
+# Written by an install switch on cam.ps1 or cam.recorder.ps1, and deleted by
+# the matching remove switch.
+#
+# Why it exists: the script it starts can live on a path that is not there yet
+# when the logon task fires (\\wsl.localhost resolves only once WSL is
+# running). This waits for the path, then forwards to the real script. It holds
+# no copy of it.
+
+$Target         = '__TARGET__'
+$TargetArgs     = __ARGS__
+$LogPath        = '__LOG__'
+$TimeoutSeconds = __TIMEOUT__
+$PollSeconds    = __POLL__
+
+function Write-StubLog {
+    param([string]$Message)
+    $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+    try {
+        $dir = Split-Path -Path $LogPath -Parent
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+    }
+    catch { }
+    Write-Host $line
+}
+
+function Test-StubTarget {
+    # A path on a share that is not up can fail rather than answer false.
+    try { return [bool](Test-Path -LiteralPath $Target) } catch { return $false }
+}
+
+Write-StubLog ('launcher starting, waiting up to {0}s for {1}' -f $TimeoutSeconds, $Target)
+
+$waited = 0
+while (-not (Test-StubTarget)) {
+    if ($waited -ge $TimeoutSeconds) {
+        Write-StubLog ('FAILED: {0} did not appear within {1}s. If that is a \\wsl.localhost path, WSL was not running. Exiting 2 so the task restart policy tries again.' -f $Target, $TimeoutSeconds)
+        exit 2
+    }
+    Start-Sleep -Seconds $PollSeconds
+    $waited += $PollSeconds
+}
+
+Write-StubLog ('target resolved after {0}s, starting {1} {2}' -f $waited, $Target, ($TargetArgs -join ' '))
+
+& $Target @TargetArgs
+$code = $LASTEXITCODE
+if ($null -eq $code) { $code = 0 }
+Write-StubLog ('it exited with {0}' -f $code)
+exit $code
+'@
+
+    # A PowerShell array literal, so the stub forwards the arguments as
+    # separate arguments rather than one string.
+    $quoted = @($TargetArgument | ForEach-Object { "'" + $_.Replace("'", "''") + "'" })
+    $argsLiteral = if ($quoted.Count -eq 0) { '@()' } else { '@(' + ($quoted -join ', ') + ')' }
+
+    $body = $template.
+        Replace('__TARGET__', $TargetScript.Replace("'", "''")).
+        Replace('__ARGS__', $argsLiteral).
+        Replace('__LOG__', $LogPath.Replace("'", "''")).
+        Replace('__TIMEOUT__', [string]$TimeoutSeconds).
+        Replace('__POLL__', [string]$PollSeconds)
+
+    $dir = Split-Path -Path $StubPath -Parent
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Set-Content -LiteralPath $StubPath -Value $body -Encoding UTF8
+    return $StubPath
+}
+
+
+function Remove-CamLauncherStub {
+    <#
+        Deletes a generated launcher. Returns $true if there was one.
+
+        The launcher's log is deliberately left behind: it is the only record
+        of a logon start that failed, and it is the first thing to read when
+        autostart did not work. Its folder goes only when nothing else is left
+        in it, so an install and removal with nothing logged leaves no trace
+        at all, while the other task's launcher and log are untouched.
+    #>
+    param([Parameter(Mandatory = $true)][string]$StubPath)
+
+    if (-not (Test-Path -LiteralPath $StubPath)) { return $false }
+    Remove-Item -LiteralPath $StubPath -Force
+    $dir = Split-Path -Path $StubPath -Parent
+    if (-not @(Get-ChildItem -LiteralPath $dir -Force -ErrorAction SilentlyContinue).Count) {
+        Remove-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+    }
+    return $true
+}
+
+
+function Register-CamLogonTask {
+    <#
+        Registers a Scheduled Task that runs one launcher stub at logon as the
+        current user, with no elevation anywhere in the path. Returns what it
+        did, for the caller to report.
+
+        Idempotent: -Force replaces the registration rather than adding a
+        second task, so running an install twice leaves exactly one.
+
+        Three settings are not defaults and are load-bearing. ExecutionTimeLimit
+        zero, because the default three-day limit would kill a 24/7 recorder on
+        day three - and because the Task Scheduler ending a task tears down what
+        it started, which for the dashboard would be the warden that holds its
+        panes alive. MultipleInstances IgnoreNew, so a second logon cannot start
+        a competing instance. And restart-on-failure, so a start that failed
+        because WSL was not up yet is retried.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$StubPath,
+        [Parameter(Mandatory = $true)][string]$Description
+    )
+
+    if (-not (Get-Command -Name 'Register-ScheduledTask' -ErrorAction SilentlyContinue)) {
+        throw 'The ScheduledTasks module is not available on this machine, so the task cannot be registered. Windows 8 or later provides it.'
+    }
+
+    $powershell = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $StubPath)
+    $account = Get-CamLogonTaskAccount
+    $existing = Get-CamLogonTask -TaskName $TaskName
+
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
+    $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Limited
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew `
+        -RestartCount $script:CamLogonTaskRestartCount `
+        -RestartInterval (New-TimeSpan -Minutes $script:CamLogonTaskRestartMinutes)
+
+    $task = Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
+        -Principal $principal -Settings $settings -Description $Description -Force
+
+    return [pscustomobject]@{
+        Task       = $task
+        Existed    = [bool]$existing
+        Account    = $account
+        Executable = $powershell
+        Arguments  = $arguments
+        Policy     = ("no execution time limit, a second instance is ignored, restart up to {0}x every {1} min on failure" -f `
+            $script:CamLogonTaskRestartCount, $script:CamLogonTaskRestartMinutes)
+    }
+}
+
+
+function Unregister-CamLogonTask {
+    <#
+        Unregisters a logon task. $true if there was one, $false if there was
+        not - Unregister-ScheduledTask throws on a missing task, so it is
+        looked up first and removal is a clean no-op.
+    #>
+    param([Parameter(Mandatory = $true)][string]$TaskName)
+
+    if (-not (Get-CamLogonTask -TaskName $TaskName)) { return $false }
+
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    $left = @(Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue).Count
+    if ($left -ne 0) {
+        throw "Unregistered '$TaskName' but $left task(s) with that name are still registered."
+    }
+    return $true
+}
