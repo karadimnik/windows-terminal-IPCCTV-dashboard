@@ -486,3 +486,35 @@ not a job termination, since MediaMTX was in the same parent and survived.
 recorder was running - which is the state the harness is required to leave behind. It now skips
 when a live supervisor owns them, identified by the ffmpeg it parents plus an agreeing heartbeat.
 9 passed, 0 failed, 2 skipped.
+
+
+## A stop that never steals focus, 2026-10-12 - item [42]
+
+- [x] **[42]** DONE 2026-10-12: stopping the dashboard no longer touches the foreground window.
+      `Stop-CamTerminalWindow` has no `-ConfirmKeystroke` path left, and `CamWin` no longer imports
+      `SetForegroundWindow` or `keybd_event` - nothing in the project synthesises input.
+
+**The focus steal was a wrong conclusion, not a necessary cost.** The old code posted `WM_CLOSE`,
+polled ONCE 400 ms later, found the window still there, and inferred that Windows Terminal's "close
+all tabs?" overlay must be waiting for a keystroke - so it took the foreground and sent an Enter.
+The window had simply not finished closing.
+
+Measured on the live six-pane grid, posting `WM_CLOSE` and sending NOTHING:
+
+```
+job terminated first (panes 6 -> 0, mpv 12 -> 0 in under a second), window still open 6 s later
+then WM_CLOSE        window gone in under 800 ms, no overlay
+panes still running  window gone in under 1500 ms, no overlay, warden then stopped the panes
+```
+
+So this window never raises that confirmation: it is ONE tab holding six panes, and the
+confirmation is about closing several TABS. The note in the [40] section that a multi-pane window
+answers `WM_CLOSE` with the overlay is wrong, and this supersedes it.
+
+`cam.ps1 -Stop -Dashboard` measured with the foreground window sampled every 100 ms from a separate
+process, with a terminal window of our own holding focus the way the Operator's shell would: 59
+samples across the 4.9 s stop, ONE unbroken run on the same HWND. Nothing moved.
+
+The ordering the Operator asked for is what makes it work and it was already in place: terminate
+the job, let the kernel take every pane and every mpv, THEN ask the window to close. The window
+close follows; it never drives.

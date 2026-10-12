@@ -1781,8 +1781,6 @@ public static class CamWin
     [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
 
@@ -1860,24 +1858,32 @@ function Stop-CamTerminalWindow {
         Closes every Windows Terminal window with this title, and returns how
         many were still there afterwards.
 
-        Two things make this harder than one PostMessage.
+        WM_CLOSE and then wait. Nothing else: this never touches the
+        foreground window and never synthesises input.
 
-        A window showing more than one pane answers WM_CLOSE by raising "Do
-        you want to close all tabs?" - a XAML overlay drawn INSIDE the window
-        with no HWND of its own, so it cannot be found by enumeration and will
-        not answer a posted message. Only real keyboard input dismisses it,
-        and "Close all" already has focus, so one VK_RETURN does it. That is
-        what -ConfirmKeystroke is for; it steals focus for a moment, which is
-        why it is opt-in rather than always on.
+        An earlier version did. It polled once 400 ms after the post, found
+        the window still there, concluded that Windows Terminal's "close all
+        tabs?" overlay must be waiting for a keystroke, and stole the
+        foreground to send it an Enter - about a second of the Operator's
+        focus on every stop. The conclusion was wrong: the window had simply
+        not finished closing. Measured on 2026-10-12 against the live
+        six-pane grid, posting WM_CLOSE and sending NOTHING:
+
+          panes already dead   window gone in under 800 ms, no overlay
+          panes still running  window gone in under 1500 ms, no overlay,
+                               and the warden then stopped the panes
+
+        So this window never raises that confirmation. It is one tab holding
+        six panes, and the confirmation is about closing several TABS.
+
+        A window that will not close within the timeout is REPORTED, never
+        forced.
 
         Never Stop-Process on the window's owner. One Windows Terminal process
         owns every terminal window on the desktop.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Title,
-
-        # Answer the "close all tabs?" overlay with a synthesised Enter.
-        [switch]$ConfirmKeystroke,
 
         [int]$TimeoutSeconds = 10
     )
@@ -1891,23 +1897,9 @@ function Stop-CamTerminalWindow {
     }
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    $prompted = $false
     while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 400
-        $left = @(Get-CamTerminalWindow -Title $Title)
-        if ($left.Count -eq 0) { return 0 }
-
-        # A multi-pane window is still here because the overlay is waiting for
-        # a keystroke. Send it once, then keep waiting on the same clock.
-        if ($ConfirmKeystroke -and -not $prompted) {
-            $prompted = $true
-            foreach ($hwnd in $left) {
-                [void][CamWin]::SetForegroundWindow($hwnd)
-                Start-Sleep -Milliseconds 500
-                [CamWin]::keybd_event(0x0D, 0, 0, [IntPtr]::Zero)   # VK_RETURN down
-                [CamWin]::keybd_event(0x0D, 0, 2, [IntPtr]::Zero)   # KEYEVENTF_KEYUP
-            }
-        }
+        Start-Sleep -Milliseconds 250
+        if (@(Get-CamTerminalWindow -Title $Title).Count -eq 0) { return 0 }
     }
 
     return @(Get-CamTerminalWindow -Title $Title).Count
@@ -2465,7 +2457,12 @@ function Stop-CamDashboard {
         & $log 'no viewer-side processes were running' 'DarkGray'
     }
 
-    $left = Stop-CamTerminalWindow -Title (Get-CamDashboardWindowTitle) -ConfirmKeystroke
+    # The windows go last, with nothing alive left inside them, and a plain
+    # WM_CLOSE is all it takes: measured 2026-10-12, under 800 ms and no
+    # confirmation overlay. No keystroke is synthesised and the foreground
+    # window is not touched, so a stop cannot interrupt what the Operator is
+    # doing - which it used to, for about a second, every time.
+    $left = Stop-CamTerminalWindow -Title (Get-CamDashboardWindowTitle)
     $left += Stop-CamTerminalWindow -Title 'cam.health'
     $report.WindowsLeft = $left
     if ($left -gt 0) { & $log ("{0} terminal window(s) would not close" -f $left) 'Yellow' }
