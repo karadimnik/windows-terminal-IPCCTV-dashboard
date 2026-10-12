@@ -429,14 +429,6 @@ $WindowHeight = $Layout.PaneHeight
 
 # 4. Build MPV commands and encode them for absolute safety
 #
-# What each pane is told about the relay: the serving set this script measured
-# once, rendered as a literal array; how long it may keep asking about its own
-# path if that set does not have it; and how far into the stagger it sits.
-$ReadyPathsLiteral = '@()'
-if ($ReadyPaths.Count -gt 0) {
-    $ReadyPathsLiteral = '@(' + (($ReadyPaths | ForEach-Object { "'" + ([string]$_).Replace("'", "''") + "'" }) -join ', ') + ')'
-}
-
 $EncodedCommands = @()
 $i = 0
 
@@ -457,6 +449,28 @@ foreach ($Stream in $Streams.GetEnumerator()) {
     # between the relay and the camera on every iteration rather than once.
     # Built by substitution into a single-quoted template: nothing in it is
     # interpolated by this script except the placeholders.
+    #
+    # KEEP THIS TEMPLATE SHORT, and comment it here rather than inside it.
+    # Every character is UTF-16 encoded and base64'd, which costs 2.67 bytes of
+    # ONE shared Windows command line, six times over - and that line cannot
+    # exceed 32767 characters. Measured: five extra comment lines in here took
+    # the wt.exe invocation to 42040 characters, at which point nothing
+    # launched at all and nothing said why. The guard below the loop is what
+    # turns that back into an error message.
+    #
+    # What the three batch-startup placeholders do:
+    #   __STAGGERMS__   this pane's place in the launch stagger, so six panes
+    #                   do not open six RTSP sessions and fire six control-API
+    #                   probes in the same instant.
+    #   __READYPATHS__  @('<this path>') when the dashboard measured this
+    #                   camera's path serving just now, @() when it did not. A
+    #                   pane only ever asks about its own path, so one shared
+    #                   measurement is all it needs and no probe is made.
+    #   __WAITSECONDS__ how long the pane keeps asking for its own path when
+    #                   that measurement was @().
+    # All three apply to the FIRST attempt only. From the second iteration the
+    # loop decides on the spot with no wait, which is what leaves a relay that
+    # died behind and picks up one that came back.
     $PaneTemplate = @'
 $ErrorActionPreference = 'Stop'
 . '__LIB__'
@@ -470,35 +484,16 @@ foreach ($candidate in (Get-CamList)) {
 if (-not $camera) { throw "Camera '$camName' is no longer in cameras.json." }
 $relayPath = Get-CamRelayPathName -SafeName (Get-CamSafeName -Name $camera.Name)
 $directUrl = Get-CamRtspUrl -Camera $camera -Credential $credential
-
-# This pane's place in the stagger, so six panes do not open six RTSP sessions
-# and six control-API probes in the same instant.
 Start-Sleep -Milliseconds __STAGGERMS__
-
-# The serving set the dashboard measured ONCE for every pane, and the budget
-# for asking about this one path if it is missing from that set. Both belong to
-# the FIRST attempt only: from the second iteration on, the loop decides on the
-# spot with no wait, which is what leaves a relay that died behind and picks one
-# that came back up.
-$readyPaths = __READYPATHS__
-$waitSeconds = __WAITSECONDS__
-
+$batch = @{ ReadyPaths = __READYPATHS__; WaitSeconds = __WAITSECONDS__ }
 # mpv reports progress on stderr, which would be a terminating error under Stop.
 $ErrorActionPreference = 'Continue'
 while ($true) {
-    if ($null -ne $readyPaths) {
-        $choice = Get-CamInputUrl -Config $config -RelayPathName $relayPath -DirectUrl $directUrl `
-            -ReadyPaths $readyPaths -WaitSeconds $waitSeconds
-        if ($choice.Mode -eq 'direct' -and $choice.WaitedSeconds -gt 0) {
-            Write-Host ("{0} {1}: the relay never served '{2}' in {3}s, taking a direct camera slot" -f (Get-Date -Format 'HH:mm:ss'), $camName, $relayPath, [int]$choice.WaitedSeconds) -ForegroundColor Yellow
-        }
-        $readyPaths = $null
-        $waitSeconds = 0
-    }
-    else {
-        $choice = Get-CamInputUrl -Config $config -RelayPathName $relayPath -DirectUrl $directUrl
-    }
-    Write-Host ("{0} {1} on the {2} input: {3}" -f (Get-Date -Format 'HH:mm:ss'), $camName, $choice.Mode, (Get-CamRedacted -Text $choice.Url)) -ForegroundColor Cyan
+    $choice = Get-CamInputUrl -Config $config -RelayPathName $relayPath -DirectUrl $directUrl @batch
+    $batch = @{}
+    $waited = ''
+    if ($choice.WaitedSeconds -gt 0) { $waited = ' after waiting {0}s' -f [int]$choice.WaitedSeconds }
+    Write-Host ("{0} {1} on the {2} input{3}: {4}" -f (Get-Date -Format 'HH:mm:ss'), $camName, $choice.Mode, $waited, (Get-CamRedacted -Text $choice.Url)) -ForegroundColor Cyan
     & '__MPV__' $choice.Url __FLAGS__
     Write-Host 'Stream interrupted. Restarting in 3 seconds...' -ForegroundColor Yellow
     Start-Sleep -Seconds 3
@@ -509,7 +504,15 @@ while ($true) {
     $ScriptBlock = $ScriptBlock.Replace('__NAME__', ([string]$Stream.Key).Replace("'", "''"))
     $ScriptBlock = $ScriptBlock.Replace('__MPV__', $MpvPath.Replace("'", "''"))
     $ScriptBlock = $ScriptBlock.Replace('__FLAGS__', "$Flags $OverlayOpts $Geometry")
-    $ScriptBlock = $ScriptBlock.Replace('__READYPATHS__', $ReadyPathsLiteral)
+    # A pane only ever asks about its own path, so the shared measurement
+    # reaches it as one name or as nothing at all. Rendered as a literal rather
+    # than passed as data because the whole pane script travels as one
+    # base64 blob on the wt.exe command line.
+    $ServingLiteral = '@()'
+    if ($ReadyPaths -contains $Stream.Value.RelayPath) {
+        $ServingLiteral = "@('" + ([string]$Stream.Value.RelayPath).Replace("'", "''") + "')"
+    }
+    $ScriptBlock = $ScriptBlock.Replace('__READYPATHS__', $ServingLiteral)
     $ScriptBlock = $ScriptBlock.Replace('__WAITSECONDS__', $RelayReadyWait.ToString([cultureinfo]::InvariantCulture))
     $ScriptBlock = $ScriptBlock.Replace('__STAGGERMS__', ($i * $StaggerMs).ToString([cultureinfo]::InvariantCulture))
     
@@ -558,6 +561,21 @@ for ($j = 1; $j -lt $EncodedCommands.Count; $j++) {
 }
 
 # 6. Execute Windows Terminal directly
+#
+# Every pane travels inside this ONE command line, and Windows refuses to
+# create a process from more than 32767 characters of it. Over that limit
+# wt.exe does not start, does not complain and leaves no window, so the
+# dashboard simply never appears - measured at 42040 characters, which is what
+# five extra comment lines in the pane template cost once base64 had tripled
+# them six times over. An explicit limit is the difference between a diagnosis
+# and a mystery.
+$CommandLineChars = ($WtArgs | Measure-Object -Property Length -Sum).Sum + $WtArgs.Count + 7
+Write-Host ("wt.exe command line: {0} of the 32767 characters Windows allows, {1} pane(s)" -f `
+    $CommandLineChars, $EncodedCommands.Count)
+if ($CommandLineChars -gt 32000) {
+    throw ("The pane commands need {0} characters of command line and Windows allows 32767. Shorten the pane template in this script - every character in it costs 2.67 bytes per pane - or reduce the camera count." -f $CommandLineChars)
+}
+
 & wt.exe $WtArgs
 
 # 7. The health strip, into its own window, after the grid so it comes up on
