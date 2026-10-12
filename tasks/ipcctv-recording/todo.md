@@ -348,7 +348,7 @@ more direct connections.
 
 - [x] **[37]** DONE 2026-10-12: an mpv pane that chose direct now watches its own relay path and
       returns to the relay on its own. See the section below.
-- [ ] **[38]** The six pane commands are 26987 of the 32767 characters Windows allows on a
+- [ ] **[38]** The six pane commands are 27803 of the 32767 characters Windows allows on a
       command line, because each pane travels as a base64 blob on one `wt.exe` invocation. Seven
       cameras would not fit. The launch now prints the count and throws over 32000 instead of
       silently opening nothing, which is what it did at 42040. A real fix is moving the pane loop
