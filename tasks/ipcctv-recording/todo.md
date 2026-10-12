@@ -346,14 +346,38 @@ more direct connections.
 
 ## Carried forward after the relay-readiness fix
 
-- [ ] **[37]** An mpv pane that fell back to direct stays there. mpv on a healthy direct stream
-      never exits, so the pane loop never gets another attempt in which to notice the relay is
-      serving again, and the camera sits at `readers=1` until the dashboard is relaunched. The
-      recorder has the equivalent promotion (it stops a direct child once the path serves); the
-      dashboard has nothing. Pre-existing, not introduced by this commission, and a fix means a
-      visible blink in that pane - the Operator's call.
+- [x] **[37]** DONE 2026-10-12: an mpv pane that chose direct now watches its own relay path and
+      returns to the relay on its own. See the section below.
 - [ ] **[38]** The six pane commands are 26987 of the 32767 characters Windows allows on a
       command line, because each pane travels as a base64 blob on one `wt.exe` invocation. Seven
       cameras would not fit. The launch now prints the count and throws over 32000 instead of
       silently opening nothing, which is what it did at 42040. A real fix is moving the pane loop
       into `cam.common.ps1` and passing arguments instead of a script.
+
+
+## Viewer promotion added 2026-10-12 - item [37]
+
+**The asymmetry.** A recorder child promotes itself off a direct connection because its supervisor
+restarts it and re-decides. A pane only re-decides when mpv exits, and mpv on a healthy DIRECT
+stream never exits, so a pane that fell back during a relay outage held that camera's second RTSP
+session until the dashboard was relaunched. Measured before the fix: after a MediaMTX kill and
+recovery the serving paths sat at `readers=1`, the recorder back and the viewer not.
+
+**The shape.** `Invoke-CamViewer` in `cam.common.ps1` runs mpv as a child and, only when this
+attempt chose direct, asks every `ViewerPromoteCheckSeconds` (default 10) whether this ONE path is
+serving again. When it is, `Stop-CamViewer` closes mpv and the function returns $true so the loop
+decides again at once instead of printing an interruption and sleeping. A pane already on the relay
+watches nothing: if the relay dies mpv loses its input and exits by itself. The agreed cost is one
+brief blink in that pane, once per outage.
+
+**Two details that are easy to get wrong.** The wait is `Process.WaitForExit($ms)`, so the poll
+keeps to the clock, costs nothing between polls, and still notices mpv's own exit in the same call -
+that is what makes the permanently offline Workshop pane safe to leave polling for a day.
+`mpv.com` is a console wrapper that re-execs `mpv.exe`: the video window belongs to the CHILD, so
+stopping the wrapper would orphan a window still holding the camera. `Stop-CamViewer` closes the
+child's window (measured: child out in ~220 ms, wrapper ~140 ms later), and only kills - by handle,
+never by image name - if the close is ignored.
+
+**Command-line budget.** The pane template grew 51 characters and lost the stderr comment it no
+longer needs. The `wt.exe` invocation measures **27803** of Windows' 32767, up from 26987, with the
+launcher's own guard still throwing above 32000.
