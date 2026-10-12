@@ -1625,14 +1625,10 @@ function New-CamChildEntry {
     # rebuilt from RelayPath at every start.
     $entry.Url = $Camera.Url
     $entry.RelayPath = $RelayPathName
-    # The bounded wait for this camera's OWN relay path, spent across the
-    # supervisor's cycles rather than blocking inside one - which is what
-    # keeps an offline camera, whose path can never become ready, from holding
-    # up every other child. FIRST START ONLY: a restart has to fall straight
-    # through to direct, because that is what leaves a relay that died mid-run
-    # behind instead of retrying against a dead address.
-    $entry.RelayWait = ($RelayPathName -ne '')
-    $entry.RelayWaitUntil = $null
+    # When this child was first held back from starting, waiting for its own
+    # relay path to come up, or null when it is not being held. Carried only so
+    # the giving-up is logged once per episode rather than once per cycle.
+    $entry.RelayHeldSince = $null
     # Which input the most recent start actually used, for the log and for
     # status.json. Empty until the child has been started once.
     $entry.InputMode = ''
@@ -3262,6 +3258,28 @@ function Invoke-CamSupervisor {
             $relayReady = $null
             if ($relay -and ($statusDue -or $pendingStart)) { $relayReady = @(Get-CamRelayReadyPaths -Config $Config) }
 
+            # Until when a child may be held back from starting, waiting for its
+            # own relay path. It is the RESTREAMER'S age that decides, because
+            # the only reason to hold a camera's second session free is that
+            # something is still pulling into it:
+            #
+            #   restreamer young  - cold start, or it has just been restarted,
+            #                       so its paths are still coming up and a
+            #                       recorder taking the second camera slot now
+            #                       would lock it out of that camera for good.
+            #                       Measured: kill MediaMTX, let all six
+            #                       recorders reconnect directly, and five of
+            #                       six paths never serve again.
+            #   restreamer old    - it has been up for a while and still is not
+            #                       serving this path, so waiting would achieve
+            #                       nothing. Decide now, take the direct input.
+            #   restreamer gone   - no hold at all, which is the fallback the
+            #                       whole per-attempt design rests on.
+            $relayWaitDeadline = $null
+            if ($relay -and $relay.Process -and -not $relay.Process.HasExited) {
+                $relayWaitDeadline = $relay.StartedAt.AddSeconds($relayReadyWait)
+            }
+
             $startedThisCycle = 0
 
             foreach ($entry in @($children.Values)) {
@@ -3345,25 +3363,28 @@ function Invoke-CamSupervisor {
                 }
                 else {
                     if ($now -ge $entry.NextStartAt) {
-                        # A camera starting for the FIRST time waits, bounded,
-                        # for its own relay path to come up before it decides.
-                        # Waiting here rather than inside the decision costs
-                        # nothing and blocks nobody: this cycle simply moves on
-                        # to the next child, so the five healthy cameras start
-                        # while the offline one is still being waited for.
-                        if ($relay -and $entry.RelayWait) {
-                            if ($null -eq $entry.RelayWaitUntil) {
-                                $entry.RelayWaitUntil = $now.AddSeconds($relayReadyWait)
-                            }
+                        # Hold this camera's second session free while the
+                        # restreamer is still bringing its path up. Waiting
+                        # here rather than inside the decision costs nothing
+                        # and blocks nobody: the cycle simply moves on to the
+                        # next child, so the healthy cameras start while an
+                        # offline one - whose path can never become ready - is
+                        # still being waited for.
+                        if ($entry.RelayPath) {
                             $pathServing = ($null -ne $relayReady -and @($relayReady) -contains $entry.RelayPath)
-                            if (-not $pathServing -and $now -lt $entry.RelayWaitUntil) { continue }
-                            if (-not $pathServing) {
-                                $message = "{0}: the restreamer is still not serving '{1}' after {2}s, starting it on the direct input" -f `
-                                    $entry.Name, $entry.RelayPath, $relayReadyWait
-                                Write-CamLog -Path $supervisorLog -Message $message -MaxBytes $maxBytes
-                                Write-CamHost -Message $message -Colour 'Yellow'
+                            if (-not $pathServing -and $null -ne $relayWaitDeadline -and $now -lt $relayWaitDeadline) {
+                                if ($null -eq $entry.RelayHeldSince) { $entry.RelayHeldSince = $now }
+                                continue
                             }
-                            $entry.RelayWait = $false
+                            if ($null -ne $entry.RelayHeldSince) {
+                                if (-not $pathServing) {
+                                    $message = "{0}: the restreamer did not serve '{1}' within {2}s, starting it on the direct input" -f `
+                                        $entry.Name, $entry.RelayPath, $relayReadyWait
+                                    Write-CamLog -Path $supervisorLog -Message $message -MaxBytes $maxBytes
+                                    Write-CamHost -Message $message -Colour 'Yellow'
+                                }
+                                $entry.RelayHeldSince = $null
+                            }
                         }
 
                         # Stagger: six ffmpeg children opening their inputs in

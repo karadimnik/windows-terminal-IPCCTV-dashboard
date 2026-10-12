@@ -25,8 +25,10 @@ $script:CamTestRepo = Split-Path -Path $script:CamTestRoot -Parent
 . (Join-Path -Path $script:CamTestRepo -ChildPath 'cam.common.ps1')
 
 # cameras.json as the Operator maintains it. A commission that changes the file
-# updates these two constants in the same commit, deliberately.
-$script:CamTestCameraListSha256 = '23b90b00714bb5d6439df1d06ef28b8f37026913e64b83779a2c5976ae6dcc3f'
+# updates these two constants in the same commit, deliberately. The pin exists
+# to catch a TEST RUN mutating the file, not to freeze the Operator's choices:
+# this value is all six cameras with Record true, which is how he runs it.
+$script:CamTestCameraListSha256 = 'f9bda083e8696badd80e3775a12d125ee2698e41ea3fc79bf2c579f9f5a07ae4'
 $script:CamTestCameraListBom = 'efbbbf'
 
 
