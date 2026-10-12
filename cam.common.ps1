@@ -12,6 +12,11 @@
 # Directory this library lives in. cameras.json, camera_creds.xml and
 # recorder.config.json are all expected beside it.
 $script:CamLibRoot = $PSScriptRoot
+
+# The one log file Write-CamLog also echoes to the console, set by
+# Set-CamLogEcho. Null means file only, which is what every script other than
+# the NVR supervisor wants.
+$script:CamLogEchoPath = $null
 if (-not $script:CamLibRoot) { $script:CamLibRoot = (Get-Location).Path }
 
 # Literal strings that must never reach a log, a status file or the console.
@@ -1291,6 +1296,28 @@ function Write-CamLog {
     }
 
     [System.IO.File]::AppendAllText($Path, $line + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+
+    # The NVR window is the supervisor's own console, and the Operator asked
+    # to see the log in it. Echoing here rather than at the call sites means
+    # every line that reaches the file reaches the screen, with its timestamp
+    # and already redacted, and nothing has to be remembered when a new log
+    # line is added. Only the one registered file echoes: the per-camera logs
+    # carry raw ffmpeg stderr and would bury it.
+    if ($script:CamLogEchoPath -and $Path -eq $script:CamLogEchoPath) {
+        Write-Host $line
+    }
+}
+
+
+function Set-CamLogEcho {
+    <#
+        Registers one log file whose lines Write-CamLog also writes to the
+        console, or clears the registration when called with no path.
+    #>
+    param([AllowEmptyString()][string]$Path = '')
+
+    if ([string]::IsNullOrEmpty($Path)) { $script:CamLogEchoPath = $null }
+    else { $script:CamLogEchoPath = $Path }
 }
 
 
@@ -1906,6 +1933,59 @@ function Stop-CamTerminalWindow {
 }
 
 
+function Start-CamDetachedProcess {
+    <#
+        Starts powershell.exe running one script in a console of its OWN with
+        no window at all, and returns the Process object.
+
+        Every background helper in this project is launched this way, and the
+        reason is measured rather than stylistic. The obvious
+        Start-Process -WindowStyle Hidden gets both halves wrong:
+
+        - Start-Process uses ShellExecute and passes no console flag, so the
+          child INHERITS the launcher's console. It is then one of the
+          processes attached to whatever terminal the launcher was typed into,
+          and closing that terminal delivers CTRL_CLOSE_EVENT to the child
+          too. For a warden holding the only handle to a KILL_ON_JOB_CLOSE
+          job, that means an unrelated terminal window closing takes down
+          everything the job protects.
+
+        - A console created WITH a window is handed to the default terminal
+          application. Measured on 2026-10-12 on this machine: creating a
+          console with a window activated OpenConsole.exe -Embedding and the
+          console arrived as a TAB in the Operator's existing Windows Terminal
+          window, because windowingBehavior is useExisting. Closing that
+          window then kills the process. That is exactly how the recording
+          supervisor died four times in one day.
+
+        CREATE_NO_WINDOW, which is what ProcessStartInfo.CreateNoWindow sets
+        when UseShellExecute is false, avoids both. Measured the same day, the
+        child reporting on itself: GetConsoleProcessList returns only its own
+        pid, GetConsoleWindow returns NULL, no OpenConsole -Embedding is
+        activated and no tab appears. Write-Host still works.
+
+        DETACHED_PROCESS was measured too and is not usable: powershell.exe
+        with no console at all never reached its first statement.
+    #>
+    param(
+        # The script to run, as source text. Passed as -EncodedCommand, so it
+        # may be several lines and may contain quotes.
+        [Parameter(Mandatory = $true)][string]$Script
+    )
+
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Script))
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -EncodedCommand {0}' -f $encoded)
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $process = [System.Diagnostics.Process]::Start($psi)
+
+    # Touching Handle first: ExitCode and HasExited can otherwise come back
+    # null on a process this one never waits for.
+    [void]$process.Handle
+    return $process
+}
 function Import-CamJobApi {
     <#
         Win32 job objects - the purpose-built primitive for "these processes
@@ -2073,10 +2153,49 @@ function Get-CamDashboardWindowTitle {
 }
 
 
+function Get-CamNvrJobName {
+    <#
+        The job the NVR window owns: the supervisor pane, and so MediaMTX and
+        every ffmpeg the supervisor starts afterwards.
+
+        A fixed name, not one per launch, so the control surface can find the
+        NVR with no state file to go stale. CreateExclusive refuses a second
+        owner, which is what stops two NVR windows sharing one job.
+    #>
+    return 'cam.nvr'
+}
+
+
+function Get-CamNvrWindowTitle {
+    <#
+        The title the NVR window carries, set with wt.exe's --title AND
+        --suppressApplicationTitle. Without the second one the shell
+        overwrites it and the title follows whatever the pane is doing, so it
+        cannot be used to find the window.
+    #>
+    return 'cam.nvr'
+}
+
+
+function Get-CamNvrWtWindowName {
+    <#
+        The wt.exe -w window name for the NVR.
+
+        Load-bearing: windowingBehavior is useExisting on this machine, so
+        without -w the NVR pane arrives as a TAB in whatever terminal window
+        was last used - the Operator's own - and closing that window would
+        stop the whole system. With -w the NVR is a window of its own.
+    #>
+    return 'ipcctv-nvr'
+}
+
+
 function Add-CamJobMember {
     <#
         Puts THIS process, and so every process it starts afterwards, into the
-        dashboard job. Called once by each pane, before it ever starts mpv.
+        job named. Called once by each member, before it starts anything
+        that must die with it - a pane before its mpv, the NVR supervisor
+        before MediaMTX and ffmpeg.
 
         Writes one line rather than returning a value, so a pane can call it
         as a bare statement - every character of a pane's script costs 2.67
@@ -2101,13 +2220,13 @@ function Add-CamJobMember {
     while ((Get-Date) -lt $deadline) {
         $problem = [CamJob]::JoinCurrentProcess($JobName)
         if ([string]::IsNullOrEmpty($problem)) {
-            Write-Host ("{0} joined the dashboard job '{1}'" -f (Get-Date -Format 'HH:mm:ss'), $JobName) -ForegroundColor DarkGray
+            Write-Host ("{0} joined the job '{1}'" -f (Get-Date -Format 'HH:mm:ss'), $JobName) -ForegroundColor DarkGray
             return
         }
         Start-Sleep -Milliseconds 500
     }
-    Write-Host ("{0} NOT in the dashboard job: {1}. Closing the window will not stop this pane." -f `
-        (Get-Date -Format 'HH:mm:ss'), $problem) -ForegroundColor Yellow
+    Write-Host ("{0} NOT in the job '{2}': {1}. Closing the window will not stop this process." -f `
+        (Get-Date -Format 'HH:mm:ss'), $problem, $JobName) -ForegroundColor Yellow
 }
 
 
@@ -2224,6 +2343,14 @@ function Get-CamProcessInventory {
         $decoded = Get-CamDecodedCommand -CommandLine $line
         $text = $line + "`n" + $decoded
 
+        if ($text -match 'Start-CamNvrWarden') {
+            # A role of its own, deliberately. Stop-CamDashboard stops every
+            # 'Warden' it finds, and the NVR warden holds the only handle to
+            # the recorder's job - stopping it would take the supervisor,
+            # MediaMTX and every ffmpeg with it.
+            Add-InventoryItem 'NvrWarden' $process ('owns the job ' + (Get-CamNvrJobName))
+            continue
+        }
         if ($text -match 'Start-CamDashboardWarden') {
             Add-InventoryItem 'Warden' $process ('owns the job ' + (Get-CamDashboardJobName))
             continue
@@ -2370,7 +2497,8 @@ function Stop-CamProcessList {
 
 function Get-CamRecorderKeepList {
     <#
-        The recording supervisor and every process below it.
+        The recording supervisor, every process below it, and the warden
+        that holds the NVR job open.
 
         Recording runs 24/7 from a Scheduled Task and is stopped only through
         the recorder's own -Stop, which tears its children down in order. No
@@ -2382,7 +2510,7 @@ function Get-CamRecorderKeepList {
     if (-not $Inventory) { $Inventory = Get-CamProcessInventory }
     $keep = New-Object System.Collections.ArrayList
     foreach ($item in $Inventory) {
-        if ($item.Role -in @('Supervisor', 'Recorder', 'Relay')) {
+        if ($item.Role -in @('Supervisor', 'Recorder', 'Relay', 'NvrWarden')) {
             if (-not $keep.Contains([int]$item.ProcessId)) { [void]$keep.Add([int]$item.ProcessId) }
         }
     }
@@ -2471,44 +2599,58 @@ function Stop-CamDashboard {
 }
 
 
-function Start-CamDashboardWarden {
+function Start-CamJobWarden {
     <#
-        The hard dependency between the dashboard window and its panes.
+        The hard dependency between a terminal window and the processes that
+        belong to it. One of these runs per window that owns a job.
 
-        Closing the Windows Terminal window used to leave all six panes
-        running headless, each holding an mpv and one of its camera's two
-        RTSP sessions, until somebody found them in Task Manager. Nothing in
-        the pane could see it happen: measured on 2026-10-12, a pane's console
-        survives the window's death intact - GetConsoleScreenBufferInfo still
-        succeeds, the pty host process is still running - so a pane cannot
-        detect this at all, let alone while it is blocked in mpv.
+        A process inside a Windows Terminal window cannot reliably see its own
+        window close: measured on 2026-10-12, a pane's console survives the
+        window's death intact - GetConsoleScreenBufferInfo still succeeds, the
+        pty host is still running - and a pane blocked inside mpv or inside a
+        supervisor loop would not notice anyway.
 
-        So the dependency is held outside the panes, by the kernel. This
-        process creates the job the panes join, and holds the only handle to
+        So the dependency is held outside the window, by the kernel. This
+        process creates the job its members join and holds the only handle to
         it. When the window goes, this process goes, the last handle closes,
-        and JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every pane and every
-        mpv at once - no polling inside the panes, nothing to miss while mpv
-        is blocking for hours.
+        and JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every member and
+        every process a member started - no polling inside the members,
+        nothing to miss while one of them is blocking for hours.
 
-        It runs detached with no window of its own and costs one IsWindow call
-        a second.
+        It runs detached with a console of its own and no window (see
+        Start-CamDetachedProcess) and costs one IsWindow call a second.
 
         If the window never appears, the job is DISARMED before this process
-        exits, so a launch that failed somewhere else cannot have its panes
+        exits, so a launch that failed somewhere else cannot have its members
         killed by a warden that simply never found what it was watching.
     #>
     param(
-        [string]$JobName = (Get-CamDashboardJobName),
-        [string]$WindowTitle = (Get-CamDashboardWindowTitle),
+        [Parameter(Mandatory = $true)][string]$JobName,
+        [Parameter(Mandatory = $true)][string]$WindowTitle,
 
-        # The grid has to open, six panes have to start and each has to reach
-        # its first mpv. Generous, because the cost of being wrong is killing
-        # a working dashboard.
+        # The window has to open and every member has to start and reach its
+        # first real work. Generous, because the cost of being wrong is
+        # killing a working system.
         [int]$AppearTimeoutSeconds = 180,
 
         [int]$PollMs = 1000,
 
-        [AllowEmptyString()][string]$LogPath = ''
+        [AllowEmptyString()][string]$LogPath = '',
+
+        # Other windows to close once the watched one has gone. A window that
+        # is not part of this job but belongs to the same thing on screen -
+        # the health strip is one - would otherwise be left showing panes
+        # whose processes were killed under it.
+        [AllowEmptyCollection()][string[]]$AlsoCloseWindowTitle = @(),
+
+        # The viewers are a job of their own with a warden of their own, so
+        # they are not swept by this job closing. The NVR window owns the
+        # whole system, so when it goes they go with it. Stopped through the
+        # one control surface when its path is given and resolves, which is
+        # the audited path; by terminating their job directly when it does
+        # not, because the repo can live on a share that is not reachable.
+        [switch]$StopViewers,
+        [AllowEmptyString()][string]$ControlSurface = ''
     )
 
     Import-CamJobApi
@@ -2524,7 +2666,7 @@ function Start-CamDashboardWarden {
     }
 
     $job = [CamJob]::CreateExclusive($JobName)
-    & $say ("created and armed the job '{0}'" -f $JobName)
+    & $say ("created and armed the job '{0}', watching for the window '{1}'" -f $JobName, $WindowTitle)
 
     try {
         $hwnd = [IntPtr]::Zero
@@ -2536,7 +2678,7 @@ function Start-CamDashboardWarden {
         }
 
         if ($hwnd -eq [IntPtr]::Zero) {
-            & $say ("no terminal window titled '{0}' appeared within {1}s - disarming the job and leaving the panes alone" -f `
+            & $say ("no terminal window titled '{0}' appeared within {1}s - disarming the job and leaving its members alone" -f `
                 $WindowTitle, $AppearTimeoutSeconds)
             [CamJob]::Disarm($job)
             return
@@ -2544,12 +2686,31 @@ function Start-CamDashboardWarden {
 
         & $say ("watching window 0x{0:X} (terminal pid {1})" -f $hwnd.ToInt64(), [CamWin]::ProcessIdOf($hwnd))
         while ([CamWin]::IsWindow($hwnd)) { Start-Sleep -Milliseconds $PollMs }
-        & $say ("window 0x{0:X} is gone - stopping the panes and their mpv" -f $hwnd.ToInt64())
+        & $say ("window 0x{0:X} is gone - stopping everything it owned" -f $hwnd.ToInt64())
 
-        # The health strip is a window of its own, so the grid closing does
-        # not take it. Close it before the job goes, or it is left showing a
-        # pane whose process was killed under it.
-        [void](Stop-CamTerminalWindow -Title 'cam.health')
+        if ($StopViewers) {
+            $stopped = $false
+            if (-not [string]::IsNullOrEmpty($ControlSurface)) {
+                try {
+                    if (Test-Path -LiteralPath $ControlSurface) {
+                        & $ControlSurface -Stop -Dashboard | Out-Null
+                        $stopped = $true
+                        & $say 'stopped the viewers through cam.ps1 -Stop -Dashboard'
+                    }
+                }
+                catch { & $say ('cam.ps1 -Stop -Dashboard failed: ' + $_.Exception.Message) }
+            }
+            if (-not $stopped) {
+                [void][CamJob]::Terminate((Get-CamDashboardJobName))
+                [void](Stop-CamTerminalWindow -Title (Get-CamDashboardWindowTitle))
+                & $say 'stopped the viewers by terminating their job directly'
+            }
+        }
+
+        foreach ($title in $AlsoCloseWindowTitle) {
+            if ([string]::IsNullOrEmpty($title)) { continue }
+            [void](Stop-CamTerminalWindow -Title $title)
+        }
     }
     finally {
         # Closing the last handle is what kills the job's members. Explicit,
@@ -2557,6 +2718,159 @@ function Start-CamDashboardWarden {
         # thing that happens before they go.
         [void][CamJob]::CloseHandle($job)
     }
+}
+
+
+function Start-CamDashboardWarden {
+    <#
+        The warden for the viewer grid: closing the grid window stops all six
+        panes and every mpv they own. Item [40].
+
+        The health strip is a window of its own, so the grid closing does not
+        take it; it is closed here, before the job goes, or it would be left
+        showing panes whose processes were killed under it.
+    #>
+    param(
+        [string]$JobName = (Get-CamDashboardJobName),
+        [string]$WindowTitle = (Get-CamDashboardWindowTitle),
+        [int]$AppearTimeoutSeconds = 180,
+        [int]$PollMs = 1000,
+        [AllowEmptyString()][string]$LogPath = ''
+    )
+
+    Start-CamJobWarden -JobName $JobName -WindowTitle $WindowTitle `
+        -AppearTimeoutSeconds $AppearTimeoutSeconds -PollMs $PollMs -LogPath $LogPath `
+        -AlsoCloseWindowTitle @('cam.health')
+}
+
+
+function Start-CamNvrWarden {
+    <#
+        The warden for the NVR window: closing it stops the supervisor, the
+        relay, every ffmpeg and the viewers.
+
+        The supervisor runs as the NVR window's only pane and joins this job
+        before it starts anything, so MediaMTX and every ffmpeg inherit
+        membership at creation and the kernel takes the lot in one sweep. That
+        is what makes "no orphans" structural rather than a matter of the
+        supervisor getting a chance to clean up - a console close does not let
+        it run its finally block at all.
+    #>
+    param(
+        [string]$JobName = (Get-CamNvrJobName),
+        [string]$WindowTitle = (Get-CamNvrWindowTitle),
+        [int]$AppearTimeoutSeconds = 180,
+        [int]$PollMs = 1000,
+        [AllowEmptyString()][string]$LogPath = '',
+        [AllowEmptyString()][string]$ControlSurface = ''
+    )
+
+    Start-CamJobWarden -JobName $JobName -WindowTitle $WindowTitle `
+        -AppearTimeoutSeconds $AppearTimeoutSeconds -PollMs $PollMs -LogPath $LogPath `
+        -StopViewers -ControlSurface $ControlSurface
+}
+
+
+function Start-CamNvrWindow {
+    <#
+        Opens the NVR: one Windows Terminal window of its own, titled
+        cam.nvr, running the recording supervisor as its only pane with the
+        supervisor log on screen.
+
+        That window IS the NVR. Closing it deliberately stops the supervisor,
+        MediaMTX, every ffmpeg and the viewers. Closing any other terminal
+        does nothing, which is the whole point of launching it this way:
+        before this existed the supervisor was a hidden console created by the
+        Scheduled Task, and on a machine where Windows Terminal is the default
+        terminal application with windowingBehavior useExisting, such a
+        console is ADOPTED as a tab in whatever terminal window already
+        exists. The Operator's. Closing it sent CTRL_CLOSE_EVENT to the
+        supervisor, which PowerShell answers by terminating without running
+        any finally block - no shutdown line in the log, and four ffmpeg plus
+        MediaMTX left orphaned and still writing. Measured four times on
+        2026-10-12.
+
+        Order matters. The warden starts BEFORE wt.exe, because the pane joins
+        the job as its first statement and the job has to exist by then: a
+        supervisor that joined late would already have started MediaMTX and
+        ffmpeg outside the job, and those are what must not be left behind.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+
+        # The warden creates the job within a few hundred ms. Waiting is
+        # cheap and the alternative is a window whose close does nothing.
+        [int]$JobWaitSeconds = 10,
+
+        [int]$WindowWaitSeconds = 30
+    )
+
+    Import-CamJobApi
+    Import-CamWindowApi
+
+    $jobName = Get-CamNvrJobName
+    $title = Get-CamNvrWindowTitle
+    $repo = $script:CamLibRoot
+    $libPath = Join-Path -Path $repo -ChildPath 'cam.common.ps1'
+    $recorderPath = Join-Path -Path $repo -ChildPath 'cam.recorder.ps1'
+    $controlPath = Join-Path -Path $repo -ChildPath 'cam.ps1'
+
+    $report = [pscustomobject]@{
+        AlreadyOpen = $false
+        WardenPid   = 0
+        JobReady    = $false
+        WindowFound = $false
+        Title       = $title
+        JobName     = $jobName
+    }
+
+    if (@(Get-CamTerminalWindow -Title $title).Count -ge 1) {
+        $report.AlreadyOpen = $true
+        $report.WindowFound = $true
+        return $report
+    }
+
+    # A job that exists with no window means a warden is still watching for
+    # one. Starting a second NVR would give the second warden an exclusive
+    # create that fails, and leave a window nothing owns.
+    if ([CamJob]::Exists($jobName)) {
+        throw "The job '$jobName' already exists but no window titled '$title' is open. A warden is still watching for one, or an NVR is shutting down. Run cam.ps1 -Status, and cam.ps1 -Stop -Recorder if it is stuck."
+    }
+
+    $wardenLog = Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath 'nvr-warden.log'
+    $wardenScript = ". '{0}'`nStart-CamNvrWarden -LogPath '{1}' -ControlSurface '{2}'" -f `
+        $libPath.Replace("'", "''"), $wardenLog.Replace("'", "''"), $controlPath.Replace("'", "''")
+    $warden = Start-CamDetachedProcess -Script $wardenScript
+    $report.WardenPid = $warden.Id
+
+    $deadline = (Get-Date).AddSeconds($JobWaitSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ([CamJob]::Exists($jobName)) { $report.JobReady = $true; break }
+        Start-Sleep -Milliseconds 250
+    }
+
+    # The pane joins the job, then becomes the supervisor. One process: the
+    # pane IS the supervisor, so the inventory finds it as the parent of every
+    # ffmpeg exactly as before.
+    $paneScript = ". '{0}'`nAdd-CamJobMember -JobName '{1}'`n& '{2}' -Run" -f `
+        $libPath.Replace("'", "''"), $jobName.Replace("'", "''"), $recorderPath.Replace("'", "''")
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($paneScript))
+
+    # -w gives the NVR a window of its own; --title plus
+    # --suppressApplicationTitle keep the title put, which is how the warden
+    # and the control surface find it. -NoExit leaves the final log lines on
+    # screen when the supervisor stops, instead of the window vanishing.
+    $wtArgs = @('-w', (Get-CamNvrWtWindowName), 'new-tab', '--title', $title, '--suppressApplicationTitle',
+        'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-EncodedCommand', $encoded)
+    & wt.exe $wtArgs
+
+    $deadline = (Get-Date).AddSeconds($WindowWaitSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (@(Get-CamTerminalWindow -Title $title).Count -ge 1) { $report.WindowFound = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return $report
 }
 
 

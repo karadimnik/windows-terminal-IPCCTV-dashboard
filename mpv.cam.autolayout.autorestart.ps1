@@ -592,9 +592,13 @@ if ($CommandLineChars -gt 32000) {
 $WardenScript = ". '{0}'`nStart-CamDashboardWarden -LogPath '{1}'" -f `
     $LibPath.Replace("'", "''"), `
     (Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath 'dashboard-warden.log').Replace("'", "''")
-$WardenEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($WardenScript))
-$Warden = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru `
-    -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $WardenEncoded
+#
+# Started through Start-CamDetachedProcess, not Start-Process -WindowStyle
+# Hidden: the latter leaves the warden attached to the console of whatever
+# terminal this script was run from, so closing that terminal would deliver
+# CTRL_CLOSE_EVENT to the warden, close the last handle to the job and kill
+# every pane and every mpv. See the measurements in Start-CamDetachedProcess.
+$Warden = Start-CamDetachedProcess -Script $WardenScript
 
 Import-CamJobApi
 $JobName = Get-CamDashboardJobName
