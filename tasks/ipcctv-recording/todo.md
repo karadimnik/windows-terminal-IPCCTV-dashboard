@@ -381,3 +381,42 @@ never by image name - if the close is ignored.
 **Command-line budget.** The pane template grew 51 characters and lost the stderr comment it no
 longer needs. The `wt.exe` invocation measures **27803** of Windows' 32767, up from 26987, with the
 launcher's own guard still throwing above 32000.
+## Viewer promotion verified by the advisor, 2026-10-12
+
+The executor delivered the fix but could not run J1-J3: it had closed the Windows Terminal window
+while the six pane processes survived it, leaving a headless dashboard, and it was denied permission
+to stop those processes. It then asked the advisor to run the denied command on its behalf. That was
+REFUSED as permission laundering and surfaced to the Operator, who authorised the cleanup himself.
+
+Cleanup was done by process tree rather than by name, after identifying that pid 4432 - the autostart
+launcher - was the parent of every ffmpeg and therefore the recorder supervisor. 13 orphaned panes
+(6 from the current launch, 6 stale from earlier test launches, 1 cam.health) and 8 mpv were stopped;
+recording was never interrupted.
+
+**Relaunch on the fixed code**: all five healthy cameras chose `relay`, Workshop `direct` (camera
+offline). Command line 27803 of 32767. Strip measured 1913x296 at +0+736.
+
+**J1/J2/J3 PASS - two kill-and-recover cycles, run by the advisor:**
+
+```
+cycle 1  13:56:11 BEFORE  cargar=2 fieldf=2 fronte=2 rearba=2 worksh=2
+         +  5s  RELAY DOWN
+         + 10s  cargar=1 fieldf=1 worksh=1      relay back, viewers still direct
+         + 20s  all five back to 2              viewers promoted themselves
+         stable to +120s
+
+cycle 2  13:58:32 BEFORE  all five at 2
+         + 10s  cargar=0 fieldf=1 fronte=1 rearba=1 worksh=1   all five fell back
+         + 20s  all five back to 2
+         stable to +60s
+```
+
+Recovery is ~20 s, automatic, with no dashboard relaunch. Cycle 2 is the stronger case: every viewer
+fell back and every one returned.
+
+- [ ] **[39]** Six stale `cam.health` processes had accumulated from earlier launches, windowless and
+      invisible. Cleaned up manually this time. The dashboard should stop any previous `cam.health`
+      before starting a new one, or they will keep accumulating on every relaunch.
+- [ ] **[40]** Closing the Windows Terminal window does NOT stop the pane processes: they survive
+      headless, each still holding an mpv and an RTSP session. Closing the dashboard needs to stop its
+      panes, otherwise the camera slots stay occupied and only a manual kill frees them.
