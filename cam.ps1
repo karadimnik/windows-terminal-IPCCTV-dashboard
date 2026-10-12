@@ -55,6 +55,11 @@
     .\cam.ps1 -Start
     .\cam.ps1 -InstallDashboardAutostart
 #>
+# The bare invocation is -Status, which needs saying explicitly: with several
+# parameter sets and no mandatory parameter in any of them, PowerShell cannot
+# pick one from no arguments at all and fails with "parameter set cannot be
+# resolved" instead. Measured on 2026-10-12 - .\cam.ps1 had never worked.
+[CmdletBinding(DefaultParameterSetName = 'Status')]
 param(
     [Parameter(ParameterSetName = 'Status')]
     [switch]$Status,

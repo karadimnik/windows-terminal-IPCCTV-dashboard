@@ -2685,7 +2685,6 @@ function New-CamLauncherStub {
 # no copy of it.
 
 $Target         = '__TARGET__'
-$TargetArgs     = __ARGS__
 $LogPath        = '__LOG__'
 $TimeoutSeconds = __TIMEOUT__
 $PollSeconds    = __POLL__
@@ -2721,23 +2720,41 @@ while (-not (Test-StubTarget)) {
     $waited += $PollSeconds
 }
 
-Write-StubLog ('target resolved after {0}s, starting {1} {2}' -f $waited, $Target, ($TargetArgs -join ' '))
+Write-StubLog ('target resolved after {0}s, starting {1} __ARGS__' -f $waited, $Target)
 
-& $Target @TargetArgs
+try {
+    & $Target __ARGS__
+}
+catch {
+    # Anything that stops the forward dead - a binding error, an unreadable
+    # script - must be visible in the log and must exit non-zero, or a task
+    # that started nothing at all looks like a clean run.
+    Write-StubLog ('FAILED to start it: ' + $_.Exception.Message)
+    exit 3
+}
 $code = $LASTEXITCODE
 if ($null -eq $code) { $code = 0 }
 Write-StubLog ('it exited with {0}' -f $code)
 exit $code
 '@
 
-    # A PowerShell array literal, so the stub forwards the arguments as
-    # separate arguments rather than one string.
-    $quoted = @($TargetArgument | ForEach-Object { "'" + $_.Replace("'", "''") + "'" })
-    $argsLiteral = if ($quoted.Count -eq 0) { '@()' } else { '@(' + ($quoted -join ', ') + ')' }
+    # The arguments are written into the generated script as SOURCE TEXT -
+    # "& $Target -Start -Dashboard" - so each one has to be a plain switch
+    # name. Passing them as an array for the stub to splat looks tidier and
+    # does not work: array splatting hands the elements over as positional
+    # values rather than parameter names, so the forward fails to bind and
+    # nothing starts. Measured on 2026-10-12, with the dashboard's task
+    # logging a clean exit 0 having opened nothing.
+    foreach ($argument in $TargetArgument) {
+        if ($argument -notmatch '^-[A-Za-z][A-Za-z0-9]*$') {
+            throw "A launcher stub forwards its arguments as source text, so each one must be a plain switch name such as -Run. Got '$argument'."
+        }
+    }
+    $argumentLine = ($TargetArgument -join ' ')
 
     $body = $template.
         Replace('__TARGET__', $TargetScript.Replace("'", "''")).
-        Replace('__ARGS__', $argsLiteral).
+        Replace('__ARGS__', $argumentLine).
         Replace('__LOG__', $LogPath.Replace("'", "''")).
         Replace('__TIMEOUT__', [string]$TimeoutSeconds).
         Replace('__POLL__', [string]$PollSeconds)
