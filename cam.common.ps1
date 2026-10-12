@@ -1721,3 +1721,843 @@ function Get-CamPanePosition {
         Y      = $ScreenTop + ($row * ($Layout.PaneHeight + $Layout.GutterPx))
     }
 }
+
+
+# ===========================================================================
+# Process identity, window handles and the dashboard's lifecycle
+#
+# Everything below answers one question: which processes belong to this
+# project, and how do they get stopped on purpose rather than by hand.
+#
+# The recorder has always had a supervisor, a status file and a working -Stop.
+# The viewers never did: each pane ran its own `while ($true)` loop with
+# nothing owning it, so closing the Windows Terminal window left six panes
+# running headless, each still holding an mpv and one of the camera's two
+# RTSP sessions. This section is the missing half.
+#
+# The identification rule throughout is: a process is what it OWNS, never
+# what it is called. Both ways of getting that wrong have already cost this
+# project a live session - see the comments on Get-CamProcessInventory.
+# ===========================================================================
+
+
+function Import-CamWindowApi {
+    <#
+        The user32/dwmapi calls this project needs to find, place and close
+        one window.
+
+        FindByTitle enumerates top-level windows rather than reading
+        Process.MainWindowTitle, because Windows Terminal serves several
+        windows from ONE process: MainWindowHandle is then whichever window
+        Windows enumerates first, not the one whose title matched, and
+        stopping the process would take every terminal window on the desktop
+        with it - including the Operator's own, which is exactly what happened
+        on 2026-10-12.
+
+        The window class is checked as well as the title so a stray window of
+        some other application that happens to carry our title can never be
+        sent a close.
+    #>
+
+    # A type cannot be added twice in one process, and this library is
+    # dot-sourced by the launcher, the warden and the control surface alike.
+    if ('CamWin' -as [type]) { return }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class CamWin
+{
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr p);
+    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr h);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
+    [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+
+    // Windows Terminal's top-level window class. Checked alongside the title
+    // so only a terminal window is ever a candidate for a close.
+    public const string TerminalClass = "CASCADIA_HOSTING_WINDOW_CLASS";
+
+    private static string TextOf(IntPtr h)
+    {
+        int len = GetWindowTextLength(h);
+        if (len == 0) { return string.Empty; }
+        StringBuilder sb = new StringBuilder(len + 2);
+        GetWindowText(h, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    private static string ClassOf(IntPtr h)
+    {
+        StringBuilder sb = new StringBuilder(256);
+        GetClassName(h, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    public static IntPtr[] FindByTitle(string title)
+    {
+        List<IntPtr> found = new List<IntPtr>();
+        EnumWindows(delegate(IntPtr h, IntPtr p) {
+            if (!IsWindowVisible(h)) { return true; }
+            if (string.Equals(TextOf(h), title, StringComparison.Ordinal)) { found.Add(h); }
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
+
+    // The same search restricted to Windows Terminal's own window class.
+    public static IntPtr[] FindTerminalByTitle(string title)
+    {
+        List<IntPtr> found = new List<IntPtr>();
+        EnumWindows(delegate(IntPtr h, IntPtr p) {
+            if (!IsWindowVisible(h)) { return true; }
+            if (ClassOf(h).IndexOf(TerminalClass, StringComparison.OrdinalIgnoreCase) < 0) { return true; }
+            if (string.Equals(TextOf(h), title, StringComparison.Ordinal)) { found.Add(h); }
+            return true;
+        }, IntPtr.Zero);
+        return found.ToArray();
+    }
+
+    public static string TitleOf(IntPtr h) { return TextOf(h); }
+
+    public static int ProcessIdOf(IntPtr h)
+    {
+        uint pid;
+        GetWindowThreadProcessId(h, out pid);
+        return (int)pid;
+    }
+}
+'@
+}
+
+
+function Get-CamTerminalWindow {
+    <# Every visible Windows Terminal window carrying exactly this title. #>
+    param([Parameter(Mandatory = $true)][string]$Title)
+
+    Import-CamWindowApi
+    return @([CamWin]::FindTerminalByTitle($Title))
+}
+
+
+function Stop-CamTerminalWindow {
+    <#
+        Closes every Windows Terminal window with this title, and returns how
+        many were still there afterwards.
+
+        Two things make this harder than one PostMessage.
+
+        A window showing more than one pane answers WM_CLOSE by raising "Do
+        you want to close all tabs?" - a XAML overlay drawn INSIDE the window
+        with no HWND of its own, so it cannot be found by enumeration and will
+        not answer a posted message. Only real keyboard input dismisses it,
+        and "Close all" already has focus, so one VK_RETURN does it. That is
+        what -ConfirmKeystroke is for; it steals focus for a moment, which is
+        why it is opt-in rather than always on.
+
+        Never Stop-Process on the window's owner. One Windows Terminal process
+        owns every terminal window on the desktop.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+
+        # Answer the "close all tabs?" overlay with a synthesised Enter.
+        [switch]$ConfirmKeystroke,
+
+        [int]$TimeoutSeconds = 10
+    )
+
+    Import-CamWindowApi
+    $existing = @(Get-CamTerminalWindow -Title $Title)
+    if ($existing.Count -eq 0) { return 0 }
+
+    foreach ($hwnd in $existing) {
+        [void][CamWin]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $prompted = $false
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 400
+        $left = @(Get-CamTerminalWindow -Title $Title)
+        if ($left.Count -eq 0) { return 0 }
+
+        # A multi-pane window is still here because the overlay is waiting for
+        # a keystroke. Send it once, then keep waiting on the same clock.
+        if ($ConfirmKeystroke -and -not $prompted) {
+            $prompted = $true
+            foreach ($hwnd in $left) {
+                [void][CamWin]::SetForegroundWindow($hwnd)
+                Start-Sleep -Milliseconds 500
+                [CamWin]::keybd_event(0x0D, 0, 0, [IntPtr]::Zero)   # VK_RETURN down
+                [CamWin]::keybd_event(0x0D, 0, 2, [IntPtr]::Zero)   # KEYEVENTF_KEYUP
+            }
+        }
+    }
+
+    return @(Get-CamTerminalWindow -Title $Title).Count
+}
+
+
+function Import-CamJobApi {
+    <#
+        Win32 job objects - the purpose-built primitive for "these processes
+        die when their owner does".
+
+        A job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every process
+        in it the moment the LAST handle to the job closes. Children inherit
+        membership at creation, so a pane's mpv joins without being told.
+
+        The trap, measured on 2026-10-12: a process that opens the job to
+        assign itself must CLOSE ITS HANDLE AFTERWARDS. Membership is not a
+        handle. With six panes each holding an open handle, the owner's death
+        closed nothing and all six survived; with the handles closed, killing
+        the owner took all six panes and their mpv in under two seconds.
+    #>
+
+    if ('CamJob' -as [type]) { return }
+
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class CamJob
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateJobObject(IntPtr sec, string name);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenJobObject(uint access, bool inherit, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint len);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool IsProcessInJob(IntPtr proc, IntPtr job, out bool result);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+
+    private const int ExtendedLimitInformation = 9;
+    private const uint KillOnJobClose = 0x2000;
+    private const int AlreadyExists = 183;
+
+    // JOB_OBJECT_ALL_ACCESS, minus nothing we need: assign, set, query, terminate.
+    private const uint AllAccess = 0x1F001F;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct BASIC_LIMIT {
+        public long PerProcessUserTimeLimit, PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize, MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass, SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS { public ulong R, W, O, RT, WT, OT; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct EXTENDED_LIMIT {
+        public BASIC_LIMIT BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit, JobMemoryLimit, PeakProcessMemoryUsed, PeakJobMemoryUsed;
+    }
+
+    private static void SetKillOnClose(IntPtr job, bool armed)
+    {
+        EXTENDED_LIMIT ext = new EXTENDED_LIMIT();
+        ext.BasicLimitInformation.LimitFlags = armed ? KillOnJobClose : 0;
+        int len = Marshal.SizeOf(typeof(EXTENDED_LIMIT));
+        IntPtr buffer = Marshal.AllocHGlobal(len);
+        try {
+            Marshal.StructureToPtr(ext, buffer, false);
+            if (!SetInformationJobObject(job, ExtendedLimitInformation, buffer, (uint)len)) {
+                throw new InvalidOperationException("SetInformationJobObject failed, error " + Marshal.GetLastWin32Error());
+            }
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    // Creates the job and arms it. Refuses an existing one: a second warden
+    // must never take over the panes of the first.
+    public static IntPtr CreateExclusive(string name)
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, name);
+        int err = Marshal.GetLastWin32Error();
+        if (job == IntPtr.Zero) {
+            throw new InvalidOperationException("CreateJobObject failed, error " + err);
+        }
+        if (err == AlreadyExists) {
+            CloseHandle(job);
+            throw new InvalidOperationException("a job object named '" + name + "' already exists");
+        }
+        try { SetKillOnClose(job, true); }
+        catch { CloseHandle(job); throw; }
+        return job;
+    }
+
+    // Lets the owner walk away without killing anything - used when the
+    // warden cannot establish what it is supposed to be watching.
+    public static void Disarm(IntPtr job) { SetKillOnClose(job, false); }
+
+    public static bool Exists(string name)
+    {
+        IntPtr job = OpenJobObject(AllAccess, false, name);
+        if (job == IntPtr.Zero) { return false; }
+        CloseHandle(job);
+        return true;
+    }
+
+    // Called by each pane. Closing our handle is what makes the owner's
+    // handle the last one, and the last one is what arms the kill.
+    public static string JoinCurrentProcess(string name)
+    {
+        IntPtr job = OpenJobObject(AllAccess, false, name);
+        if (job == IntPtr.Zero) { return "no such job (error " + Marshal.GetLastWin32Error() + ")"; }
+        try {
+            if (!AssignProcessToJobObject(job, GetCurrentProcess())) {
+                return "assign failed (error " + Marshal.GetLastWin32Error() + ")";
+            }
+            bool inJob;
+            IsProcessInJob(GetCurrentProcess(), job, out inJob);
+            return inJob ? string.Empty : "assign reported success but membership did not take";
+        }
+        finally { CloseHandle(job); }
+    }
+
+    public static bool Terminate(string name)
+    {
+        IntPtr job = OpenJobObject(AllAccess, false, name);
+        if (job == IntPtr.Zero) { return false; }
+        try { return TerminateJobObject(job, 1); }
+        finally { CloseHandle(job); }
+    }
+}
+'@
+}
+
+
+function Get-CamDashboardJobName {
+    <#
+        The job every dashboard pane joins.
+
+        A fixed name, not one per launch, so the control surface can find the
+        panes with no state file to go stale. The launcher stops the previous
+        dashboard before starting a new one, so there is only ever one.
+    #>
+    return 'cam.dashboard.panes'
+}
+
+
+function Get-CamDashboardWindowTitle {
+    <#
+        The title the dashboard's Windows Terminal window carries.
+
+        Set with wt.exe's --title AND --suppressApplicationTitle on every
+        pane. Measured on 2026-10-12: --title alone is overwritten by the
+        shell's own title, and the window title then follows whichever pane
+        has focus, so it cannot be used to find the window. With the title
+        suppressed it stays put across focus changes.
+    #>
+    return 'cam.dashboard'
+}
+
+
+function Add-CamJobMember {
+    <#
+        Puts THIS process, and so every process it starts afterwards, into the
+        dashboard job. Called once by each pane, before it ever starts mpv.
+
+        Writes one line rather than returning a value, so a pane can call it
+        as a bare statement - every character of a pane's script costs 2.67
+        characters of a shared 32767-character command line, six times over.
+
+        A pane that cannot join says so and carries on. The job is what makes
+        closing the window stop the panes; the control surface finds them by
+        process identity either way, so a failed join costs the window-close
+        path and nothing else.
+    #>
+    param(
+        [string]$JobName = (Get-CamDashboardJobName),
+
+        # The warden creates the job before the window opens, but a pane that
+        # wins that race should wait rather than give up.
+        [int]$TimeoutSeconds = 30
+    )
+
+    Import-CamJobApi
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $problem = 'not attempted'
+    while ((Get-Date) -lt $deadline) {
+        $problem = [CamJob]::JoinCurrentProcess($JobName)
+        if ([string]::IsNullOrEmpty($problem)) {
+            Write-Host ("{0} joined the dashboard job '{1}'" -f (Get-Date -Format 'HH:mm:ss'), $JobName) -ForegroundColor DarkGray
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    Write-Host ("{0} NOT in the dashboard job: {1}. Closing the window will not stop this pane." -f `
+        (Get-Date -Format 'HH:mm:ss'), $problem) -ForegroundColor Yellow
+}
+
+
+function Get-CamDecodedCommand {
+    <#
+        Every base64 blob on a command line, decoded from UTF-16 and joined.
+
+        A pane's whole script travels as -EncodedCommand, so the command line
+        says "powershell.exe -NoExit -EncodedCommand JABFAHIA..." and nothing
+        about cameras. The script inside it is the only honest description of
+        what the process is doing, which makes this the identity check.
+
+        Any long base64-looking token is tried rather than parsing the switch
+        name, because -EncodedCommand can be abbreviated to -e and a parser
+        that misses the abbreviation silently misclassifies the process.
+    #>
+    param([AllowNull()][string]$CommandLine)
+
+    if ([string]::IsNullOrEmpty($CommandLine)) { return '' }
+
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($match in [regex]::Matches($CommandLine, '[A-Za-z0-9+/]{40,}={0,2}')) {
+        try {
+            $bytes = [Convert]::FromBase64String($match.Value)
+            if (($bytes.Length % 2) -ne 0) { continue }
+            [void]$parts.Add([System.Text.Encoding]::Unicode.GetString($bytes))
+        }
+        catch { }
+    }
+    return ($parts -join "`n")
+}
+
+
+function Get-CamProcessInventory {
+    <#
+        Every process this project owns right now, each labelled with the role
+        it is actually performing.
+
+        Roles: Supervisor, Recorder (an ffmpeg), Relay (MediaMTX), Warden,
+        Pane, Viewer (an mpv), Health.
+
+        HOW EACH ROLE IS IDENTIFIED, and why not by name. Two incidents on
+        2026-10-12 came from identifying a process by something that was not
+        about the work it was doing:
+
+        - Killing by window title destroyed the Operator's own session,
+          because Windows Terminal serves every window from one process. A
+          title identifies a WINDOW, a pid identifies a PROCESS.
+        - Killing by image name would have stopped the 24/7 recording
+          supervisor, which is a powershell.exe indistinguishable from the
+          six panes and was started by a launcher stub, so its own command
+          line does not even name the script it supervises.
+
+        So the supervisor is found as THE PARENT OF EVERY ffmpeg - the work it
+        owns is the only thing that identifies it - and the panes and the
+        health strip are found by decoding the script they were handed.
+
+        Orphaned mpv and panes from a previous crash are included: they are
+        the processes that hurt, because each one holds one of a camera's two
+        RTSP sessions until somebody finds it.
+    #>
+    param([AllowNull()]$Config)
+
+    $all = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+        Select-Object ProcessId, ParentProcessId, Name, CreationDate, CommandLine)
+
+    $byId = @{}
+    foreach ($process in $all) { $byId[[int]$process.ProcessId] = $process }
+
+    $childrenOf = @{}
+    foreach ($process in $all) {
+        $parent = [int]$process.ParentProcessId
+        if (-not $childrenOf.ContainsKey($parent)) { $childrenOf[$parent] = New-Object System.Collections.ArrayList }
+        [void]$childrenOf[$parent].Add([int]$process.ProcessId)
+    }
+
+    $ffmpeg = @($all | Where-Object { $_.Name -eq 'ffmpeg.exe' })
+    $mediamtx = @($all | Where-Object { $_.Name -eq 'mediamtx.exe' })
+
+    # The supervisor owns every ffmpeg, and owns MediaMTX when the relay is
+    # enabled. Nothing else about it is distinctive.
+    $supervisorIds = New-Object System.Collections.ArrayList
+    foreach ($candidate in @($ffmpeg) + @($mediamtx)) {
+        $parent = [int]$candidate.ParentProcessId
+        if ($parent -le 0) { continue }
+        if (-not $byId.ContainsKey($parent)) { continue }
+        if ([string]$byId[$parent].Name -notlike 'powershell*') { continue }
+        if (-not $supervisorIds.Contains($parent)) { [void]$supervisorIds.Add($parent) }
+    }
+
+    $items = New-Object System.Collections.ArrayList
+    function Add-InventoryItem([string]$role, $process, [string]$detail) {
+        [void]$items.Add([pscustomobject]@{
+            Role            = $role
+            ProcessId       = [int]$process.ProcessId
+            ParentProcessId = [int]$process.ParentProcessId
+            Name            = [string]$process.Name
+            StartedAt       = $process.CreationDate
+            Detail          = $detail
+        })
+    }
+
+    $paneIds = New-Object System.Collections.ArrayList
+    foreach ($process in $all) {
+        if ([string]$process.Name -notlike 'powershell*') { continue }
+        $id = [int]$process.ProcessId
+
+        if ($supervisorIds.Contains($id)) {
+            Add-InventoryItem 'Supervisor' $process 'parent of every ffmpeg'
+            continue
+        }
+
+        $line = [string]$process.CommandLine
+        $decoded = Get-CamDecodedCommand -CommandLine $line
+        $text = $line + "`n" + $decoded
+
+        if ($text -match 'Start-CamDashboardWarden') {
+            Add-InventoryItem 'Warden' $process ('owns the job ' + (Get-CamDashboardJobName))
+            continue
+        }
+        if ($decoded -match 'Invoke-CamViewer') {
+            $camera = ''
+            if ($decoded -match "\`$camName\s*=\s*'([^']*)'") { $camera = $Matches[1] }
+            [void]$paneIds.Add($id)
+            Add-InventoryItem 'Pane' $process $camera
+            continue
+        }
+        if ($decoded -match 'cam\.health') {
+            Add-InventoryItem 'Health' $process 'the health strip'
+            continue
+        }
+    }
+
+    # An mpv belongs to the pane that started it. mpv.com is a console wrapper
+    # that re-execs mpv.exe, so the window-owning process is a grandchild of
+    # the pane and both have to be accounted for.
+    $claimed = New-Object System.Collections.ArrayList
+    foreach ($paneId in $paneIds) {
+        foreach ($descendant in (Get-CamDescendantId -ChildrenOf $childrenOf -ProcessId $paneId)) {
+            if ($byId.ContainsKey($descendant) -and ([string]$byId[$descendant].Name -like 'mpv*')) {
+                [void]$claimed.Add($descendant)
+                Add-InventoryItem 'Viewer' $byId[$descendant] ('pane ' + $paneId)
+            }
+        }
+    }
+    foreach ($process in $all) {
+        if ([string]$process.Name -notlike 'mpv*') { continue }
+        $id = [int]$process.ProcessId
+        if ($claimed.Contains($id)) { continue }
+        Add-InventoryItem 'Viewer' $process 'no pane owns it'
+    }
+
+    foreach ($process in $ffmpeg) { Add-InventoryItem 'Recorder' $process ('supervisor ' + $process.ParentProcessId) }
+    foreach ($process in $mediamtx) { Add-InventoryItem 'Relay' $process 'MediaMTX' }
+
+    return @($items)
+}
+
+
+function Get-CamDescendantId {
+    <# Every pid below this one, breadth first. #>
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$ChildrenOf,
+        [Parameter(Mandatory = $true)][int]$ProcessId
+    )
+
+    $found = New-Object System.Collections.ArrayList
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue($ProcessId)
+    while ($queue.Count -gt 0) {
+        $current = [int]$queue.Dequeue()
+        if (-not $ChildrenOf.ContainsKey($current)) { continue }
+        foreach ($child in $ChildrenOf[$current]) {
+            if ($found.Contains([int]$child)) { continue }
+            [void]$found.Add([int]$child)
+            $queue.Enqueue([int]$child)
+        }
+    }
+    return @($found)
+}
+
+
+function Get-CamAncestorId {
+    <#
+        Every pid above this one.
+
+        Used to build the guard list: the control surface must never stop a
+        process it is itself running inside, which on this project means the
+        shell that invoked it and whatever launched that.
+    #>
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $found = New-Object System.Collections.ArrayList
+    $current = $ProcessId
+    for ($hop = 0; $hop -lt 32; $hop++) {
+        $process = Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId=" + $current) -ErrorAction SilentlyContinue
+        if (-not $process) { break }
+        $parent = [int]$process.ParentProcessId
+        if ($parent -le 0 -or $found.Contains($parent)) { break }
+        [void]$found.Add($parent)
+        $current = $parent
+    }
+    return @($found)
+}
+
+
+function Stop-CamProcessList {
+    <#
+        Stops exactly these pids, and reports what it refused to touch.
+
+        The keep list is the point of this function. It is built from the
+        recording supervisor and everything below it, plus this process and
+        every ancestor of it, and it is honoured even when a caller names one
+        of those pids explicitly. A guard that can never fire costs nothing;
+        this one has had to fire twice already.
+    #>
+    param(
+        [AllowEmptyCollection()][int[]]$ProcessId = @(),
+
+        # Extra pids that must survive no matter what the caller asked for.
+        [AllowEmptyCollection()][int[]]$Keep = @(),
+
+        [int]$TimeoutSeconds = 10
+    )
+
+    $result = [pscustomobject]@{
+        Requested = @($ProcessId | Sort-Object -Unique)
+        Stopped   = @()
+        Refused   = @()
+        Survived  = @()
+    }
+    if ($result.Requested.Count -eq 0) { return $result }
+
+    $guard = New-Object System.Collections.ArrayList
+    [void]$guard.Add([int]$PID)
+    foreach ($ancestor in (Get-CamAncestorId -ProcessId $PID)) { [void]$guard.Add([int]$ancestor) }
+    foreach ($keeper in $Keep) { if (-not $guard.Contains([int]$keeper)) { [void]$guard.Add([int]$keeper) } }
+
+    $targets = New-Object System.Collections.ArrayList
+    $refused = New-Object System.Collections.ArrayList
+    foreach ($id in $result.Requested) {
+        if ($guard.Contains([int]$id)) { [void]$refused.Add([int]$id) } else { [void]$targets.Add([int]$id) }
+    }
+    $result.Refused = @($refused)
+
+    foreach ($id in $targets) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $alive = @($targets)
+    while ($alive.Count -gt 0 -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 300
+        $alive = @($alive | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    }
+
+    $result.Survived = @($alive)
+    $result.Stopped = @($targets | Where-Object { $alive -notcontains $_ })
+    return $result
+}
+
+
+function Get-CamRecorderKeepList {
+    <#
+        The recording supervisor and every process below it.
+
+        Recording runs 24/7 from a Scheduled Task and is stopped only through
+        the recorder's own -Stop, which tears its children down in order. No
+        dashboard operation may touch any of it, so every stop in this project
+        passes this list as its guard.
+    #>
+    param([AllowNull()]$Inventory)
+
+    if (-not $Inventory) { $Inventory = Get-CamProcessInventory }
+    $keep = New-Object System.Collections.ArrayList
+    foreach ($item in $Inventory) {
+        if ($item.Role -in @('Supervisor', 'Recorder', 'Relay')) {
+            if (-not $keep.Contains([int]$item.ProcessId)) { [void]$keep.Add([int]$item.ProcessId) }
+        }
+    }
+    return @($keep)
+}
+
+
+function Stop-CamDashboard {
+    <#
+        Stops the whole viewer side: the window, the warden, the job, the six
+        panes, every mpv they own, the health strip, and any orphan of the
+        same shape left by an earlier crash. Leaves the recorder alone.
+
+        The order matters. The job is terminated first because that is one
+        kernel call that takes every pane and every mpv at once, including the
+        mpv a pane was about to restart. Enumeration then catches whatever was
+        not in the job - panes from a launch before this mechanism existed, or
+        a pane that lost the race to join - and the window is closed last, when
+        there is nothing left in it to prompt about.
+
+        Safe on a machine where nothing is running, and safe to run twice: a
+        job that does not exist, a window that is not there and an empty pid
+        list are all ordinary answers here, not errors.
+    #>
+    param(
+        [AllowNull()]$Config,
+        [switch]$Quiet
+    )
+
+    Import-CamJobApi
+    $log = {
+        param([string]$message, [string]$colour = 'Gray')
+        if (-not $Quiet) { Write-Host $message -ForegroundColor $colour }
+    }
+
+    $jobName = Get-CamDashboardJobName
+    $report = [pscustomobject]@{
+        JobTerminated = $false
+        Stopped       = @()
+        Refused       = @()
+        Survived      = @()
+        WindowsLeft   = 0
+    }
+
+    if ([CamJob]::Exists($jobName)) {
+        $report.JobTerminated = [CamJob]::Terminate($jobName)
+        & $log ("terminated the dashboard job '{0}': {1}" -f $jobName, $report.JobTerminated) 'DarkGray'
+        Start-Sleep -Milliseconds 700
+    }
+
+    # Whatever is left after the kernel's own sweep, by role.
+    $inventory = Get-CamProcessInventory -Config $Config
+    $keep = Get-CamRecorderKeepList -Inventory $inventory
+    $targets = @($inventory |
+        Where-Object { $_.Role -in @('Warden', 'Pane', 'Viewer', 'Health') } |
+        ForEach-Object { [int]$_.ProcessId })
+
+    if ($targets.Count -gt 0) {
+        & $log ("stopping {0} viewer-side process(es): {1}" -f $targets.Count, (($targets | Sort-Object) -join ', '))
+        $stop = Stop-CamProcessList -ProcessId $targets -Keep $keep
+        $report.Stopped = $stop.Stopped
+        $report.Refused = $stop.Refused
+        $report.Survived = $stop.Survived
+        if ($stop.Refused.Count -gt 0) {
+            & $log ("refused by the guard (recorder or this shell): {0}" -f (($stop.Refused | Sort-Object) -join ', ')) 'Yellow'
+        }
+        if ($stop.Survived.Count -gt 0) {
+            & $log ("still alive after {0}s: {1}" -f 10, (($stop.Survived | Sort-Object) -join ', ')) 'Red'
+        }
+    }
+    else {
+        & $log 'no viewer-side processes were running' 'DarkGray'
+    }
+
+    $left = Stop-CamTerminalWindow -Title (Get-CamDashboardWindowTitle) -ConfirmKeystroke
+    $left += Stop-CamTerminalWindow -Title 'cam.health'
+    $report.WindowsLeft = $left
+    if ($left -gt 0) { & $log ("{0} terminal window(s) would not close" -f $left) 'Yellow' }
+
+    return $report
+}
+
+
+function Start-CamDashboardWarden {
+    <#
+        The hard dependency between the dashboard window and its panes.
+
+        Closing the Windows Terminal window used to leave all six panes
+        running headless, each holding an mpv and one of its camera's two
+        RTSP sessions, until somebody found them in Task Manager. Nothing in
+        the pane could see it happen: measured on 2026-10-12, a pane's console
+        survives the window's death intact - GetConsoleScreenBufferInfo still
+        succeeds, the pty host process is still running - so a pane cannot
+        detect this at all, let alone while it is blocked in mpv.
+
+        So the dependency is held outside the panes, by the kernel. This
+        process creates the job the panes join, and holds the only handle to
+        it. When the window goes, this process goes, the last handle closes,
+        and JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every pane and every
+        mpv at once - no polling inside the panes, nothing to miss while mpv
+        is blocking for hours.
+
+        It runs detached with no window of its own and costs one IsWindow call
+        a second.
+
+        If the window never appears, the job is DISARMED before this process
+        exits, so a launch that failed somewhere else cannot have its panes
+        killed by a warden that simply never found what it was watching.
+    #>
+    param(
+        [string]$JobName = (Get-CamDashboardJobName),
+        [string]$WindowTitle = (Get-CamDashboardWindowTitle),
+
+        # The grid has to open, six panes have to start and each has to reach
+        # its first mpv. Generous, because the cost of being wrong is killing
+        # a working dashboard.
+        [int]$AppearTimeoutSeconds = 180,
+
+        [int]$PollMs = 1000,
+
+        [AllowEmptyString()][string]$LogPath = ''
+    )
+
+    Import-CamJobApi
+    Import-CamWindowApi
+
+    $say = {
+        param([string]$message)
+        $line = "{0} warden[{1}] {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $PID, $message
+        Write-Host $line
+        if (-not [string]::IsNullOrEmpty($LogPath)) {
+            try { $line | Out-File -FilePath $LogPath -Encoding ascii -Append } catch { }
+        }
+    }
+
+    $job = [CamJob]::CreateExclusive($JobName)
+    & $say ("created and armed the job '{0}'" -f $JobName)
+
+    try {
+        $hwnd = [IntPtr]::Zero
+        $deadline = (Get-Date).AddSeconds($AppearTimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            $found = @([CamWin]::FindTerminalByTitle($WindowTitle))
+            if ($found.Count -ge 1) { $hwnd = $found[0]; break }
+            Start-Sleep -Milliseconds $PollMs
+        }
+
+        if ($hwnd -eq [IntPtr]::Zero) {
+            & $say ("no terminal window titled '{0}' appeared within {1}s - disarming the job and leaving the panes alone" -f `
+                $WindowTitle, $AppearTimeoutSeconds)
+            [CamJob]::Disarm($job)
+            return
+        }
+
+        & $say ("watching window 0x{0:X} (terminal pid {1})" -f $hwnd.ToInt64(), [CamWin]::ProcessIdOf($hwnd))
+        while ([CamWin]::IsWindow($hwnd)) { Start-Sleep -Milliseconds $PollMs }
+        & $say ("window 0x{0:X} is gone - stopping the panes and their mpv" -f $hwnd.ToInt64())
+
+        # The health strip is a window of its own, so the grid closing does
+        # not take it. Close it before the job goes, or it is left showing a
+        # pane whose process was killed under it.
+        [void](Stop-CamTerminalWindow -Title 'cam.health')
+    }
+    finally {
+        # Closing the last handle is what kills the job's members. Explicit,
+        # rather than left to process exit, so the log line above is the last
+        # thing that happens before they go.
+        [void][CamJob]::CloseHandle($job)
+    }
+}

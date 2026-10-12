@@ -173,60 +173,6 @@ if ($PrintUrls) {
 # rough cell size so it does not flash up over the grid, and then sized
 # exactly with SetWindowPos.
 
-$script:CamWinLoaded = $false
-
-function Import-CamWindowApi {
-    <#
-        The few user32/dwmapi calls needed to place one window by pixel.
-
-        FindByTitle enumerates top-level windows rather than reading
-        Process.MainWindowTitle, because Windows Terminal serves several
-        windows from ONE process: MainWindowHandle is then whichever window
-        Windows enumerates first, not the one whose title matched, and killing
-        the process would take every terminal window on the desktop with it.
-    #>
-
-    if ($script:CamWinLoaded) { return }
-    Add-Type -TypeDefinition @'
-using System;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
-using System.Text;
-
-public static class CamWin
-{
-    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr p);
-    [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr p);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
-    [DllImport("user32.dll")] private static extern int GetWindowTextLength(IntPtr h);
-    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll", SetLastError = true)] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
-    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-
-    public static IntPtr[] FindByTitle(string title)
-    {
-        List<IntPtr> found = new List<IntPtr>();
-        EnumWindows(delegate(IntPtr h, IntPtr p) {
-            if (!IsWindowVisible(h)) { return true; }
-            int len = GetWindowTextLength(h);
-            if (len == 0) { return true; }
-            StringBuilder sb = new StringBuilder(len + 2);
-            GetWindowText(h, sb, sb.Capacity);
-            if (string.Equals(sb.ToString(), title, StringComparison.Ordinal)) { found.Add(h); }
-            return true;
-        }, IntPtr.Zero);
-        return found.ToArray();
-    }
-}
-'@
-    $script:CamWinLoaded = $true
-}
-
 
 function Get-CamWindowFrame {
     <#
