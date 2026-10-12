@@ -80,7 +80,7 @@ func run(cfg Config, log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	NewAPI(cfg.StatusFile, log).Routes(mux)
-	mux.Handle("GET /", http.FileServerFS(static))
+	mux.Handle("GET /", versioned(http.FileServerFS(static)))
 
 	handler := requireToken(cfg.Token, logRequests(log, mux))
 
@@ -128,6 +128,21 @@ func run(cfg Config, log *slog.Logger) error {
 		}
 		return <-errc
 	}
+}
+
+// versioned tags the embedded assets with the build version as their ETag and
+// asks the browser to revalidate every time. An embedded file has no useful
+// modification time, so without this the browser gets no validator at all,
+// falls back to heuristic caching, and serves yesterday's CSS after an upgrade.
+// http.ServeContent answers If-None-Match from this header, so revalidation
+// costs a 304 rather than a refetch.
+func versioned(next http.Handler) http.Handler {
+	etag := `"` + version + `"`
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requireToken enforces the auth token when one is configured. The token is

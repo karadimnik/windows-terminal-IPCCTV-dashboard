@@ -117,6 +117,9 @@ tr:hover td{background:#1e1e1c}
 .events li{display:flex;gap:12px;padding:7px var(--pad);border-bottom:1px solid var(--line-soft);list-style:none}
 .events li:last-child{border-bottom:0}
 .events time{color:var(--ink-3);flex:none}
-.events .t{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* min-width:0 is load-bearing: a flex item defaults to min-width:auto, so a
+   nowrap line as long as a full ffmpeg command refuses to shrink and sets the
+   width of the whole document. The mockup's short sample events hid this. */
+.events .t{color:var(--ink-2);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 footer.note{margin-top:22px;color:var(--ink-3);font-size:12px;border-top:1px solid var(--line-soft);padding-top:12px}
