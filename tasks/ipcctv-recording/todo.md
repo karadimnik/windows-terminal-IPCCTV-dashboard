@@ -348,11 +348,13 @@ more direct connections.
 
 - [x] **[37]** DONE 2026-10-12: an mpv pane that chose direct now watches its own relay path and
       returns to the relay on its own. See the section below.
-- [ ] **[38]** The six pane commands are 27803 of the 32767 characters Windows allows on a
+- [ ] **[38]** The six pane commands are **28382** of the 32767 characters Windows allows on a
       command line, because each pane travels as a base64 blob on one `wt.exe` invocation. Seven
       cameras would not fit. The launch now prints the count and throws over 32000 instead of
       silently opening nothing, which is what it did at 42040. A real fix is moving the pane loop
-      into `cam.common.ps1` and passing arguments instead of a script.
+      into `cam.common.ps1` and passing arguments instead of a script. The lifecycle work added only
+      334 characters - `Add-CamJobMember` is one 16-character line because the function itself lives
+      in the library - so the move was not needed to fit and was left undone.
 
 
 ## Viewer promotion added 2026-10-12 - item [37]
@@ -414,9 +416,73 @@ cycle 2  13:58:32 BEFORE  all five at 2
 Recovery is ~20 s, automatic, with no dashboard relaunch. Cycle 2 is the stronger case: every viewer
 fell back and every one returned.
 
-- [ ] **[39]** Six stale `cam.health` processes had accumulated from earlier launches, windowless and
-      invisible. Cleaned up manually this time. The dashboard should stop any previous `cam.health`
-      before starting a new one, or they will keep accumulating on every relaunch.
-- [ ] **[40]** Closing the Windows Terminal window does NOT stop the pane processes: they survive
-      headless, each still holding an mpv and an RTSP session. Closing the dashboard needs to stop its
-      panes, otherwise the camera slots stay occupied and only a manual kill frees them.
+- [x] **[39]** DONE 2026-10-12: the dashboard stops any previous `cam.health` by process identity
+      before starting a new one. Root cause was that the old code closed a WINDOW found by title and
+      never touched a process - and the title does not hold, because when the renderer exits
+      `-NoExit` returns to a prompt and the title reverts to the shell default. See the section below.
+- [x] **[40]** DONE 2026-10-12: closing the window now stops the panes and their mpv, held by a
+      Win32 job object with `KILL_ON_JOB_CLOSE` owned by a warden that watches the window. See the
+      section below.
+
+
+## One control surface and a hard pane lifecycle, 2026-10-12 - items [39] and [40]
+
+**`cam.ps1` is the single place.** `-Status`, `-Start`, `-Stop`, scoped with `-Recorder` or
+`-Dashboard` and meaning everything when unscoped. `-Stop` counts the same components before and
+after from one shared snapshot and exits non-zero if anything in scope survived.
+
+**Nothing is identified by image name or window title.** `Get-CamProcessInventory` labels each
+process by the work it owns: the supervisor is the parent of every ffmpeg, and panes, the health
+strip and the warden are found by DECODING the `-EncodedCommand` they were handed, since a pane's
+command line otherwise says nothing but `powershell.exe -NoExit -EncodedCommand JABF...`. The
+recording supervisor and its children sit on a keep list every stop honours.
+
+### [40] - why the panes survived, and what holds them now
+
+**A pane cannot see its own window close.** Measured three ways: `GetConsoleScreenBufferInfo`,
+`GetConsoleMode` and `GetConsoleProcessList` all kept succeeding for 60 s after the window was
+gone, and all seven `OpenConsole.exe` pty hosts were still alive. Windows Terminal leaks the pty
+when the window closes with processes still running, so there is no signal inside the pane to watch
+- and the loop is blocked inside mpv for hours anyway. A single-pane window is different: closing
+one DOES kill its pane in under a second, which is what made the six-pane case look inconsistent.
+
+**So the kernel holds the dependency.** A warden process creates a named job object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and holds the only handle. Each pane's first act is
+`Add-CamJobMember`, before mpv exists, so mpv inherits membership. Window gone -> warden exits ->
+last handle closes -> every pane and every mpv terminated at once.
+
+**The trap that cost an hour: a member must CLOSE ITS HANDLE after assigning itself.** Membership
+is not a handle. With six panes each holding an open handle the owner's death closed nothing and
+all six survived; with the handles closed, killing the owner took every member and child in under
+two seconds.
+
+**The window needs a stable identity.** `-w cctv-grid` gives the grid its own window - without it
+the six panes arrive as a TAB in whatever terminal was last used, because this machine's
+`windowingBehavior` is `useExisting`, and the Operator's own shell was a candidate. `--title` plus
+`--suppressApplicationTitle` on EVERY pane keeps the title put; `--title` alone is overwritten by
+the shell and the window title then follows whichever pane has focus. The flags belong to the
+`new-tab`/`split-pane` subcommand, not among the global options - put up with the globals, `wt.exe`
+parses nothing and opens no window, silently.
+
+**K4 measured:**
+
+```
+BEFORE  window=1 warden=1 panes=6 mpv=12 health=1 | ffmpeg=5 mediamtx=1 job=True
++2s     window=0 warden=0 panes=0 mpv=0  health=0 | ffmpeg=5 mediamtx=1 job=False
+```
+
+### A supervisor can outlive its own children's ability to be stopped
+
+Observed this session: the supervisor died with five ffmpeg still writing and MediaMTX still
+serving, `status.json` still saying `running`, and their parent pid pointing at nothing. The
+recorder's own `-Stop` has no supervisor to signal in that state, so nothing could stop them.
+`cam.ps1 -Stop` now gives the orderly path 20 seconds and then stops whatever outlived it. The
+cause of the supervisor's exit is NOT established - no log line, no Application event - but it was
+not a job termination, since MediaMTX was in the same parent and survived.
+
+### Harness
+
+`procs` asserted zero ffmpeg and zero MediaMTX, so it failed on any machine where the Operator's
+recorder was running - which is the state the harness is required to leave behind. It now skips
+when a live supervisor owns them, identified by the ffmpeg it parents plus an agreeing heartbeat.
+9 passed, 0 failed, 2 skipped.

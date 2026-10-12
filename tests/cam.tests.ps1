@@ -771,13 +771,41 @@ function Invoke-CamCheckLeak {
 
 
 function Invoke-CamCheckProcs {
+    <#
+        Asserts that no ffmpeg or MediaMTX is left over from a test run.
+
+        It has to tell a leftover from the Operator's own recorder, which runs
+        24/7 and legitimately owns five ffmpeg and a MediaMTX. Without that
+        distinction the check fails on any machine where recording is up - so
+        the one state the harness is REQUIRED to leave behind was also the one
+        state it reported as a failure, which is noise that teaches everyone
+        to ignore a red check.
+
+        A live supervisor is identified by the work it owns, not by name:
+        Get-CamProcessInventory finds it as the parent of every ffmpeg, and
+        status.json has to agree that it is running. If both say yes, these
+        processes have an owner and this check has nothing to say about them.
+    #>
     param($Run)
 
     $counts = Get-CamTestProcessCount
+    $evidence = @(("ffmpeg ids: {0}" -f (@($counts.FfmpegIds) -join ' ')),
+        ("mediamtx ids: {0}" -f (@($counts.MediaMtxIds) -join ' ')))
+
+    $config = Get-CamConfig
+    $supervisor = Get-CamSupervisorState -Config $config -Snapshot (Get-CamStatusSnapshot -Config $config)
+    $owned = @(Get-CamProcessInventory -Config $config | Where-Object { $_.Role -eq 'Supervisor' })
+    if ($supervisor.Running -and $owned.Count -gt 0) {
+        Add-CamTestResult -Run $Run -Check 'procs' -Status 'SKIP' `
+            -Message ("the Operator's recorder is running, so these processes have an owner: {0}" -f $counts.Text) `
+            -Evidence ($evidence + @(("live supervisor: {0}" -f $supervisor.Reason)))
+        return
+    }
+
     $ok = ($counts.Ffmpeg -eq 0 -and $counts.MediaMtx -eq 0)
     Add-CamTestResult -Run $Run -Check 'procs' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
         -Message ("no recorder process left running: {0}" -f $counts.Text) `
-        -Evidence @(("ffmpeg ids: {0}" -f (@($counts.FfmpegIds) -join ' ')), ("mediamtx ids: {0}" -f (@($counts.MediaMtxIds) -join ' ')))
+        -Evidence $evidence
 }
 
 
