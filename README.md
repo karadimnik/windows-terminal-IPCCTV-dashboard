@@ -55,7 +55,7 @@ copy recorder.config.example.json recorder.config.json
 .\cam.recorder.ps1 -Enable all
 
 # 7. Start recording. The supervisor also starts and owns MediaMTX.
-.\cam.recorder.ps1 -Run
+.\cam.recorder.ps1 -Nvr
 
 # 8. Optional: have it start itself at every logon instead.
 .\cam.recorder.ps1 -InstallAutostart
@@ -111,6 +111,7 @@ Right-click the script and choose "Run with PowerShell", or run it from a termin
 | `-Stop` | Asks a running supervisor to shut down, waits for it, and reports any `ffmpeg` or MediaMTX left behind. |
 | `-InstallRestreamer` | Generates the MediaMTX config from `cameras.json`, one path per camera, and checks the binary is in place. |
 | `-RemoveRestreamer` | Deletes that generated config. Recording and viewing continue on the direct camera inputs. |
+| `-Nvr` | Opens the NVR: one Windows Terminal window of its own, titled `cam.nvr`, running the supervisor as its only pane with the log on screen. Closing that window stops the supervisor, MediaMTX, every ffmpeg and the viewers. Closing any other terminal does nothing. |
 | `-InstallAutostart` | Registers the logon Scheduled Task. Unelevated and idempotent. |
 | `-RemoveAutostart` | Unregisters the task and deletes the launcher it created. A clean no-op when nothing is installed. |
 | `-SelfTest [-Offline] [-MaxConcurrency <n>]` | Pre-flight report: tools, per-camera RTSP probe, measured connection limit, crash-safety proof, disk projection. `-Offline` skips every check that touches a camera. |
@@ -202,7 +203,9 @@ Set `HealthStripHeightPx` to 0 to switch the strip off entirely and get the orig
 
 `-InstallAutostart` registers a Scheduled Task that runs at logon as you, with an interactive, limited token. It needs no elevation and it never prompts. Reinstalling replaces the registration rather than adding a second one. The task has no execution time limit, because the default three day limit would otherwise kill a 24/7 supervisor on day three, it ignores a second instance, and it restarts the task up to three times at one minute intervals if it fails.
 
-The task does not point at `cam.recorder.ps1` directly. It points at a small generated launcher at `%LOCALAPPDATA%\IPCCTV\start-recorder.ps1`, which waits for the recorder's path to become reachable, logs what it saw to `%LOCALAPPDATA%\IPCCTV\autostart.log`, and then forwards to `cam.recorder.ps1 -Run`. That indirection exists because a repository kept inside WSL is reached over `\\wsl.localhost`, which does not resolve until WSL's file server is running, and a Scheduled Task has no way to wait for a path. The launcher holds no copy of the scripts, so it cannot drift from the repository. `-RemoveAutostart` deletes the launcher along with the task, keeping only the log.
+The task opens the NVR window rather than running the supervisor directly, and that is not cosmetic. Windows 11 hands every console created with a window to the default terminal application, which here is Windows Terminal, and with `windowingBehavior` set to `useExisting` the console arrives as a **tab in whichever terminal window already exists** - the Operator's. `-WindowStyle Hidden` does not prevent it, because the window belongs to Windows Terminal rather than to `powershell.exe`. Closing that window sent `CTRL_CLOSE_EVENT` to the supervisor, which PowerShell answers by terminating without running any `finally` block: no shutdown line in the log, and every ffmpeg plus MediaMTX left orphaned and still writing. It happened four times on 2026-10-12. Launching the supervisor as a pane in a window of its own removes the adoption, and the job object `cam.nvr` makes closing that window stop everything in it.
+
+The task does not point at `cam.recorder.ps1` directly. It points at a small generated launcher at `%LOCALAPPDATA%\IPCCTV\start-recorder.ps1`, which waits for the recorder's path to become reachable, logs what it saw to `%LOCALAPPDATA%\IPCCTV\autostart.log`, and then forwards to `cam.recorder.ps1 -Nvr`. That indirection exists because a repository kept inside WSL is reached over `\\wsl.localhost`, which does not resolve until WSL's file server is running, and a Scheduled Task has no way to wait for a path. The launcher holds no copy of the scripts, so it cannot drift from the repository. `-RemoveAutostart` deletes the launcher along with the task, keeping only the log.
 
 ## Configuration
 
