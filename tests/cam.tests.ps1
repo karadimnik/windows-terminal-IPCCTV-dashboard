@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs', 'relay')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs', 'relay', 'viewer')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -933,6 +933,137 @@ function Invoke-CamCheckRelay {
 }
 
 
+function Invoke-CamCheckViewer {
+    <#
+        The pane's return to the relay, and the two things about it that can
+        only fail silently.
+
+        The pane script is not a file: it travels to Windows Terminal as one
+        base64 blob inside a here-string, so the repository-wide parse check
+        cannot see it and a syntax error in it would surface as six panes that
+        open and immediately die. It is substituted and parsed here.
+
+        The mpv arguments now reach mpv through a command-line string rather
+        than the call operator, so the quoting is asserted against the exact
+        line the call operator produced - one mpv flag carries a space.
+
+        The watch itself is asserted where no camera is involved: a relay pane
+        watches nothing, a zero interval is an off switch, and the promotion
+        is only exercised when the local relay is actually serving a path to
+        answer about.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+
+    # 1. the pane template, substituted exactly as the launcher substitutes it
+    $launcher = Join-Path -Path $repo -ChildPath 'mpv.cam.autolayout.autorestart.ps1'
+    $text = [System.IO.File]::ReadAllText($launcher)
+    # Escaped rather than written inline: a $ in a double-quoted pattern is
+    # interpolated by PowerShell before the regex ever sees it, which silently
+    # matched a different here-string and handed this check 56 characters.
+    $marker = [regex]::Escape("`$PaneTemplate = @'")
+    $match = [regex]::Match($text, "(?s)" + $marker + "\r?\n(.*?)\r?\n'@")
+    if (-not $match.Success -or $match.Groups[1].Value.Length -lt 800) {
+        $ok = $false
+        $evidence += ("FAIL: the pane template did not extract - matched {0} character(s), expected the whole here-string called " -f $match.Groups[1].Value.Length) + '$PaneTemplate'
+    }
+    else {
+        $flags = "--no-border --msg-level=all=error --osd-level=1 --osd-msg1='Traffic: `${video-bitrate}' --geometry=640x360+0+0"
+        $pane = $match.Groups[1].Value
+        $pane = $pane.Replace('__LIB__', (Join-Path -Path $repo -ChildPath 'cam.common.ps1'))
+        $pane = $pane.Replace('__NAME__', 'Workshop').Replace('__MPV__', 'C:\mpv\mpv.com').Replace('__FLAGS__', $flags)
+        $pane = $pane.Replace('__READYPATHS__', "@('workshop')").Replace('__WAITSECONDS__', '15').Replace('__STAGGERMS__', '1500')
+        $errors = $null
+        [void][System.Management.Automation.Language.Parser]::ParseInput($pane, [ref]$null, [ref]$errors)
+        $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($pane)).Length
+        $evidence += ("pane template substituted: {0} chars, {1} parse error(s), {2} chars of command line for six panes" -f `
+            $pane.Length, @($errors).Count, (6 * $encoded))
+        foreach ($item in @($errors)) { $evidence += ("  line {0}: {1}" -f $item.Extent.StartLineNumber, $item.Message) }
+        if (@($errors).Count -gt 0) { $ok = $false; $evidence += 'FAIL: the encoded pane script does not parse' }
+        # Windows refuses a command line over 32767 and wt.exe then opens
+        # nothing and says nothing. The panes are nearly all of it.
+        if ((6 * $encoded) -gt 30000) {
+            $ok = $false
+            $evidence += 'FAIL: six panes no longer leave room under the 32767 character command line'
+        }
+        if ($pane -notmatch 'Invoke-CamViewer') {
+            $ok = $false
+            $evidence += 'FAIL: the pane no longer runs mpv through Invoke-CamViewer, so it cannot return to the relay'
+        }
+    }
+
+    # 2. the quoting, against the line the call operator used to produce
+    $tokens = @(& { $args } --no-border --msg-level=all=error --osd-level=1 --osd-msg1='Traffic: ${video-bitrate}' --geometry=640x360+0+0)
+    $line = Get-CamArgumentLine -Tokens (@('rtsp://127.0.0.1:8554/frontentrance') + $tokens)
+    $want = 'rtsp://127.0.0.1:8554/frontentrance --no-border --msg-level=all=error --osd-level=1 "--osd-msg1=Traffic: ${video-bitrate}" --geometry=640x360+0+0'
+    $evidence += ('argument line: ' + $line)
+    if ($line -ne $want) { $ok = $false; $evidence += 'FAIL: mpv would not receive the arguments it used to' }
+
+    $default = [int](Get-CamConfigDefault).ViewerPromoteCheckSeconds
+    $evidence += ("ViewerPromoteCheckSeconds default {0}s" -f $default)
+    if ($default -le 0 -or $default -gt 60) { $ok = $false; $evidence += 'FAIL: the promotion check interval is not a sane default' }
+
+    # 3. the watch, with a stand-in for mpv so no camera is touched. ping is a
+    #    process that exits on its own, which is the other way the watch ends.
+    $config = Get-CamConfigDefault
+    $config.RelayApiBase = 'http://10.254.254.254:9997'
+    $config.RelayProbeTimeoutMs = 400
+    $stand = 'C:\Windows\System32\cmd.exe'
+    $short = @('ping -n 4 127.0.0.1')
+
+    function Measure-CamWatch {
+        param($Config, [string]$Mode, [string]$Path, [string[]]$Arguments)
+        $choice = [pscustomobject]@{ Mode = $Mode; Url = '/c'; WaitedSeconds = 0 }
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $promoted = Invoke-CamViewer -Config $Config -Choice $choice -RelayPathName $Path -MpvPath $stand -MpvArgs $Arguments
+        $watch.Stop()
+        return [pscustomobject]@{ Promoted = $promoted; Seconds = $watch.Elapsed.TotalSeconds }
+    }
+
+    $config.ViewerPromoteCheckSeconds = 10
+    $onRelay = Measure-CamWatch -Config $config -Mode 'relay' -Path 'frontentrance' -Arguments $short
+    $evidence += ("relay pane, 3s process, 10s interval: promoted {0} after {1:N1}s - a relay pane watches nothing" -f $onRelay.Promoted, $onRelay.Seconds)
+    if ($onRelay.Promoted) { $ok = $false; $evidence += 'FAIL: a pane already on the relay tried to promote itself' }
+
+    $config.ViewerPromoteCheckSeconds = 0
+    $off = Measure-CamWatch -Config $config -Mode 'direct' -Path 'frontentrance' -Arguments $short
+    $evidence += ("direct pane, interval 0: promoted {0} after {1:N1}s - the off switch" -f $off.Promoted, $off.Seconds)
+    if ($off.Promoted) { $ok = $false; $evidence += 'FAIL: a zero interval did not switch the watch off' }
+
+    $config.ViewerPromoteCheckSeconds = 1
+    $unreachable = Measure-CamWatch -Config $config -Mode 'direct' -Path 'frontentrance' -Arguments $short
+    $evidence += ("direct pane, 1s interval, unreachable API: promoted {0} after {1:N1}s - it ends on mpv's own exit too" -f `
+        $unreachable.Promoted, $unreachable.Seconds)
+    if ($unreachable.Promoted) { $ok = $false; $evidence += 'FAIL: an unreachable control API was read as a serving path' }
+    if ($unreachable.Seconds -gt 20) { $ok = $false; $evidence += 'FAIL: the watch did not notice the process exiting on its own' }
+
+    # 4. the promotion itself, only when the local relay has a path to answer
+    #    about. It is the one assertion that needs something outside the repo.
+    $live = Get-CamConfigDefault
+    $serving = @(Get-CamRelayReadyPaths -Config $live)
+    if ($serving.Count -eq 0) {
+        $evidence += 'the local relay is not serving anything, so the promotion itself was not exercised'
+    }
+    else {
+        $live.ViewerPromoteCheckSeconds = 3
+        $long = @('ping -n 60 127.0.0.1')
+        $promotion = Measure-CamWatch -Config $live -Mode 'direct' -Path $serving[0] -Arguments $long
+        $evidence += ("direct pane, 3s interval, {0} serving: promoted {1} after {2:N1}s, mpv stopped by the watch" -f `
+            $serving[0], $promotion.Promoted, $promotion.Seconds)
+        if (-not $promotion.Promoted) { $ok = $false; $evidence += 'FAIL: a serving path did not take the pane back' }
+        # One interval plus the stop. Minutes would mean it waited for the
+        # process instead of the path.
+        if ($promotion.Seconds -gt 10) { $ok = $false; $evidence += 'FAIL: the promotion did not land on the first poll' }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'viewer' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'the encoded pane script parses and still fits the command line, mpv receives the arguments it always did, and a pane on direct returns to the relay on the first poll while a pane on the relay watches nothing' `
+        -Evidence $evidence
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -943,6 +1074,7 @@ foreach ($check in $Checks) {
         'parse'      { Invoke-CamCheckParse      -Run $run }
         'cameralist' { Invoke-CamCheckCameraList -Run $run }
         'inputs'     { Invoke-CamCheckInputs     -Run $run }
+        'viewer'     { Invoke-CamCheckViewer     -Run $run }
         'selftest'   { Invoke-CamCheckSelfTest   -Run $run }
         'layout'     { Invoke-CamCheckLayout     -Run $run }
         'strip'      { Invoke-CamCheckStrip      -Run $run }
