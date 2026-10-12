@@ -258,6 +258,13 @@ function Get-CamConfigDefault {
         RelayReadyWaitSeconds   = 15
         # How often that wait re-asks.
         RelayReadyPollMs        = 500
+        # How often an mpv pane that is on a DIRECT connection asks whether
+        # the relay has started serving its camera again, so it can hand the
+        # second camera session back. One control-API call per pane per
+        # interval, and only for a pane that is actually on direct. 0 switches
+        # the watch off and leaves such a pane on direct until the dashboard
+        # is relaunched, which is what it did before this existed.
+        ViewerPromoteCheckSeconds = 10
         # Delay between consecutive consumer starts - recorder children and
         # mpv panes alike - so six of them do not burst onto the relay, the
         # control API and the cameras in the same instant.
@@ -832,6 +839,144 @@ function Get-CamInputUrl {
 
     $direct.WaitedSeconds = ([DateTime]::Now - $startedAt).TotalSeconds
     return $direct
+}
+
+
+function Stop-CamViewer {
+    <#
+        Stops one mpv the clean way: WM_CLOSE to its window, a bounded wait,
+        then a kill aimed at that one process only if it ignored the close.
+
+        mpv ships two binaries and the dashboard runs the console one,
+        mpv.com, which is a wrapper that re-execs mpv.exe and waits for it.
+        The video window therefore belongs to the CHILD. Stopping the wrapper
+        alone leaves mpv.exe on screen still holding its RTSP session, which
+        is the opposite of the point, so the children are closed first and the
+        wrapper follows them down on its own. Measured 2026-10-12: closing the
+        child's window exits the child in ~220 ms and the wrapper ~140 ms
+        after that.
+
+        Closing the window rather than killing it matters because mpv then
+        tears its RTSP session down instead of leaving the camera to time the
+        session out - and freeing that session is the whole reason for the
+        move.
+
+        Nothing is found by image name. The children are read from this
+        process's own pid, so no other mpv on the desktop can be touched, and
+        the pane's own terminal is never a candidate.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+
+        # Long enough for a graceful quit, short enough that a pane does not
+        # sit on a black tile if mpv is wedged.
+        [int]$GraceMs = 5000
+    )
+
+    $targets = New-Object System.Collections.ArrayList
+    $children = @()
+    try {
+        $children = @(Get-CimInstance -ClassName Win32_Process -Filter ("ParentProcessId=" + [int]$Process.Id))
+    }
+    catch { }
+    foreach ($child in $children) {
+        # The wrapper also has a conhost child, which owns a window and must
+        # not be sent anything.
+        if ([string]$child.Name -notlike 'mpv*') { continue }
+        $handle = Get-Process -Id ([int]$child.ProcessId) -ErrorAction SilentlyContinue
+        if ($handle) { [void]$targets.Add($handle) }
+    }
+    # Last, and harmless either way: an mpv.exe started directly owns its
+    # window itself, while the console wrapper inside a Windows Terminal pane
+    # has no window of its own for CloseMainWindow to find.
+    [void]$targets.Add($Process)
+
+    foreach ($target in $targets) {
+        try { [void]$target.CloseMainWindow() } catch { }
+    }
+
+    if ($Process.WaitForExit($GraceMs)) { return }
+
+    foreach ($target in $targets) {
+        try { if (-not $target.HasExited) { $target.Kill() } } catch { }
+    }
+    [void]$Process.WaitForExit(2000)
+}
+
+
+function Invoke-CamViewer {
+    <#
+        Runs ONE mpv attempt for a dashboard pane and answers one question:
+        did the relay take this pane back?
+
+        $true  - the relay started serving this camera's path while mpv was on
+                 the direct input, so mpv was stopped deliberately and the
+                 caller should decide again at once.
+        $false - mpv exited on its own, or there was nothing to watch for, so
+                 the caller should back off and retry as it always has.
+
+        Why a pane needs this. The pane loop re-decides relay-or-direct on
+        every mpv exit, and mpv on a HEALTHY direct stream never exits. A pane
+        that fell back to direct during a relay outage therefore stayed there
+        until the dashboard was relaunched, holding the second of the camera's
+        two RTSP sessions - the one the relay exists to keep free for the
+        Operator's phone. Recorder children never had the fault because their
+        supervisor restarts them and re-decides.
+
+        Only a pane that chose DIRECT watches anything. A pane on the relay
+        needs no watch: if the relay dies mpv loses its input and exits, and
+        the loop decides again. That asymmetry is the whole design.
+
+        The watch costs one control-API call per ViewerPromoteCheckSeconds and
+        it sleeps inside Process.WaitForExit, so a camera whose path can never
+        become ready - an offline one - keeps to the clock forever instead of
+        spinning, and notices mpv's own exit in the same wait.
+
+        The pane hands over the argument tokens exactly as PowerShell parsed
+        them, and they are requoted here because .NET takes one command-line
+        string. Verified byte for byte against the line the call operator
+        produced before this function existed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+
+        # What Get-CamInputUrl decided: Mode and Url.
+        [Parameter(Mandatory = $true)]$Choice,
+
+        [AllowEmptyString()][string]$RelayPathName,
+
+        [Parameter(Mandatory = $true)][string]$MpvPath,
+
+        [AllowNull()][AllowEmptyCollection()][string[]]$MpvArgs
+    )
+
+    $tokens = @([string]$Choice.Url) + @($MpvArgs)
+    $line = (@(foreach ($token in $tokens) {
+        if ([string]$token -match '[\s"]') { '"' + ([string]$token -replace '"', '\"') + '"' } else { [string]$token }
+    }) -join ' ')
+
+    # -NoNewWindow keeps mpv's console output in the pane it belongs to, the
+    # way the call operator did. Its stderr is not captured, so it can no
+    # longer become a NativeCommandError.
+    $process = Start-Process -FilePath $MpvPath -ArgumentList $line -NoNewWindow -PassThru
+    try { $null = $process.Handle } catch { }
+
+    $seconds = 10
+    try { $seconds = [int]$Config.ViewerPromoteCheckSeconds } catch { }
+
+    if (([string]$Choice.Mode -ne 'direct') -or ($seconds -le 0) -or
+        [string]::IsNullOrEmpty($RelayPathName) -or -not (Get-CamRelayEnabled -Config $Config)) {
+        $process.WaitForExit()
+        return $false
+    }
+
+    while (-not $process.WaitForExit($seconds * 1000)) {
+        if (Test-CamRelayPathReady -Config $Config -PathName $RelayPathName) {
+            Stop-CamViewer -Process $process
+            return $true
+        }
+    }
+    return $false
 }
 
 

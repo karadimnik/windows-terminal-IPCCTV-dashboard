@@ -471,6 +471,26 @@ foreach ($Stream in $Streams.GetEnumerator()) {
     # All three apply to the FIRST attempt only. From the second iteration the
     # loop decides on the spot with no wait, which is what leaves a relay that
     # died behind and picks up one that came back.
+    #
+    # Why the mpv call is Invoke-CamViewer and not the call operator any more:
+    # the loop only re-decides when mpv exits, and mpv on a healthy DIRECT
+    # stream never exits, so a pane that fell back during a relay outage stayed
+    # on direct - holding the second of that camera's two RTSP sessions - until
+    # the whole dashboard was relaunched. Invoke-CamViewer runs mpv as a child
+    # and, only when this attempt chose direct, asks every
+    # ViewerPromoteCheckSeconds whether this one path is serving again; when it
+    # is, it stops mpv and returns $true so the loop decides again immediately
+    # instead of printing an interruption and sleeping. The cost is one brief
+    # blink in that pane, once per outage. A pane already on the relay is
+    # unchanged and watches nothing: if the relay dies mpv exits by itself.
+    #
+    # $mpvArgs is the flag text tokenised by PowerShell's own argument parser -
+    # & { $args } hands back exactly what the call operator used to pass - so
+    # the arguments mpv receives are unchanged. It is hoisted out of the loop
+    # because it never varies, and it is what let the stderr comment that used
+    # to sit here go: Invoke-CamViewer does not capture mpv's output, so it can
+    # no longer turn into a NativeCommandError, though Continue is still set
+    # for the rest of the loop.
     $PaneTemplate = @'
 $ErrorActionPreference = 'Stop'
 . '__LIB__'
@@ -486,7 +506,7 @@ $relayPath = Get-CamRelayPathName -SafeName (Get-CamSafeName -Name $camera.Name)
 $directUrl = Get-CamRtspUrl -Camera $camera -Credential $credential
 Start-Sleep -Milliseconds __STAGGERMS__
 $batch = @{ ReadyPaths = __READYPATHS__; WaitSeconds = __WAITSECONDS__ }
-# mpv reports progress on stderr, which would be a terminating error under Stop.
+$mpvArgs = @(& { $args } __FLAGS__)
 $ErrorActionPreference = 'Continue'
 while ($true) {
     $choice = Get-CamInputUrl -Config $config -RelayPathName $relayPath -DirectUrl $directUrl @batch
@@ -494,7 +514,7 @@ while ($true) {
     $waited = ''
     if ($choice.WaitedSeconds -gt 0) { $waited = ' after waiting {0}s' -f [int]$choice.WaitedSeconds }
     Write-Host ("{0} {1} on the {2} input{3}: {4}" -f (Get-Date -Format 'HH:mm:ss'), $camName, $choice.Mode, $waited, (Get-CamRedacted -Text $choice.Url)) -ForegroundColor Cyan
-    & '__MPV__' $choice.Url __FLAGS__
+    if (Invoke-CamViewer -Config $config -Choice $choice -RelayPathName $relayPath -MpvPath '__MPV__' -MpvArgs $mpvArgs) { continue }
     Write-Host 'Stream interrupted. Restarting in 3 seconds...' -ForegroundColor Yellow
     Start-Sleep -Seconds 3
 }
