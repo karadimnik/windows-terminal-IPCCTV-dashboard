@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs', 'relay')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs', 'relay')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -77,6 +77,138 @@ function Invoke-CamCheckCameraList {
     Add-CamTestResult -Run $Run -Check 'cameralist' -Status $(if ($result.Ok) { 'PASS' } else { 'FAIL' }) `
         -Message ("cameras.json {0} bytes, sha256 and BOM {1}" -f $result.Bytes, $(if ($result.Ok) { 'as expected' } else { 'CHANGED' })) `
         -Evidence @(("sha256 {0}" -f $result.Sha256), ("bom    {0}" -f $result.Bom))
+}
+
+
+function Invoke-CamCheckInputs {
+    <#
+        The relay-or-direct decision for a BATCH of consumers, asserted against
+        an unreachable control API so every answer is attributable.
+
+        The two properties that matter are opposites, and both were broken:
+
+        - A batch must make NO per-camera probe. Six cameras each asking about
+          their own path in the same instant is what put a recorder and two mpv
+          panes on direct connections while their paths were serving perfectly
+          well, each burning the spare camera slot the relay exists to protect.
+          Proven by the clock: the API here is a black hole, so a probe costs
+          the whole timeout and a batch that made six of them could not come
+          back in a few milliseconds.
+
+        - A LONE attempt must still probe, and must still fall through to
+          direct. That is what leaves a relay that died mid-run behind on the
+          next attempt rather than retrying forever against a dead address.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+
+    # 10.254.254.254 is not routable, so every probe runs the clock out instead
+    # of being refused. 400 ms keeps the check quick while staying far above the
+    # few ms a decision needs when no probe is made.
+    $config = Get-CamConfigDefault
+    $config.RelayApiBase = 'http://10.254.254.254:9997'
+    $config.RelayProbeTimeoutMs = 400
+    $config.RelayReadyPollMs = 100
+    $direct = 'rtsp://user:secret@192.168.50.15/stream1'
+
+    function Measure-CamChoice {
+        param([hashtable]$Arguments)
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $choice = Get-CamInputUrl @Arguments
+        $watch.Stop()
+        return [pscustomobject]@{ Mode = $choice.Mode; Url = $choice.Url; Ms = [int]$watch.ElapsedMilliseconds }
+    }
+
+    function Assert-CamChoice {
+        param([string]$Label, [hashtable]$Arguments, [string]$WantMode, [int]$MaxMs = 0, [int]$MinMs = 0)
+        $result = Measure-CamChoice -Arguments $Arguments
+        $bad = @()
+        if ($result.Mode -ne $WantMode) { $bad += ("mode {0} want {1}" -f $result.Mode, $WantMode) }
+        if ($MaxMs -gt 0 -and $result.Ms -gt $MaxMs) { $bad += ("took {0} ms, want at most {1}" -f $result.Ms, $MaxMs) }
+        if ($MinMs -gt 0 -and $result.Ms -lt $MinMs) { $bad += ("took {0} ms, want at least {1}" -f $result.Ms, $MinMs) }
+        $line = "{0,-62} {1,-7} {2,5} ms" -f $Label, $result.Mode, $result.Ms
+        if ($bad.Count -gt 0) { $line += ('  FAIL: ' + ($bad -join '; ')) }
+        $script:CamInputLine = $line
+        return ($bad.Count -eq 0)
+    }
+
+    # The real camera list, one shared serving set, one camera missing from it:
+    # exactly the cold start this check exists for. The whole batch is timed
+    # together - six probes at 400 ms each could not fit in 200 ms.
+    $cameras = Get-CamList -Path (Join-Path -Path $repo -ChildPath 'cameras.json')
+    $paths = @(foreach ($camera in $cameras) { Get-CamRelayPathName -SafeName (Get-CamSafeName -Name $camera.Name) })
+    $serving = @($paths | Select-Object -Skip 1)
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $modes = @(foreach ($path in $paths) {
+        (Get-CamInputUrl -Config $config -RelayPathName $path -DirectUrl $direct -ReadyPaths $serving).Mode
+    })
+    $watch.Stop()
+    $relayCount = @($modes | Where-Object { $_ -eq 'relay' }).Count
+    $evidence += ("batch of {0} cameras against a serving set of {1}: {2} relay, {3} direct, decided in {4} ms with no probe" -f `
+        $paths.Count, $serving.Count, $relayCount, ($paths.Count - $relayCount), [int]$watch.ElapsedMilliseconds)
+    $evidence += ("  " + (($paths | ForEach-Object { $_ }) -join ', '))
+    $evidence += ("  " + ($modes -join ', '))
+    if ($relayCount -ne $serving.Count -or $modes[0] -ne 'direct') {
+        $ok = $false
+        $evidence += 'FAIL: the shared serving set did not decide every camera'
+    }
+    if ($watch.ElapsedMilliseconds -gt 200) {
+        $ok = $false
+        $evidence += 'FAIL: the batch spent long enough to have probed the API per camera'
+    }
+
+    $checks = @(
+        @{ Label = 'in the batch set, unreachable API'
+           Arguments = @{ Config = $config; RelayPathName = 'frontentrance'; DirectUrl = $direct; ReadyPaths = @('frontentrance', 'rearbalcony') }
+           WantMode = 'relay'; MaxMs = 100 }
+        @{ Label = 'not in the batch set, no wait'
+           Arguments = @{ Config = $config; RelayPathName = 'frontentrance'; DirectUrl = $direct; ReadyPaths = @('rearbalcony') }
+           WantMode = 'direct'; MaxMs = 100 }
+        @{ Label = 'empty batch set, no wait'
+           Arguments = @{ Config = $config; RelayPathName = 'frontentrance'; DirectUrl = $direct; ReadyPaths = @() }
+           WantMode = 'direct'; MaxMs = 100 }
+        @{ Label = 'lone attempt, no batch set: still probes, falls to direct'
+           Arguments = @{ Config = $config; RelayPathName = 'frontentrance'; DirectUrl = $direct }
+           WantMode = 'direct'; MinMs = 350 }
+        @{ Label = 'not in the batch set, 1s wait: bounded, then direct'
+           Arguments = @{ Config = $config; RelayPathName = 'frontentrance'; DirectUrl = $direct; ReadyPaths = @(); WaitSeconds = 1 }
+           WantMode = 'direct'; MinMs = 900; MaxMs = 3000 }
+        @{ Label = 'no relay path name at all'
+           Arguments = @{ Config = $config; RelayPathName = ''; DirectUrl = $direct; ReadyPaths = @('frontentrance') }
+           WantMode = 'direct'; MaxMs = 100 }
+    )
+    foreach ($check in $checks) {
+        if (-not (Assert-CamChoice @check)) { $ok = $false }
+        $evidence += $script:CamInputLine
+    }
+
+    # The restreamer switched off must never produce a relay URL, whatever the
+    # batch says.
+    $disabled = Get-CamConfigDefault
+    $disabled.RestreamerEnabled = $false
+    $offChoice = Get-CamInputUrl -Config $disabled -RelayPathName 'frontentrance' -DirectUrl $direct -ReadyPaths @('frontentrance')
+    $evidence += ("RestreamerEnabled=false with the path in the batch set: {0}" -f $offChoice.Mode)
+    if ($offChoice.Mode -ne 'direct' -or $offChoice.Url -ne $direct) {
+        $ok = $false
+        $evidence += 'FAIL: the relay was chosen with the restreamer switched off'
+    }
+
+    # Startup budget: the stagger is per consumer, so the last of six starts
+    # five gaps in. Seconds, not minutes.
+    $defaults = Get-CamConfigDefault
+    $spreadMs = 5 * [int]$defaults.StartStaggerMs
+    $evidence += ("StartStaggerMs {0} -> the sixth consumer starts {1} ms in; RelayReadyWaitSeconds {2}; RelayStartupWaitSeconds {3}" -f `
+        $defaults.StartStaggerMs, $spreadMs, $defaults.RelayReadyWaitSeconds, $defaults.RelayStartupWaitSeconds)
+    if ($spreadMs -gt 3000 -or [int]$defaults.RelayReadyWaitSeconds -gt 30) {
+        $ok = $false
+        $evidence += 'FAIL: the startup budget is no longer measured in seconds'
+    }
+
+    Add-CamTestResult -Run $Run -Check 'inputs' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'a batch of consumers decides relay-or-direct from one shared serving set with no per-camera probe, a path missing from it is waited for and bounded, and a lone attempt still probes and still falls back to direct' `
+        -Evidence $evidence
 }
 
 
@@ -810,6 +942,7 @@ foreach ($check in $Checks) {
     switch ($check) {
         'parse'      { Invoke-CamCheckParse      -Run $run }
         'cameralist' { Invoke-CamCheckCameraList -Run $run }
+        'inputs'     { Invoke-CamCheckInputs     -Run $run }
         'selftest'   { Invoke-CamCheckSelfTest   -Run $run }
         'layout'     { Invoke-CamCheckLayout     -Run $run }
         'strip'      { Invoke-CamCheckStrip      -Run $run }
