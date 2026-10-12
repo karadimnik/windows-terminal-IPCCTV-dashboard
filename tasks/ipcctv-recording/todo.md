@@ -567,3 +567,83 @@ Redaction runs over the whole decoded status document, at any depth: keys named 
 and every bare IPv4 literal is replaced. `Restreamer.RelayBase` is therefore absent from
 `/api/status`, and no camera address or credential can reach the browser even inside ffmpeg error
 text. Proven by a Go test with a positive control and by `-Checks uileak` in the harness.
+
+
+## The NVR window, 2026-10-12 - items [50]-[53]
+
+- [x] **[50]** DONE 2026-10-12: the supervisor no longer dies when an unrelated terminal window is
+      closed. Root cause below - it was never "an unrelated terminal".
+- [x] **[51]** DONE 2026-10-12: `cam.recorder.ps1 -Nvr` opens the NVR: one Windows Terminal window
+      of its own, titled `cam.nvr`, with the supervisor as its only pane and the supervisor log live
+      on screen.
+- [x] **[52]** DONE 2026-10-12: closing that window stops the supervisor, MediaMTX, every ffmpeg and
+      the viewers, with zero orphans. Held by the job object `cam.nvr` and a warden.
+- [x] **[53]** DONE 2026-10-12: the `IPCCTV-Recorder` logon task forwards `-Nvr` instead of `-Run`.
+      Modified, not duplicated - one registered task.
+
+### Root cause: the supervisor's console was a TAB in the Operator's terminal
+
+Windows Terminal is this machine's default terminal application, so a console created WITH a window
+is handed off to it. Measured: creating one activated `OpenConsole.exe -Embedding` and the console
+appeared as a tab in an existing Windows Terminal window, because `windowingBehavior` is
+`useExisting`. The `IPCCTV-Recorder` task created exactly such a console for the supervisor -
+`-WindowStyle Hidden` does not prevent it, because the window belongs to Windows Terminal, not to
+powershell.exe. The Operator's "unrelated" window was hosting the recorder.
+
+Two signatures, one cause:
+
+- **Closing the window** sends `CTRL_CLOSE_EVENT`. PowerShell terminates without running any
+  `finally`, so there is no shutdown line and the children - which have consoles of their own - are
+  orphaned and keep writing. That is 20:30:47.
+- **Closing the tab, or Ctrl+C in it**, stops the pipeline instead: the `finally` runs in full and
+  logs `supervisor shutting down: supervisor shutdown` with `$stopRequested` false, and the launcher
+  stub's own pipeline is stopped too, which is why `autostart.log` has no "the supervisor exited
+  with N" line for any of them. That is 16:57:03, 19:06:17 and 20:18:56. All four deaths lack that
+  stub line, which is what ties them together.
+
+### What holds it now
+
+`Start-CamNvrWindow` starts a warden, waits for it to create and arm the job `cam.nvr`, then runs
+`wt.exe -w ipcctv-nvr new-tab --title cam.nvr --suppressApplicationTitle`. The pane joins the job as
+its first statement and only then becomes the supervisor, so MediaMTX and every ffmpeg inherit
+membership at creation. No console is adopted anywhere, so no other window can reach the supervisor.
+
+`Start-CamJobWarden` is the dashboard warden generalised - one warden per window that owns a job.
+`Start-CamDetachedProcess` replaces `Start-Process -WindowStyle Hidden` for both wardens: measured,
+`Start-Process` leaves the child attached to the LAUNCHER's console, so closing the terminal a
+launch was typed into would have closed the last handle to the job and killed everything it
+protected. `CREATE_NO_WINDOW` gives the child its own console, no window and no handoff.
+
+**T2 measured:**
+
+```
+BEFORE  ffmpeg=4 mediamtx=1 supervisor=[69900] nvrWindow=1 nvrWarden=1 job=True
++1s     ffmpeg=4 mediamtx=1 supervisor=[]      orphanParent=[69900]      <- CTRL_CLOSE took the pane
++9s     ffmpeg=0 mediamtx=0 supervisor=[]      nvrWindow=0 nvrWarden=0 job=False
+```
+
+The eight seconds of orphaned ffmpeg were the warden stopping the viewers before closing its handle.
+It now closes the handle first; the viewers follow.
+
+### The one residual risk - a foreign console can still be adopted INTO the NVR window
+
+Measured on 2026-10-12 with a surrogate started the way the task used to start the supervisor: its
+console was adopted as a tab in the **`cam.nvr` window**, and while it was the active tab the NVR
+window's title read `NVR-REPRO-SURROGATE`, so `Get-CamTerminalWindow -Title cam.nvr` found nothing.
+`--suppressApplicationTitle` pins our own pane's title and cannot pin a tab Windows Terminal adds.
+
+The warden is unaffected - it resolves the HWND once and then polls `IsWindow` - so recording is not
+at risk. What is at risk is the Operator closing what he thinks is a stray console window and
+closing the NVR with it, which is the original complaint wearing a different hat.
+
+The fix is one line in the Operator's own Windows Terminal settings and is his call, not ours:
+`"windowingBehavior": "useNew"` makes an adopted console open its own window instead of joining one.
+Setting the default terminal application to Windows Console Host would do it too. Neither was
+changed here.
+
+### Also fixed in passing
+
+The supervisor log is echoed to the NVR window by `Set-CamLogEcho`, registered by `-Run` for
+`recorder.log` only - the per-camera logs carry raw ffmpeg stderr and would bury it. Fifteen
+`Write-CamHost` calls that printed the same event without a timestamp were removed; the echo covers
+them.
