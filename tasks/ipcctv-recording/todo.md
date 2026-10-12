@@ -305,3 +305,55 @@ archive. Reduced to a 256-colour palette, 894 KB instead of 2.4 MB, strip text u
 - [ ] **[23]/[24]** The long-run paths named in [24] remain unexercised: log rotation at
       `LogMaxBytes`, the full 900 s segment, `HealthyResetSeconds`, the 2250 s stall watchdog,
       `MaxRetentionDays`. README limitation 7 says so plainly.
+
+
+## Relay-readiness race fixed 2026-10-12 - both consumers decide from one measurement
+
+**The fault, measured twice.** `Get-CamInputUrl` probed the MediaMTX control API once per
+camera with no retry, so a six-camera start fired six near-simultaneous probes and took whatever
+each one said. Workshop was started one second before MediaMTX had its paths up and recorded
+direct for its whole run; on a dashboard launch where five of six paths were confirmed serving,
+two panes still chose direct. Each one burns the spare camera session the relay exists to free.
+
+**One measurement per batch.** `-ReadyPaths` answers from the set the batch fetched once with
+`Get-CamRelayReadyPaths` and makes no API call at all; `-WaitSeconds` keeps asking while the
+answer is still no. Both optional, and absent is exactly the old single probe, so a lone restart
+and the per-attempt fallback are unchanged. The harness asserts the no-probe property by the
+clock against an unroutable API (`-Checks inputs`).
+
+**What decides whether a recorder child waits: the RESTREAMER'S age, not the child's.** First
+attempt was the obvious rule and it was wrong. Kill MediaMTX and every child correctly
+reconnects directly - and the second camera session is then taken, so MediaMTX cannot pull that
+camera when it returns, the path never serves again and nothing comes back to the relay.
+Measured: five of six paths dead 90 s after a kill. A child now waits for its own path while the
+restreamer is younger than `RelayReadyWaitSeconds`, which is exactly when paths are still coming
+up - cold start or restart. An older restreamer, or none, decides on the spot.
+
+**`Start-CamRelayChild` waits for the control API, not for every path.** Workshop is offline, so
+its path can never become ready and waiting for the whole set spent the entire 20 s budget on
+every cold start, behind a camera that was never coming. Each child waits for its own path
+instead, so a straggler delays nothing but itself.
+
+**Three config keys**: `RelayReadyWaitSeconds` 15, `RelayReadyPollMs` 500, `StartStaggerMs` 300.
+The stagger applies to both consumers: the supervisor sleeps it between consecutive child starts,
+and each mpv pane sleeps its index times it before deciding.
+
+**Evidence, four cold starts of both consumers.** Five serving paths at `readers=2` every time,
+all five recorders on the relay within 3 s of each other, Workshop on direct after its bounded
+wait and delaying nobody. On the third start only THREE of six paths were serving when the API
+answered, and Field Front and Car Garage both waited and got the relay - pre-fix they were two
+more direct connections.
+
+## Carried forward after the relay-readiness fix
+
+- [ ] **[37]** An mpv pane that fell back to direct stays there. mpv on a healthy direct stream
+      never exits, so the pane loop never gets another attempt in which to notice the relay is
+      serving again, and the camera sits at `readers=1` until the dashboard is relaunched. The
+      recorder has the equivalent promotion (it stops a direct child once the path serves); the
+      dashboard has nothing. Pre-existing, not introduced by this commission, and a fix means a
+      visible blink in that pane - the Operator's call.
+- [ ] **[38]** The six pane commands are 26987 of the 32767 characters Windows allows on a
+      command line, because each pane travels as a base64 blob on one `wt.exe` invocation. Seven
+      cameras would not fit. The launch now prints the count and throws over 32000 instead of
+      silently opening nothing, which is what it did at 42040. A real fix is moving the pane loop
+      into `cam.common.ps1` and passing arguments instead of a script.
