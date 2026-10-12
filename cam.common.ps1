@@ -2100,7 +2100,7 @@ function Add-CamJobMember {
 
         # The warden creates the job before the window opens, but a pane that
         # wins that race should wait rather than give up.
-        [int]$TimeoutSeconds = 30
+        [int]$TimeoutSeconds = 15
     )
 
     Import-CamJobApi
@@ -2560,4 +2560,36 @@ function Start-CamDashboardWarden {
         # thing that happens before they go.
         [void][CamJob]::CloseHandle($job)
     }
+}
+
+
+function Stop-CamHealthStrip {
+    <#
+        Stops every health strip - the PROCESS, then its window - and returns
+        how many processes it stopped.
+
+        This is item [39]. Six stale cam.health processes had accumulated by
+        the end of 2026-10-12, windowless and invisible, one per relaunch. The
+        reason is the whole lesson of this file: the old version closed a
+        WINDOW found by its title and never touched a process, so it worked
+        only while the title held. It does not hold. cam.health.ps1 sets the
+        title, and when the renderer exits, PowerShell -NoExit returns to a
+        prompt and the title reverts to the shell default - measured on
+        2026-10-12 as a live strip window reading "Windows PowerShell". From
+        then on every relaunch closed nothing and left one more process behind.
+
+        So the strip is found the way everything else here is found: by the
+        script it was handed. The window close is cosmetic cleanup afterwards.
+    #>
+    param([AllowNull()]$Config)
+
+    $strips = @(Get-CamProcessInventory -Config $Config | Where-Object { $_.Role -eq 'Health' })
+    if ($strips.Count -gt 0) {
+        $keep = Get-CamRecorderKeepList
+        [void](Stop-CamProcessList -ProcessId @($strips | ForEach-Object { [int]$_.ProcessId }) -Keep $keep)
+    }
+
+    # Whatever window is left, by whichever title it now carries.
+    [void](Stop-CamTerminalWindow -Title 'cam.health')
+    return $strips.Count
 }

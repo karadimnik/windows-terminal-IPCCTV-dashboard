@@ -105,6 +105,23 @@ foreach ($Camera in (Get-CamList -Path $JsonPath)) {
     }
 }
 
+# Anything left of a previous dashboard goes BEFORE the relay is measured.
+#
+# Relaunching used to leave the old run behind: six pane processes survive the
+# window being closed, and six stale cam.health processes had accumulated
+# windowless and invisible by the end of 2026-10-12. Each old pane still holds
+# the second of its camera's two RTSP sessions, which is also the session
+# MediaMTX needs to pull that camera - so a stale pane does not just waste a
+# slot, it keeps the relay from recovering the path this launch is about to
+# measure. Stopping first is what makes the measurement below mean anything.
+#
+# -PrintUrls must not touch a running dashboard: it answers a question.
+if (-not $PrintUrls) {
+    Write-Host '=== stopping any previous dashboard ===' -ForegroundColor Cyan
+    [void](Stop-CamDashboard -Config $Config)
+    Write-Host ''
+}
+
 # The serving set, measured ONCE for all six panes. Six panes each asking the
 # control API about their own path in the same instant is what put two of them
 # on direct connections on 2026-10-11, on a launch where five of the six paths
@@ -256,28 +273,6 @@ function Set-CamWindowFrame {
 }
 
 
-function Stop-CamHealthWindow {
-    <#
-        Closes any existing strip window, so relaunching the dashboard replaces
-        it instead of leaving two.
-
-        WM_CLOSE to that one window. Never Stop-Process: one Windows Terminal
-        process can own several windows, including the Operator's own.
-    #>
-    Import-CamWindowApi
-
-    $existing = @([CamWin]::FindByTitle('cam.health'))
-    if ($existing.Count -eq 0) { return 0 }
-
-    foreach ($hwnd in $existing) { [void][CamWin]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) }
-    for ($i = 0; $i -lt 10; $i++) {
-        Start-Sleep -Milliseconds 400
-        if (@([CamWin]::FindByTitle('cam.health')).Count -eq 0) { break }
-    }
-    return $existing.Count
-}
-
-
 function Start-CamHealthWindow {
     <#
         Launches cam.health.ps1 into its own named Windows Terminal window and
@@ -301,8 +296,8 @@ function Start-CamHealthWindow {
     }
 
     Import-CamWindowApi
-    $closed = Stop-CamHealthWindow
-    if ($closed -gt 0) { Write-Host ("closed {0} earlier health window(s)" -f $closed) -ForegroundColor Yellow }
+    $closed = Stop-CamHealthStrip -Config $Config
+    if ($closed -gt 0) { Write-Host ("stopped {0} earlier health strip(s)" -f $closed) -ForegroundColor Yellow }
 
     # The title is set here as well as inside cam.health.ps1, so the window can
     # still be found and placed if the renderer fails on startup.
@@ -404,6 +399,15 @@ foreach ($Stream in $Streams.GetEnumerator()) {
     # launched at all and nothing said why. The guard below the loop is what
     # turns that back into an error message.
     #
+    # Add-CamJobMember is the one line that makes closing this window stop
+    # this pane. It puts the pane into the Win32 job the warden owns, before
+    # mpv is ever started so mpv inherits the membership, and the kernel kills
+    # the lot when the warden lets its handle go. Sixteen characters here
+    # rather than a watchdog inside the loop because a pane CANNOT see its own
+    # window close: measured on 2026-10-12, the console survives it intact and
+    # every console call still succeeds, and in any case the loop is blocked
+    # inside mpv for hours at a time.
+    #
     # What the three batch-startup placeholders do:
     #   __STAGGERMS__   this pane's place in the launch stagger, so six panes
     #                   do not open six RTSP sessions and fire six control-API
@@ -440,6 +444,7 @@ foreach ($Stream in $Streams.GetEnumerator()) {
     $PaneTemplate = @'
 $ErrorActionPreference = 'Stop'
 . '__LIB__'
+Add-CamJobMember
 $camName = '__NAME__'
 $config = Get-CamConfig
 $credential = Get-CamCredential
@@ -491,7 +496,22 @@ while ($true) {
 }
 
 # 5. Build Windows Terminal argument array using the encoded commands
-$WtArgs = @("new-tab", "powershell.exe", "-NoExit", "-EncodedCommand", $EncodedCommands[0])
+#
+# -w cctv-grid gives the grid a window of its OWN. Without it the dashboard
+# obeys the user's windowingBehavior setting, which is "useExisting" on this
+# machine, and the six panes arrive as a TAB inside whatever terminal window
+# was last used - the Operator's own included. A dashboard that cannot be
+# closed without closing his shell is not a dashboard.
+#
+# --title plus --suppressApplicationTitle on EVERY pane is what gives the
+# window a stable name for the warden to watch. Measured on 2026-10-12:
+# --title alone is overwritten by the shell's own title, and the window title
+# then follows whichever pane has focus, so it changed on every move-focus.
+# With the application title suppressed it stays put.
+$PaneTitleArgs = @("--title", (Get-CamDashboardWindowTitle), "--suppressApplicationTitle")
+
+$WtArgs = @("-w", "cctv-grid", "new-tab") + $PaneTitleArgs +
+    @("powershell.exe", "-NoExit", "-EncodedCommand", $EncodedCommands[0])
 
 for ($j = 1; $j -lt $EncodedCommands.Count; $j++) {
     $WtArgs += ";"
@@ -540,6 +560,40 @@ Write-Host ("wt.exe command line: {0} of the 32767 characters Windows allows, {1
     $CommandLineChars, $EncodedCommands.Count)
 if ($CommandLineChars -gt 32000) {
     throw ("The pane commands need {0} characters of command line and Windows allows 32767. Shorten the pane template in this script - every character in it costs 2.67 bytes per pane - or reduce the camera count." -f $CommandLineChars)
+}
+
+# The warden starts BEFORE wt.exe, because a pane joins the job as its first
+# act and the job has to exist by then - a pane that joined late would already
+# have an mpv outside the job, and that mpv is what holds the camera session.
+#
+# It is a detached, windowless process holding the only handle to the job. It
+# waits for the window titled cam.dashboard to appear, then polls it once a
+# second; when the window goes, so does the warden, the last handle closes and
+# JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE terminates every pane and every mpv at
+# once. If the window never appears it DISARMS the job and leaves, so a launch
+# that failed elsewhere cannot have its panes killed by a warden that simply
+# never found what it was watching.
+$WardenScript = ". '{0}'`nStart-CamDashboardWarden -LogPath '{1}'" -f `
+    $LibPath.Replace("'", "''"), `
+    (Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath 'dashboard-warden.log').Replace("'", "''")
+$WardenEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($WardenScript))
+$Warden = Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -PassThru `
+    -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $WardenEncoded
+
+Import-CamJobApi
+$JobName = Get-CamDashboardJobName
+$JobReady = $false
+for ($Attempt = 0; $Attempt -lt 40; $Attempt++) {
+    if ([CamJob]::Exists($JobName)) { $JobReady = $true; break }
+    Start-Sleep -Milliseconds 250
+}
+if ($JobReady) {
+    Write-Host ("warden pid {0} owns the job '{1}'; closing the dashboard window will stop the panes" -f `
+        $Warden.Id, $JobName) -ForegroundColor Green
+}
+else {
+    Write-Host ("the warden (pid {0}) did not create the job '{1}' within 10s. The dashboard will still open, but closing its window will NOT stop the panes - use cam.ps1 -Stop." -f `
+        $Warden.Id, $JobName) -ForegroundColor Yellow
 }
 
 & wt.exe $WtArgs
