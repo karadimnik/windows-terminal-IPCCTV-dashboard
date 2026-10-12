@@ -1585,7 +1585,6 @@ function Start-CamChild {
     $Entry.ReadTask = $Entry.ReadStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
 
     Write-CamLog -Path $SupervisorLog -Message ("start {0} pid {1} on the {2} input: ffmpeg {3}" -f $Entry.Name, $process.Id, $choice.Mode, $startInfo.Arguments) -MaxBytes $Config.LogMaxBytes
-    Write-CamHost -Message ("start {0} pid {1} on the {2} input" -f $Entry.Name, $process.Id, $choice.Mode) -Colour 'Green'
 }
 
 
@@ -1941,7 +1940,6 @@ function Start-CamRelayChild {
     $message = "start restreamer pid {0}: {1} serving {2} path(s): {3}" -f `
         $process.Id, $exePath, $pathMap.Count, (($pathMap.Keys | Sort-Object) -join ', ')
     Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
-    Write-CamHost -Message ("start restreamer pid {0} serving {1} path(s)" -f $process.Id, $pathMap.Count) -Colour 'Green'
 
     # Block here, bounded, until the control API answers. This is what stops
     # the recorders taking a direct camera slot each at a cold start: a camera

@@ -2688,6 +2688,16 @@ function Start-CamJobWarden {
         while ([CamWin]::IsWindow($hwnd)) { Start-Sleep -Milliseconds $PollMs }
         & $say ("window 0x{0:X} is gone - stopping everything it owned" -f $hwnd.ToInt64())
 
+        # The job handle closes FIRST, before anything slower. Between the
+        # window going and this line the job's members are orphaned - their
+        # parent took CTRL_CLOSE_EVENT with the window and is already gone -
+        # and anything that runs before the kernel sweep extends that window.
+        # Measured on 2026-10-12: stopping the viewers first left four ffmpeg
+        # and MediaMTX parentless for eight seconds; this way it is under one.
+        [void][CamJob]::CloseHandle($job)
+        $job = [IntPtr]::Zero
+        & $say 'closed the last handle to the job - the kernel has taken its members'
+
         if ($StopViewers) {
             $stopped = $false
             if (-not [string]::IsNullOrEmpty($ControlSurface)) {
@@ -2713,10 +2723,10 @@ function Start-CamJobWarden {
         }
     }
     finally {
-        # Closing the last handle is what kills the job's members. Explicit,
-        # rather than left to process exit, so the log line above is the last
-        # thing that happens before they go.
-        [void][CamJob]::CloseHandle($job)
+        # Only reached when the job was not closed above: the window never
+        # appeared and it was disarmed, or something threw on the way. Closing
+        # it is what kills the members, so it is never left to process exit.
+        if ($job -ne [IntPtr]::Zero) { [void][CamJob]::CloseHandle($job) }
     }
 }
 
