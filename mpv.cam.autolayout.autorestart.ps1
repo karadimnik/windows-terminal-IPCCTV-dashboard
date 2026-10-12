@@ -319,9 +319,15 @@ $Host.UI.RawUI.WindowTitle = 'cam.health'
     # --suppressApplicationTitle keeps this window findable. Without it the
     # title reverts to the shell default the moment the renderer exits, which
     # is how six stale strips went unnoticed - see Stop-CamHealthStrip.
-    & wt.exe -w cctv-health --focus --title 'cam.health' --suppressApplicationTitle `
+    # --pos and --size are GLOBAL options and come before the subcommand;
+    # --title and --suppressApplicationTitle belong to new-tab and have to go
+    # after it. Measured: with the two title flags up among the global options
+    # wt.exe parsed nothing and opened no window at all, silently, so the
+    # subcommand is written out rather than left implicit.
+    & wt.exe -w cctv-health --focus `
         --pos ("{0},{1}" -f $Layout.StripLeft, $Layout.StripTop) `
         --size ("{0},{1}" -f $hintColumns, $hintRows) `
+        new-tab --title 'cam.health' --suppressApplicationTitle `
         powershell.exe -NoExit -EncodedCommand $encoded
 
     $hwnd = [IntPtr]::Zero

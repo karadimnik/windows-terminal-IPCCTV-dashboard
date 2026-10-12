@@ -359,7 +359,10 @@ function Invoke-CamStartAll {
     if ($WantDashboard) {
         if ($WantRecorder -and (Get-CamRelayEnabled -Config $Config)) {
             Write-CamSection 'waiting for the relay to serve'
-            $wanted = @(Get-CamRelayPathMap -Config $Config).Count
+            # Get-CamList is passed without @(): it returns its array with a
+            # leading comma, and @() around a function call nests that one
+            # level deeper into a single element holding every camera.
+            $wanted = (Get-CamRelayPathMap -Cameras (Get-CamList)).Count
             $seconds = [int]$Config.RelayReadyWaitSeconds
             if ($seconds -lt 5) { $seconds = 5 }
             $deadline = (Get-Date).AddSeconds($seconds)
