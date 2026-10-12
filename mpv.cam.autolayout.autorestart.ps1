@@ -316,7 +316,11 @@ $Host.UI.RawUI.WindowTitle = 'cam.health'
     # --focus drops the tab bar, which is dead weight on a one-pane status
     # strip. Measured: the same 1913x296 window carries 15 text rows with it
     # and 13 without, so the flag is worth two rows of the Operator's budget.
-    & wt.exe -w cctv-health --focus --pos ("{0},{1}" -f $Layout.StripLeft, $Layout.StripTop) `
+    # --suppressApplicationTitle keeps this window findable. Without it the
+    # title reverts to the shell default the moment the renderer exits, which
+    # is how six stale strips went unnoticed - see Stop-CamHealthStrip.
+    & wt.exe -w cctv-health --focus --title 'cam.health' --suppressApplicationTitle `
+        --pos ("{0},{1}" -f $Layout.StripLeft, $Layout.StripTop) `
         --size ("{0},{1}" -f $hintColumns, $hintRows) `
         powershell.exe -NoExit -EncodedCommand $encoded
 
@@ -508,6 +512,10 @@ while ($true) {
 # --title alone is overwritten by the shell's own title, and the window title
 # then follows whichever pane has focus, so it changed on every move-focus.
 # With the application title suppressed it stays put.
+# Every pane, not just the first. The window title follows whichever pane has
+# focus, so one untitled pane out of six is enough to lose the window: measured
+# with the flags on new-tab alone, the grid came up titled "powershell.exe" and
+# the warden sat waiting for a window that never appeared.
 $PaneTitleArgs = @("--title", (Get-CamDashboardWindowTitle), "--suppressApplicationTitle")
 
 $WtArgs = @("-w", "cctv-grid", "new-tab") + $PaneTitleArgs +
@@ -523,7 +531,8 @@ for ($j = 1; $j -lt $EncodedCommands.Count; $j++) {
         $SizeVal = ($Columns - $j) / ($Columns - $j + 1)
         $SizeStr = [math]::Round($SizeVal, 4).ToString([cultureinfo]::InvariantCulture)
 
-        $WtArgs += "split-pane", "-V", "-s", $SizeStr, "powershell.exe", "-NoExit", "-EncodedCommand", $EncodedCommands[$j]
+        $WtArgs += @("split-pane", "-V", "-s", $SizeStr) + $PaneTitleArgs +
+            @("powershell.exe", "-NoExit", "-EncodedCommand", $EncodedCommands[$j])
     }
     else {
         # STEP B: Building subsequent rows underneath.
@@ -542,7 +551,8 @@ for ($j = 1; $j -lt $EncodedCommands.Count; $j++) {
         $SizeStr = [math]::Round($SizeVal, 4).ToString([cultureinfo]::InvariantCulture)
 
         # Split downward using the encoded command
-        $WtArgs += "split-pane", "-H", "-s", $SizeStr, "powershell.exe", "-NoExit", "-EncodedCommand", $EncodedCommands[$j]
+        $WtArgs += @("split-pane", "-H", "-s", $SizeStr) + $PaneTitleArgs +
+            @("powershell.exe", "-NoExit", "-EncodedCommand", $EncodedCommands[$j])
     }
 }
 

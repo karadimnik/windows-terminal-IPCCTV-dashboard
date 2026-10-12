@@ -260,6 +260,36 @@ function Invoke-CamStopAll {
         else {
             Write-Host '  the recorder was not running' -ForegroundColor DarkGray
         }
+
+        # A supervisor that died without tearing its children down leaves
+        # ffmpeg and MediaMTX running with nothing to stop them: their parent
+        # pid points at a process that no longer exists, so the recorder's own
+        # -Stop has no supervisor to signal and the stop flag is read by
+        # nobody. Observed on 2026-10-12, with five ffmpeg still writing and
+        # MediaMTX still serving half an hour after the supervisor had gone.
+        #
+        # Each of those holds a camera session, which is the whole reason this
+        # script exists, so they are stopped directly once the orderly path
+        # has had its turn.
+        # The orderly stop is given its time first. An ffmpeg killed partway
+        # through its own shutdown is a truncated segment, and the supervisor
+        # closes them in order precisely to avoid that.
+        $orphans = @()
+        $deadline = (Get-Date).AddSeconds(20)
+        while ($true) {
+            $orphans = @(Get-CamProcessInventory -Config $Config |
+                Where-Object { $_.Role -in @('Supervisor', 'Recorder', 'Relay') })
+            if ($orphans.Count -eq 0 -or (Get-Date) -ge $deadline) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if ($orphans.Count -gt 0) {
+            Write-Host ("  {0} recorder process(es) outlived the orderly stop; stopping them directly" -f `
+                $orphans.Count) -ForegroundColor Yellow
+            $stop = Stop-CamProcessList -ProcessId @($orphans | ForEach-Object { [int]$_.ProcessId })
+            if ($stop.Survived.Count -gt 0) {
+                Write-Host ("  still alive: {0}" -f (($stop.Survived | Sort-Object) -join ', ')) -ForegroundColor Red
+            }
+        }
     }
 
     $after = Get-CamComponentState
