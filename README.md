@@ -183,6 +183,8 @@ These cameras allow very few simultaneous RTSP sessions, which is the whole reas
 
 The choice is made per start attempt, per consumer: if the relay is serving that camera it is used, and if it is not, a direct camera connection is used instead. A relay that dies is left behind at the next restart and one that comes back is picked up without relaunching anything. The health strip's `MODE` column tells you which input each recorder is actually on.
 
+A consumer that had to take a direct connection gives the camera slot back on its own once the relay is serving that camera again. A recorder child is stopped and restarted by its supervisor; an mpv pane watches its own path every `ViewerPromoteCheckSeconds` (10 by default, 0 to switch it off) and restarts itself onto the relay, which costs one brief blink in that pane, once per outage. Only a pane on a direct connection watches anything - a pane on the relay needs no watch, because if the relay dies mpv loses its input and the pane decides again by itself.
+
 The generated `mediamtx.yml` contains no password. Every path is left as `source: publisher` in the file and the supervisor supplies the real camera URL on the child's environment block at launch.
 
 ### The health strip
