@@ -243,11 +243,25 @@ function Get-CamConfigDefault {
         # Budget for one control-API probe. Spent once per recorder child
         # start and once per mpv pane attempt, both on loopback.
         RelayProbeTimeoutMs  = 1500
-        # How long the supervisor waits for the restreamer's paths to come up
-        # before it starts the recorders. Without the wait the recorders take a
-        # direct slot each at a cold start, and a camera already serving the
-        # dashboard would then have no slot left for the restreamer to pull.
+        # How long the supervisor waits for the restreamer to answer its
+        # control API before it starts the recorders. Without the wait the
+        # recorders take a direct slot each at a cold start, and a camera
+        # already serving the dashboard would then have no slot left for the
+        # restreamer to pull. It waits for the API only, not for every path:
+        # each camera waits for its OWN path below, so one offline camera -
+        # whose path can never become ready - cannot delay the others.
         RelayStartupWaitSeconds = 20
+        # How long ONE consumer waits for its OWN relay path to start serving
+        # before it gives up and takes a direct camera slot. Spent only on a
+        # consumer's first attempt, at batch startup: a later attempt decides
+        # on the spot so a relay that died is left behind immediately.
+        RelayReadyWaitSeconds   = 15
+        # How often that wait re-asks.
+        RelayReadyPollMs        = 500
+        # Delay between consecutive consumer starts - recorder children and
+        # mpv panes alike - so six of them do not burst onto the relay, the
+        # control API and the cameras in the same instant.
+        StartStaggerMs          = 300
         Container            = 'mkv'
         ContainerProfiles    = @{
             mkv  = [pscustomobject]@{
@@ -747,25 +761,77 @@ function Get-CamInputUrl {
         being retried forever against a dead address, and what lets a consumer
         return to the relay on its own once MediaMTX is back.
 
+        Two optional parameters are what a BATCH of consumers starting together
+        needs, and neither changes the single-attempt behaviour above when it
+        is left out:
+
+        -ReadyPaths is the serving set the batch fetched ONCE with
+        Get-CamRelayReadyPaths. A path in it is served without any API call at
+        all, so six cameras starting together cost one list query instead of
+        six near-simultaneous per-path probes - any one of which could flake
+        and silently send that camera direct for its whole run. Measured on
+        2026-10-11: two of six mpv panes chose direct on a launch where five of
+        the six paths had just been confirmed serving.
+
+        -WaitSeconds is how long to keep asking the API while the answer is
+        still no, for the other half of the same fault: a path that is not
+        ready YET. It BLOCKS, so only a consumer with nothing else to do in the
+        meantime may use it - an mpv pane, which is its own process. The
+        supervisor must not, because one offline camera would then hold up
+        every other child; it spreads its wait across its own loop instead.
+
         The returned Mode is logged by both consumers so the choice is always
-        visible after the fact.
+        visible after the fact, and WaitedSeconds says how much of the budget
+        the decision cost.
     #>
     param(
         [Parameter(Mandatory = $true)]$Config,
         [AllowEmptyString()][string]$RelayPathName,
-        [Parameter(Mandatory = $true)][string]$DirectUrl
+        [Parameter(Mandatory = $true)][string]$DirectUrl,
+        [AllowNull()][AllowEmptyCollection()][string[]]$ReadyPaths,
+        [int]$WaitSeconds = 0
     )
 
-    if ((Get-CamRelayEnabled -Config $Config) -and -not [string]::IsNullOrEmpty($RelayPathName)) {
+    $direct = [pscustomobject]@{ Mode = 'direct'; Url = $DirectUrl; WaitedSeconds = 0 }
+
+    if (-not (Get-CamRelayEnabled -Config $Config)) { return $direct }
+    if ([string]::IsNullOrEmpty($RelayPathName)) { return $direct }
+
+    $relay = [pscustomobject]@{
+        Mode          = 'relay'
+        Url           = (Get-CamRelayUrl -Config $Config -PathName $RelayPathName)
+        WaitedSeconds = 0
+    }
+
+    # The batch's own answer first: free, and not subject to a probe flake.
+    if ($PSBoundParameters.ContainsKey('ReadyPaths') -and (@($ReadyPaths) -contains $RelayPathName)) {
+        return $relay
+    }
+
+    # No batch answer means this is a lone attempt, so ask for this one path.
+    # Skipped when the batch already said no, because it just asked.
+    if (-not $PSBoundParameters.ContainsKey('ReadyPaths')) {
+        if (Test-CamRelayPathReady -Config $Config -PathName $RelayPathName) { return $relay }
+    }
+
+    if ($WaitSeconds -le 0) { return $direct }
+
+    $pollMs = 500
+    try { $pollMs = [int]$Config.RelayReadyPollMs } catch { }
+    if ($pollMs -lt 50) { $pollMs = 50 }
+
+    $startedAt = [DateTime]::Now
+    $deadline = $startedAt.AddSeconds($WaitSeconds)
+    while ([DateTime]::Now -lt $deadline) {
+        Start-Sleep -Milliseconds $pollMs
         if (Test-CamRelayPathReady -Config $Config -PathName $RelayPathName) {
-            return [pscustomobject]@{
-                Mode = 'relay'
-                Url  = (Get-CamRelayUrl -Config $Config -PathName $RelayPathName)
-            }
+            $relay.WaitedSeconds = ([DateTime]::Now - $startedAt).TotalSeconds
+            return $relay
         }
     }
 
-    return [pscustomobject]@{ Mode = 'direct'; Url = $DirectUrl }
+    $direct.WaitedSeconds = ([DateTime]::Now - $startedAt).TotalSeconds
+    return $direct
 }
 
 
