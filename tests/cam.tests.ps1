@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Test harness for the IPCCTV recorder. Run it from Windows PowerShell 5.1.
 
@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs', 'relay', 'viewer')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'uileak', 'procs', 'relay', 'viewer')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'procs')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'uileak', 'procs')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -770,6 +770,72 @@ function Invoke-CamCheckLeak {
 }
 
 
+function Invoke-CamCheckUiLeak {
+    <#
+        The same question as 'leak', asked of the WIRE instead of the disk:
+        camui.exe is started on loopback and every endpoint it serves is
+        fetched and scanned for the camera password, for the username in URL
+        userinfo shape, and for any URL at all.
+
+        Frigate's CVE-2026-33469 leaked camera RTSP credentials to any
+        logged-in viewer, so a redacted status file is not the deliverable -
+        a redacted RESPONSE is. Restreamer.RelayBase is asserted absent by
+        name as well, because that is the one field in status.json that
+        always holds a URL.
+    #>
+    param($Run)
+
+    if (-not (Test-Path -LiteralPath (Join-Path -Path $repo -ChildPath 'camera_creds.xml'))) {
+        Add-CamTestResult -Run $Run -Check 'uileak' -Status 'SKIP' `
+            -Message 'no camera_creds.xml, so there is no needle to scan for'
+        return
+    }
+
+    $ui = Start-CamTestUi
+    if (-not $ui.Started) {
+        Add-CamTestResult -Run $Run -Check 'uileak' -Status 'SKIP' -Message $ui.Reason
+        if ($ui.Process) { [void](Stop-CamTestUi -Ui $ui) }
+        return
+    }
+
+    try {
+        $result = Invoke-CamUiCredentialLeakScan -BaseUrl $ui.BaseUrl
+        $ok = $result.Ok
+
+        $evidence = @(
+            ("camui {0}, status file {1}" -f $ui.BaseUrl, $ui.StatusFile),
+            $result.Text
+        )
+        $evidence += @($result.Endpoints | ForEach-Object {
+            if ($_.Error) { '  {0,-14} UNREACHABLE {1}' -f $_.Path, $_.Error }
+            else { '  {0,-14} {1,8} bytes, {2} hit(s)' -f $_.Path, $_.Bytes, $_.Hits }
+        })
+        $evidence += @($result.Hits | ForEach-Object { 'HIT ' + $_ })
+
+        # RelayBase by name: the one status field that always carries a URL.
+        $raw = (New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + '/api/status'))
+        if ($raw -match 'RelayBase') {
+            $ok = $false
+            $evidence += 'HIT Restreamer.RelayBase survived into /api/status'
+        }
+        else {
+            $evidence += '  Restreamer.RelayBase absent from /api/status'
+        }
+        $status = ($raw | ConvertFrom-Json)
+        $relayKeys = @(($status.status.Restreamer | Get-Member -MemberType NoteProperty).Name)
+        $evidence += ('  Restreamer keys served: ' + ($relayKeys -join ', '))
+    }
+    finally {
+        $logLines = @(Stop-CamTestUi -Ui $ui)
+    }
+    $evidence += @($logLines | Where-Object { $_ -match 'msg="camui listening"' } | ForEach-Object { '  ' + $_ })
+
+    Add-CamTestResult -Run $Run -Check 'uileak' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'no camera password, no credential in URL userinfo shape and no URL of any scheme in any camui response' `
+        -Evidence $evidence
+}
+
+
 function Invoke-CamCheckProcs {
     <#
         Asserts that no ffmpeg or MediaMTX is left over from a test run.
@@ -1109,6 +1175,7 @@ foreach ($check in $Checks) {
         'sections'   { Invoke-CamCheckSections   -Run $run }
         'autostart'  { Invoke-CamCheckAutostart  -Run $run }
         'leak'       { Invoke-CamCheckLeak       -Run $run }
+        'uileak'     { Invoke-CamCheckUiLeak     -Run $run }
         'procs'      { Invoke-CamCheckProcs      -Run $run }
         'relay'      { Invoke-CamCheckRelay      -Run $run }
     }

@@ -1,4 +1,4 @@
-<#
+﻿<#
     cam.testlib.ps1 - reusable test primitives for the IPCCTV recorder.
 
     Dot-source it, do not run it:
@@ -322,6 +322,197 @@ function Invoke-CamCredentialLeakScan {
         UserinfoHits    = @($userinfoHits)
         Text            = ("{0} file(s) over {1} root(s): password hits {2}, URL-userinfo hits {3}, positive control {4}" -f `
                             $files.Count, @($Roots).Count, $passwordHits.Count, $userinfoHits.Count, $(if ($controlOk) { 'lit up' } else { 'DID NOT LIGHT UP' }))
+    }
+}
+
+
+function Start-CamTestUi {
+    <#
+        Starts camui.exe on a loopback port for the UI leak scan, from a copy
+        under %TEMP% rather than from the repo: the repo may live on the
+        \\wsl.localhost share and a Windows process should not be launched from
+        there.
+
+        Returns the process, the base URL and the log paths, or $null with a
+        Reason when camui.exe has not been built. Stop it with Stop-CamTestUi,
+        which stops the pid this returned - never a process matched by name.
+    #>
+    param(
+        [int]$Port = 18787,
+        [string]$StatusFile,
+        [string]$Token
+    )
+
+    $source = Join-Path -Path (Get-CamTestRepo) -ChildPath 'camui.exe'
+    if (-not (Test-Path -LiteralPath $source)) {
+        return [pscustomobject]@{ Started = $false; Reason = 'camui.exe is not built; run ui/build.sh' }
+    }
+    if (-not $StatusFile) {
+        $StatusFile = Join-Path -Path ([string](Get-CamConfig).RootPath) -ChildPath '_state\status.json'
+    }
+
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\camui'
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+    $exe = Join-Path -Path $dir -ChildPath 'camui.exe'
+    Copy-Item -LiteralPath $source -Destination $exe -Force
+
+    $out = Join-Path -Path $dir -ChildPath 'camui.out.log'
+    $err = Join-Path -Path $dir -ChildPath 'camui.err.log'
+    Remove-Item -LiteralPath $out, $err -Force -ErrorAction SilentlyContinue
+
+    if ($Token) { $env:CAMUI_TOKEN = $Token } else { Remove-Item Env:\CAMUI_TOKEN -ErrorAction SilentlyContinue }
+    $process = Start-Process -FilePath $exe `
+        -ArgumentList '-listen', ("127.0.0.1:{0}" -f $Port), '-status-file', $StatusFile `
+        -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
+
+    $base = "http://127.0.0.1:$Port"
+    $deadline = (Get-Date).AddSeconds(15)
+    $listening = $false
+    while ((Get-Date) -lt $deadline) {
+        if ($process.HasExited) { break }
+        if (Get-NetTCPConnection -LocalPort $Port -State Listen -OwningProcess $process.Id -ErrorAction SilentlyContinue) {
+            $listening = $true
+            break
+        }
+        Start-Sleep -Milliseconds 200
+    }
+
+    return [pscustomobject]@{
+        Started    = $listening
+        Reason     = $(if ($listening) { '' } elseif ($process.HasExited) { "camui.exe exited with $($process.ExitCode)" } else { 'camui.exe did not start listening within 15s' })
+        Process    = $process
+        BaseUrl    = $base
+        Port       = $Port
+        StatusFile = $StatusFile
+        StdOut     = $out
+        StdErr     = $err
+    }
+}
+
+
+function Stop-CamTestUi {
+    <# Stops the pid Start-CamTestUi returned, and returns its stdout. #>
+    param($Ui)
+
+    if (-not $Ui -or -not $Ui.Process) { return @() }
+    if (-not $Ui.Process.HasExited) {
+        Stop-Process -Id $Ui.Process.Id -ErrorAction SilentlyContinue
+        [void]$Ui.Process.WaitForExit(5000)
+    }
+    Remove-Item Env:\CAMUI_TOKEN -ErrorAction SilentlyContinue
+    $lines = @()
+    foreach ($log in @($Ui.StdOut, $Ui.StdErr)) {
+        if ($log -and (Test-Path -LiteralPath $log)) {
+            $lines += @(Get-Content -LiteralPath $log -ErrorAction SilentlyContinue)
+        }
+    }
+    return $lines
+}
+
+
+function Invoke-CamUiCredentialLeakScan {
+    <#
+        Fetches every camui endpoint and scans the RESPONSE BYTES for the
+        camera credential and for anything address-shaped. This is the Frigate
+        CVE-2026-33469 check: any logged-in viewer there could read the camera
+        RTSP credentials, so what matters is not what the status file holds but
+        what crosses the wire.
+
+        Three questions, because they have three different answers:
+          - the PASSWORD must not appear at all, raw or URL-escaped, in UTF-8
+            or UTF-16 over every byte of the response;
+          - the USERNAME is only a leak in URL userinfo shape (scheme://x:y@),
+            which is the only shape redaction has to prevent and the only one
+            that cannot collide with this machine's Windows account name;
+          - no URL of any scheme may survive at all, because a camera is
+            addressed here by NAME and the page needs no address - that is what
+            catches Restreamer.RelayBase and an ffmpeg error carrying an
+            rtsp:// URL.
+
+        Needles are read from the DPAPI store into memory and are never printed
+        or written anywhere. A clean scan proves nothing on its own, so a
+        synthetic body carrying all three shapes is run through the same
+        scanner; if it does not light up the result is inconclusive, not a pass.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$BaseUrl,
+        [string[]]$Paths = @('/', '/index.html', '/style.css', '/app.js', '/api/status'),
+        [string]$Token
+    )
+
+    $credential = Get-CamCredential
+    $password = $credential.GetNetworkCredential().Password
+    $user = $credential.UserName
+
+    $needles = @()
+    foreach ($form in (@($password, [System.Uri]::EscapeDataString($password)) | Select-Object -Unique)) {
+        $needles += , @('utf8', [System.Text.Encoding]::UTF8.GetBytes($form))
+        $needles += , @('utf16', [System.Text.Encoding]::Unicode.GetBytes($form))
+    }
+    $userinfoPattern = '(?i)[a-z][a-z0-9+.\-]*://([^/\s@"'']+)@'
+    $urlPattern = '(?i)[a-z][a-z0-9+.\-]*://[^\s"'',)]+'
+
+    # One scanner, used for the real responses and for the positive control.
+    $scanBytes = {
+        param([byte[]]$Bytes, [string]$Label)
+
+        $found = @()
+        foreach ($needle in $needles) {
+            if (Test-CamByteSequence -Haystack $Bytes -Needle $needle[1]) {
+                $found += ("PASSWORD in {0} [{1}]" -f $Label, $needle[0])
+            }
+        }
+        $text = [System.Text.Encoding]::UTF8.GetString($Bytes)
+        foreach ($match in [regex]::Matches($text, $userinfoPattern)) {
+            if ($match.Groups[1].Value -like "*$user*") {
+                $found += ("USERINFO in {0} :: {1}" -f $Label, $match.Value)
+            }
+        }
+        foreach ($match in [regex]::Matches($text, $urlPattern)) {
+            $found += ("URL in {0} :: {1}" -f $Label, $match.Value)
+        }
+        return @($found)
+    }
+
+    $endpoints = @()
+    $hits = @()
+    foreach ($path in $Paths) {
+        $url = ($BaseUrl.TrimEnd('/')) + $path
+        $client = New-Object System.Net.WebClient
+        if ($Token) { $client.Headers.Add('Authorization', "Bearer $Token") }
+        $bytes = $null
+        $fetchError = ''
+        try { $bytes = $client.DownloadData($url) }
+        catch { $fetchError = $_.Exception.Message }
+        finally { $client.Dispose() }
+
+        if ($null -eq $bytes) {
+            $endpoints += [pscustomobject]@{ Path = $path; Bytes = 0; Hits = 0; Error = $fetchError }
+            continue
+        }
+        $found = @(& $scanBytes $bytes $path)
+        $hits += $found
+        $endpoints += [pscustomobject]@{ Path = $path; Bytes = $bytes.Length; Hits = $found.Count; Error = '' }
+    }
+
+    # Positive control: the same scanner over a body that really does leak.
+    $controlBody = [System.Text.Encoding]::UTF8.GetBytes(
+        ('{{"RelayBase":"rtsp://127.0.0.1:8554","LastError":"open rtsp://{0}:{1}@192.168.50.99/stream1 failed"}}' -f $user, $password))
+    $controlHits = @(& $scanBytes $controlBody 'positive-control')
+    $controlOk = (@($controlHits | Where-Object { $_ -like 'PASSWORD*' }).Count -ge 1 -and
+                  @($controlHits | Where-Object { $_ -like 'USERINFO*' }).Count -ge 1 -and
+                  @($controlHits | Where-Object { $_ -like 'URL*' }).Count -ge 2)
+
+    $failed = @($endpoints | Where-Object { $_.Error })
+    return [pscustomobject]@{
+        Ok        = ($hits.Count -eq 0 -and $failed.Count -eq 0 -and $controlOk)
+        ControlOk = $controlOk
+        Endpoints = @($endpoints)
+        Hits      = @($hits)
+        Unreached = @($failed)
+        Text      = ("{0} endpoint(s) scanned, {1} byte(s): password/userinfo/URL hits {2}, unreachable {3}, positive control {4}" -f `
+                        @($endpoints).Count, (@($endpoints) | Measure-Object -Property Bytes -Sum).Sum, $hits.Count, $failed.Count,
+                        $(if ($controlOk) { 'lit up' } else { 'DID NOT LIGHT UP' }))
     }
 }
 

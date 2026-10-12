@@ -284,13 +284,12 @@ func Redact(value any) any {
 	}
 }
 
-// ScrubText removes URLs and bare IPv4 addresses from a string, keeping the
-// scheme so a message still reads sensibly.
+// ScrubText removes URLs and bare IPv4 addresses from a string. The scheme goes
+// too: leaving "rtsp://[redacted]" behind would make "no URL of any scheme
+// survives" an invariant with an exception in it, and an invariant with an
+// exception is one a later change can widen without anyone noticing.
 func ScrubText(text string) string {
-	scrubbed := urlPattern.ReplaceAllStringFunc(text, func(match string) string {
-		scheme := match[:strings.Index(match, "://")]
-		return scheme + "://[redacted]"
-	})
+	scrubbed := urlPattern.ReplaceAllString(text, "[redacted]")
 	return ipv4Pattern.ReplaceAllString(scrubbed, "[redacted]")
 }
 
