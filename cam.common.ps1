@@ -918,21 +918,32 @@ function Stop-CamViewer {
     # has no window of its own for CloseMainWindow to find.
     [void]$targets.Add($Process)
 
-    $delivered = $false
-    foreach ($target in $targets) {
-        try { if ($target.CloseMainWindow()) { $delivered = $true } } catch { }
-    }
+    try {
+        $delivered = $false
+        foreach ($target in $targets) {
+            try { if ($target.CloseMainWindow()) { $delivered = $true } } catch { }
+        }
 
-    # Wait only for a close that was actually delivered. CloseMainWindow finds
-    # no window at all if mpv is younger than its own window - measured as the
-    # whole grace spent on a half-second-old mpv - and waiting out a message
-    # nobody received just leaves the pane black for longer.
-    if ($delivered -and $Process.WaitForExit($GraceMs)) { return }
+        # Wait only for a close that was actually delivered. CloseMainWindow
+        # finds no window at all if mpv is younger than its own window -
+        # measured as the whole grace spent on a half-second-old mpv - and
+        # waiting out a message nobody received just leaves the pane black
+        # for longer.
+        if ($delivered -and $Process.WaitForExit($GraceMs)) { return }
 
-    foreach ($target in $targets) {
-        try { if (-not $target.HasExited) { $target.Kill() } } catch { }
+        foreach ($target in $targets) {
+            try { if (-not $target.HasExited) { $target.Kill() } } catch { }
+        }
+        [void]$Process.WaitForExit(2000)
     }
-    [void]$Process.WaitForExit(2000)
+    finally {
+        # Every Get-Process here opened a kernel handle. The caller's own
+        # object is not ours to dispose.
+        foreach ($target in $targets) {
+            if ($target -eq $Process) { continue }
+            try { $target.Dispose() } catch { }
+        }
+    }
 }
 
 
@@ -989,22 +1000,31 @@ function Invoke-CamViewer {
     $process = Start-Process -FilePath $MpvPath -ArgumentList $line -NoNewWindow -PassThru
     try { $null = $process.Handle } catch { }
 
-    $seconds = 10
-    try { $seconds = [int]$Config.ViewerPromoteCheckSeconds } catch { }
+    try {
+        $seconds = 10
+        try { $seconds = [int]$Config.ViewerPromoteCheckSeconds } catch { }
 
-    if (([string]$Choice.Mode -ne 'direct') -or ($seconds -le 0) -or
-        [string]::IsNullOrEmpty($RelayPathName) -or -not (Get-CamRelayEnabled -Config $Config)) {
-        $process.WaitForExit()
+        if (([string]$Choice.Mode -ne 'direct') -or ($seconds -le 0) -or
+            [string]::IsNullOrEmpty($RelayPathName) -or -not (Get-CamRelayEnabled -Config $Config)) {
+            $process.WaitForExit()
+            return $false
+        }
+
+        while (-not $process.WaitForExit($seconds * 1000)) {
+            if (Test-CamRelayPathReady -Config $Config -PathName $RelayPathName) {
+                Stop-CamViewer -Process $process
+                return $true
+            }
+        }
         return $false
     }
-
-    while (-not $process.WaitForExit($seconds * 1000)) {
-        if (Test-CamRelayPathReady -Config $Config -PathName $RelayPathName) {
-            Stop-CamViewer -Process $process
-            return $true
-        }
+    finally {
+        # A pane calls this once per mpv attempt and never exits, so the
+        # kernel handle behind each Process object has to go back explicitly.
+        # Measured over 120 attempts: handles flat with this, drifting until
+        # a collection without it.
+        try { $process.Dispose() } catch { }
     }
-    return $false
 }
 
 
