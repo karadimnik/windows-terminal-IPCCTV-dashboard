@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>IPCCTV control</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <div class="top">
+    <div class="brand">IPCCTV <span>/ control</span></div>
+    <div class="feed">
+      <span id="feed"></span>
+      <span class="when" id="feedWhen"></span>
+    </div>
+  </div>
+
+  <div id="banner"></div>
+
+  <div class="actions" style="margin-bottom:6px">
+    <button class="btn primary" disabled>Start everything</button>
+    <button class="btn danger" disabled>Stop everything</button>
+    <button class="btn" disabled>Recorder only</button>
+    <button class="btn" disabled>Dashboard only</button>
+  </div>
+  <div class="muted" style="font-size:12px;margin-bottom:16px">
+    This build reads status only. Start, stop and the record toggles arrive in the next update.
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div id="camsA">
+    <div class="panel">
+      <header><h2>Cameras</h2><span class="muted" id="recCount"></span></header>
+      <table>
+        <thead><tr><th>Camera</th><th>Status</th><th>Input</th><th>Last segment</th><th>Restarts/h</th><th>Record</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div id="camsC" class="clist"></div>
+
+  <div class="panel" style="margin-top:16px">
+    <header><h2>Recent events</h2><span class="muted" id="eventCount"></span></header>
+    <ul class="events" id="events"></ul>
+  </div>
+
+  <div class="panel" style="margin-top:16px">
+    <header><h2>Services</h2></header>
+    <ul class="events" id="tasks"></ul>
+  </div>
+
+  <footer class="note">
+    Status is read from <code>status.json</code>; actions call <code>cam.ps1</code>.
+    No camera address or credential ever reaches this page.
+  </footer>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

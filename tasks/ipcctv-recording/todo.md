@@ -518,3 +518,52 @@ samples across the 4.9 s stop, ONE unbroken run on the same HWND. Nothing moved.
 The ordering the Operator asked for is what makes it work and it was already in place: terminate
 the job, let the kernel take every pane and every mpv, THEN ask the window to close. The window
 close follows; it never drives.
+
+
+## U1 delivered 2026-10-12 - the Go toolchain, the skeleton, the guard and the main screen
+
+First commission of the V1 control UI (plan `~/.claude/plans/luminous-wibbling-allen.md`). The U0
+mockup items **[41]-[45]** were delivered as `ui/mockup/mockup.html` + `ui/mockup/fixture.json` in
+27d4273 but were never written into this file; note also that **[42]** is used twice here, once for
+the U0 settings mockup in the plan and once for the focus-steal fix above.
+
+- [x] **[46]** Go 1.27.2 installed in WSL under `~/.local/go` from go.dev (apt has only 1.13), sha256
+      verified against go.dev's published checksum. `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build`
+      produces a 7.2 MB `camui.exe` that runs on Windows. Install and build documented in
+      `docs/go-toolchain.md`; `ui/build.sh` runs `gofmt -l`, `go vet` and `go test` before building.
+- [x] **[47]** `ui/` skeleton: `main.go` (flags, config, logging, graceful stop), `config.go` (config
+      file + flags + `CAMUI_TOKEN`, and the guard), `api.go` (`GET /api/status` and redaction),
+      `static/` embedded with `go:embed`. No external files at runtime, no front-end build step, no
+      CDN - the front end is plain CSS and JS with no dependencies. Listen address, archive root and
+      status file come from flags or a JSON config file and default to loopback and `E:\cameras`.
+      Logging is one `log/slog` text line per event on stdout; query strings are never logged because
+      one of them can carry the token.
+- [x] **[48]** The loopback guard: any listen address that is not exclusively loopback is **refused**
+      (exit 2) unless a token of at least 16 characters is configured, and when one is, it is required
+      on every request. Nine table cases in `config_test.go` plus the refusal and the successful bind
+      demonstrated on Windows.
+- [x] **[49]** The main screen wired to `/api/status`: the hero figure (days of footage headroom) and
+      three stat tiles, the camera table with status, input mode, last segment age, restarts and a
+      record toggle, recent events, and a services panel for both Scheduled Tasks. Layout A above
+      760 px, layout C below it, chosen by CSS media query. Every state carries a dot AND a word.
+      The record toggle and the global action buttons render disabled - U2 wires them.
+
+### Two defects found and fixed in this commission
+
+**`schtasks /FO CSV /V` cannot be parsed.** It does not escape the quotes inside `Task To Run`
+(`powershell.exe -File "C:\...\start-recorder.ps1"`), so a CSV reader silently shifts every column
+after it: `Scheduled Task State` came back holding the `Idle Time` value and both tasks reported as
+`Disabled` while `cam.ps1 -Status` correctly said `Ready`. `/FO LIST /V` is line-oriented and immune.
+Caught only by comparing the API against the CLI - the API was self-consistent and wrong.
+
+**`schtasks` prints in the console's OEM codepage**, so `Last Run Time` arrives as mojibake on this
+machine's Greek locale (`12/??/2026 18:55:25`). That field is no longer surfaced at all; `Last Result`
+says the same thing in digits, and every schtasks-derived string goes through `strings.ToValidUTF8`.
+
+### Credential containment
+
+Redaction runs over the whole decoded status document, at any depth: keys named `RelayBase`,
+`Password` or `Username` are dropped, every `scheme://...` token is reduced to `scheme://[redacted]`
+and every bare IPv4 literal is replaced. `Restreamer.RelayBase` is therefore absent from
+`/api/status`, and no camera address or credential can reach the browser even inside ffmpeg error
+text. Proven by a Go test with a positive control and by `-Checks uileak` in the harness.

@@ -1,0 +1,315 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
+
+// taskNames are the Scheduled Tasks whose state the dashboard reports, keyed by
+// the short name the API uses.
+var taskNames = map[string]string{
+	"recorder":  "IPCCTV-Recorder",
+	"dashboard": "IPCCTV-Dashboard",
+}
+
+// taskCacheTTL keeps a burst of requests from spawning a schtasks.exe pair each
+// time. The recorder shares four CPU threads with six ffmpeg children.
+const taskCacheTTL = 5 * time.Second
+
+// schtasksTimeout bounds a query that hangs rather than failing.
+const schtasksTimeout = 10 * time.Second
+
+// StatusResponse is the body of GET /api/status.
+type StatusResponse struct {
+	Schema     int                 `json:"schema"`
+	ServerTime string              `json:"serverTime"`
+	StatusFile StatusFileInfo      `json:"statusFile"`
+	Status     map[string]any      `json:"status"`
+	Tasks      map[string]TaskInfo `json:"tasks"`
+}
+
+// StatusFileInfo describes the status.json read, so the page can tell live data
+// from a stale file left behind by a supervisor that died.
+type StatusFileInfo struct {
+	Path       string  `json:"path"`
+	Present    bool    `json:"present"`
+	ModifiedAt string  `json:"modifiedAt"`
+	AgeSeconds float64 `json:"ageSeconds"`
+	Error      string  `json:"error"`
+}
+
+// TaskInfo is the subset of a Scheduled Task's state that the UI needs. The
+// task's command line, author and run-as user are deliberately not included:
+// they carry the Windows account name and the page has no use for them. Nor is
+// the last run time, which schtasks prints in the console's OEM codepage and so
+// arrives as mojibake on a non-English locale; Last Result says the same thing
+// in digits.
+type TaskInfo struct {
+	Name       string `json:"name"`
+	Exists     bool   `json:"exists"`
+	Status     string `json:"status"`
+	Enabled    string `json:"enabled"`
+	LastResult string `json:"lastResult"`
+	Error      string `json:"error"`
+}
+
+// API serves the read-only status endpoint.
+type API struct {
+	statusPath string
+	log        *slog.Logger
+
+	mu        sync.Mutex
+	tasks     map[string]TaskInfo
+	tasksRead time.Time
+}
+
+// NewAPI returns an API reading the given status.json.
+func NewAPI(statusPath string, log *slog.Logger) *API {
+	return &API{statusPath: statusPath, log: log}
+}
+
+// Routes registers the API handlers on mux.
+func (a *API) Routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/status", a.handleStatus)
+}
+
+func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
+	body := StatusResponse{
+		Schema:     1,
+		ServerTime: time.Now().Format(time.RFC3339),
+		StatusFile: StatusFileInfo{Path: a.statusPath},
+		Tasks:      a.taskStates(),
+	}
+
+	status, info, err := a.readStatus()
+	body.StatusFile.Present = info.Present
+	body.StatusFile.ModifiedAt = info.ModifiedAt
+	body.StatusFile.AgeSeconds = info.AgeSeconds
+	if err != nil {
+		// A missing or malformed status file is a state the page must
+		// render, not a reason to fail the request.
+		body.StatusFile.Error = err.Error()
+		a.log.Warn("status file unreadable", "path", a.statusPath, "error", err)
+	} else {
+		body.Status = status
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(true)
+	if err := enc.Encode(body); err != nil {
+		a.log.Error("write status response", "error", err)
+	}
+}
+
+// readStatus reads status.json and returns it redacted.
+func (a *API) readStatus() (map[string]any, StatusFileInfo, error) {
+	info := StatusFileInfo{Path: a.statusPath}
+
+	stat, err := os.Stat(a.statusPath)
+	if err != nil {
+		return nil, info, fmt.Errorf("status file not readable: %w", err)
+	}
+	info.Present = true
+	info.ModifiedAt = stat.ModTime().Format(time.RFC3339)
+	info.AgeSeconds = roundTo(time.Since(stat.ModTime()).Seconds(), 1)
+
+	raw, err := os.ReadFile(a.statusPath)
+	if err != nil {
+		return nil, info, fmt.Errorf("read status file: %w", err)
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(stripBOM(raw), &parsed); err != nil {
+		return nil, info, fmt.Errorf("parse status file: %w", err)
+	}
+
+	redacted, ok := Redact(parsed).(map[string]any)
+	if !ok {
+		return nil, info, fmt.Errorf("status file is not a JSON object")
+	}
+	return redacted, info, nil
+}
+
+// taskStates returns both Scheduled Task states, cached for taskCacheTTL.
+func (a *API) taskStates() map[string]TaskInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.tasks != nil && time.Since(a.tasksRead) < taskCacheTTL {
+		return a.tasks
+	}
+
+	fresh := make(map[string]TaskInfo, len(taskNames))
+	for key, name := range taskNames {
+		fresh[key] = queryTask(name)
+	}
+	a.tasks = fresh
+	a.tasksRead = time.Now()
+	return fresh
+}
+
+// queryTask reads one Scheduled Task's state with schtasks.exe. schtasks is a
+// native executable and costs about 0.13 s, where starting PowerShell costs
+// about a second; status must never pay for a PowerShell start.
+func queryTask(name string) TaskInfo {
+	info := TaskInfo{Name: name}
+
+	out, err := runSchtasks(name)
+	if err != nil {
+		// schtasks exits non-zero both for "no such task" and for a real
+		// failure, and says which on stderr.
+		if strings.Contains(strings.ToLower(out), "cannot find the file") ||
+			strings.Contains(strings.ToLower(out), "does not exist") {
+			info.Error = "task not registered"
+			return info
+		}
+		info.Error = firstLine(out)
+		if info.Error == "" {
+			info.Error = err.Error()
+		}
+		return info
+	}
+
+	fields, err := parseSchtasksList(out)
+	if err != nil {
+		info.Error = err.Error()
+		return info
+	}
+
+	info.Exists = true
+	info.Status = fields["Status"]
+	info.Enabled = fields["Scheduled Task State"]
+	info.LastResult = fields["Last Result"]
+	return info
+}
+
+// runSchtasks returns the combined output of a verbose task query.
+//
+// The LIST format is used rather than CSV because schtasks does not escape the
+// quotes inside "Task To Run" ("powershell.exe -File "C:\...\start.ps1""), so a
+// CSV reader silently shifts every column after it and the Scheduled Task State
+// comes back holding the Idle Time value.
+func runSchtasks(name string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), schtasksTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(ctx, "schtasks.exe", "/Query", "/TN", name, "/FO", "LIST", "/V").CombinedOutput()
+	if ctx.Err() != nil {
+		return string(out), fmt.Errorf("schtasks query for %s timed out", name)
+	}
+	return string(out), err
+}
+
+// parseSchtasksList turns "Name: value" lines into a map, splitting on the
+// first colon so a value may contain colons of its own.
+func parseSchtasksList(out string) (map[string]string, error) {
+	fields := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		cut := strings.Index(line, ":")
+		if cut < 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:cut])
+		if key == "" {
+			continue
+		}
+		fields[key] = strings.ToValidUTF8(strings.TrimSpace(line[cut+1:]), "")
+	}
+	if _, ok := fields["Status"]; !ok {
+		return nil, fmt.Errorf("schtasks output has no Status line")
+	}
+	return fields, nil
+}
+
+// ---------------------------------------------------------------------------
+// Redaction
+//
+// Frigate's CVE-2026-33469 handed camera RTSP credentials to any logged-in
+// viewer. Cameras here are addressed by name, so nothing in the browser needs
+// an address at all, and anything shaped like one is removed on the way out.
+// ---------------------------------------------------------------------------
+
+var (
+	// urlPattern matches any scheme://... token, which is the shape that
+	// carries both a host and any userinfo credential.
+	urlPattern = regexp.MustCompile(`(?i)[a-z][a-z0-9+.\-]*://[^\s"']*`)
+
+	// ipv4Pattern matches a bare dotted-quad address, which is how a camera
+	// appears in error text with no scheme in front of it.
+	ipv4Pattern = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+
+	// deniedKeys are dropped wherever they appear, at any depth. RelayBase is
+	// the restreamer's own rtsp:// base and the page has no use for it.
+	deniedKeys = map[string]bool{
+		"relaybase": true,
+		"password":  true,
+		"username":  true,
+	}
+)
+
+// Redact returns a copy of a decoded JSON value with address-shaped and
+// credential-shaped content removed.
+func Redact(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, inner := range typed {
+			if deniedKeys[strings.ToLower(key)] {
+				continue
+			}
+			out[key] = Redact(inner)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, inner := range typed {
+			out[i] = Redact(inner)
+		}
+		return out
+	case string:
+		return ScrubText(typed)
+	default:
+		return value
+	}
+}
+
+// ScrubText removes URLs and bare IPv4 addresses from a string, keeping the
+// scheme so a message still reads sensibly.
+func ScrubText(text string) string {
+	scrubbed := urlPattern.ReplaceAllStringFunc(text, func(match string) string {
+		scheme := match[:strings.Index(match, "://")]
+		return scheme + "://[redacted]"
+	})
+	return ipv4Pattern.ReplaceAllString(scrubbed, "[redacted]")
+}
+
+func stripBOM(raw []byte) []byte {
+	return []byte(strings.TrimPrefix(string(raw), "\ufeff"))
+}
+
+func firstLine(text string) string {
+	text = strings.TrimSpace(text)
+	if i := strings.IndexAny(text, "\r\n"); i >= 0 {
+		return strings.TrimSpace(text[:i])
+	}
+	return text
+}
+
+func roundTo(value float64, places int) float64 {
+	factor := 1.0
+	for i := 0; i < places; i++ {
+		factor *= 10
+	}
+	return float64(int64(value*factor+0.5)) / factor
+}
