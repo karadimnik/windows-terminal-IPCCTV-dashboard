@@ -918,11 +918,16 @@ function Stop-CamViewer {
     # has no window of its own for CloseMainWindow to find.
     [void]$targets.Add($Process)
 
+    $delivered = $false
     foreach ($target in $targets) {
-        try { [void]$target.CloseMainWindow() } catch { }
+        try { if ($target.CloseMainWindow()) { $delivered = $true } } catch { }
     }
 
-    if ($Process.WaitForExit($GraceMs)) { return }
+    # Wait only for a close that was actually delivered. CloseMainWindow finds
+    # no window at all if mpv is younger than its own window - measured as the
+    # whole grace spent on a half-second-old mpv - and waiting out a message
+    # nobody received just leaves the pane black for longer.
+    if ($delivered -and $Process.WaitForExit($GraceMs)) { return }
 
     foreach ($target in $targets) {
         try { if (-not $target.HasExited) { $target.Kill() } } catch { }
