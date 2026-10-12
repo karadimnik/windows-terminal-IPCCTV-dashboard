@@ -842,6 +842,33 @@ function Get-CamInputUrl {
 }
 
 
+function Get-CamArgumentLine {
+    <#
+        Joins argument tokens into the ONE command-line string .NET takes,
+        quoting the way PowerShell's own native-command call does: a token
+        containing whitespace or a quote is wrapped in double quotes and its
+        inner quotes escaped, and every other token is passed through
+        untouched.
+
+        It exists because Start-Process takes a command line rather than an
+        argument vector, and one mpv flag - the OSD message - carries a space
+        inside it. Verified byte for byte against the command line the call
+        operator produced for the same tokens before Invoke-CamViewer
+        existed:
+
+            ... --osd-level=1 "--osd-msg1=Traffic: ${video-bitrate}" --geometry=...
+
+        No trailing-backslash handling, because these are mpv flags and a
+        Windows path never ends in one here.
+    #>
+    param([AllowNull()][AllowEmptyCollection()][string[]]$Tokens)
+
+    return (@(foreach ($token in @($Tokens)) {
+        if ([string]$token -match '[\s"]') { '"' + ([string]$token -replace '"', '\"') + '"' } else { [string]$token }
+    }) -join ' ')
+}
+
+
 function Stop-CamViewer {
     <#
         Stops one mpv the clean way: WM_CLOSE to its window, a bounded wait,
@@ -933,9 +960,8 @@ function Invoke-CamViewer {
         spinning, and notices mpv's own exit in the same wait.
 
         The pane hands over the argument tokens exactly as PowerShell parsed
-        them, and they are requoted here because .NET takes one command-line
-        string. Verified byte for byte against the line the call operator
-        produced before this function existed.
+        them and Get-CamArgumentLine rejoins them, so the arguments mpv
+        receives are the ones the call operator used to pass.
     #>
     param(
         [Parameter(Mandatory = $true)]$Config,
@@ -950,10 +976,7 @@ function Invoke-CamViewer {
         [AllowNull()][AllowEmptyCollection()][string[]]$MpvArgs
     )
 
-    $tokens = @([string]$Choice.Url) + @($MpvArgs)
-    $line = (@(foreach ($token in $tokens) {
-        if ([string]$token -match '[\s"]') { '"' + ([string]$token -replace '"', '\"') + '"' } else { [string]$token }
-    }) -join ' ')
+    $line = Get-CamArgumentLine -Tokens (@([string]$Choice.Url) + @($MpvArgs))
 
     # -NoNewWindow keeps mpv's console output in the pane it belongs to, the
     # way the call operator did. Its stderr is not captured, so it can no
