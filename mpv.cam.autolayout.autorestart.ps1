@@ -10,6 +10,14 @@
     left behind on the next restart and one that comes back is picked up
     without relaunching the dashboard.
 
+    The FIRST attempt is the one that needs help, because all six panes make it
+    at once. This script measures the serving set ONCE and hands the same
+    answer to every pane; a pane whose path is missing from it keeps asking for
+    up to RelayReadyWaitSeconds before settling for a direct connection; and
+    the panes are started StartStaggerMs apart. Six simultaneous one-shot
+    probes with no retry is what left two panes on direct connections, each
+    burning a camera slot the relay exists to give back.
+
     The camera URL is built inside the pane rather than passed to it, which
     keeps the credential out of the Windows Terminal and PowerShell command
     lines it would otherwise appear in.
@@ -97,14 +105,29 @@ foreach ($Camera in (Get-CamList -Path $JsonPath)) {
     }
 }
 
+# The serving set, measured ONCE for all six panes. Six panes each asking the
+# control API about their own path in the same instant is what put two of them
+# on direct connections on 2026-10-11, on a launch where five of the six paths
+# had just been confirmed serving: one flaked probe is one burnt camera slot.
+# Every pane is handed this set and only asks for itself if its own path is
+# missing from it.
+$ReadyPaths = @()
+if (Get-CamRelayEnabled -Config $Config) { $ReadyPaths = @(Get-CamRelayReadyPaths -Config $Config) }
+
 # What each pane would use if it started now. A snapshot, not a promise: every
 # pane re-decides on every attempt of its own loop.
 Write-Host ""
 Write-Host "=== camera inputs ===" -ForegroundColor Cyan
 foreach ($Stream in $Streams.GetEnumerator()) {
-    $Choice = Get-CamInputUrl -Config $Config -RelayPathName $Stream.Value.RelayPath -DirectUrl $Stream.Value.DirectUrl
+    $Choice = Get-CamInputUrl -Config $Config -RelayPathName $Stream.Value.RelayPath `
+        -DirectUrl $Stream.Value.DirectUrl -ReadyPaths $ReadyPaths
     Write-Host ("  {0,-20} {1,-7} {2}" -f $Stream.Key, $Choice.Mode, (Get-CamRedacted -Text $Choice.Url))
 }
+Write-Host ("  relay serving {0} path(s): {1}" -f $ReadyPaths.Count, (($ReadyPaths | Sort-Object) -join ', '))
+$RelayReadyWait = [int]$Config.RelayReadyWaitSeconds
+$StaggerMs = [int]$Config.StartStaggerMs
+Write-Host ("  a pane whose path is not in that set waits up to {0}s for it, then takes a direct slot; panes start {1} ms apart" -f `
+    $RelayReadyWait, $StaggerMs)
 Write-Host ""
 
 # 3. Screen real estate and the reserved strip
@@ -405,6 +428,15 @@ $WindowWidth = $Layout.PaneWidth
 $WindowHeight = $Layout.PaneHeight
 
 # 4. Build MPV commands and encode them for absolute safety
+#
+# What each pane is told about the relay: the serving set this script measured
+# once, rendered as a literal array; how long it may keep asking about its own
+# path if that set does not have it; and how far into the stagger it sits.
+$ReadyPathsLiteral = '@()'
+if ($ReadyPaths.Count -gt 0) {
+    $ReadyPathsLiteral = '@(' + (($ReadyPaths | ForEach-Object { "'" + ([string]$_).Replace("'", "''") + "'" }) -join ', ') + ')'
+}
+
 $EncodedCommands = @()
 $i = 0
 
@@ -424,7 +456,7 @@ foreach ($Stream in $Streams.GetEnumerator()) {
     # itself, so the credential never appears in a command line, and it decides
     # between the relay and the camera on every iteration rather than once.
     # Built by substitution into a single-quoted template: nothing in it is
-    # interpolated by this script except the four placeholders.
+    # interpolated by this script except the placeholders.
     $PaneTemplate = @'
 $ErrorActionPreference = 'Stop'
 . '__LIB__'
@@ -439,10 +471,33 @@ if (-not $camera) { throw "Camera '$camName' is no longer in cameras.json." }
 $relayPath = Get-CamRelayPathName -SafeName (Get-CamSafeName -Name $camera.Name)
 $directUrl = Get-CamRtspUrl -Camera $camera -Credential $credential
 
+# This pane's place in the stagger, so six panes do not open six RTSP sessions
+# and six control-API probes in the same instant.
+Start-Sleep -Milliseconds __STAGGERMS__
+
+# The serving set the dashboard measured ONCE for every pane, and the budget
+# for asking about this one path if it is missing from that set. Both belong to
+# the FIRST attempt only: from the second iteration on, the loop decides on the
+# spot with no wait, which is what leaves a relay that died behind and picks one
+# that came back up.
+$readyPaths = __READYPATHS__
+$waitSeconds = __WAITSECONDS__
+
 # mpv reports progress on stderr, which would be a terminating error under Stop.
 $ErrorActionPreference = 'Continue'
 while ($true) {
-    $choice = Get-CamInputUrl -Config $config -RelayPathName $relayPath -DirectUrl $directUrl
+    if ($null -ne $readyPaths) {
+        $choice = Get-CamInputUrl -Config $config -RelayPathName $relayPath -DirectUrl $directUrl `
+            -ReadyPaths $readyPaths -WaitSeconds $waitSeconds
+        if ($choice.Mode -eq 'direct' -and $choice.WaitedSeconds -gt 0) {
+            Write-Host ("{0} {1}: the relay never served '{2}' in {3}s, taking a direct camera slot" -f (Get-Date -Format 'HH:mm:ss'), $camName, $relayPath, [int]$choice.WaitedSeconds) -ForegroundColor Yellow
+        }
+        $readyPaths = $null
+        $waitSeconds = 0
+    }
+    else {
+        $choice = Get-CamInputUrl -Config $config -RelayPathName $relayPath -DirectUrl $directUrl
+    }
     Write-Host ("{0} {1} on the {2} input: {3}" -f (Get-Date -Format 'HH:mm:ss'), $camName, $choice.Mode, (Get-CamRedacted -Text $choice.Url)) -ForegroundColor Cyan
     & '__MPV__' $choice.Url __FLAGS__
     Write-Host 'Stream interrupted. Restarting in 3 seconds...' -ForegroundColor Yellow
@@ -454,6 +509,9 @@ while ($true) {
     $ScriptBlock = $ScriptBlock.Replace('__NAME__', ([string]$Stream.Key).Replace("'", "''"))
     $ScriptBlock = $ScriptBlock.Replace('__MPV__', $MpvPath.Replace("'", "''"))
     $ScriptBlock = $ScriptBlock.Replace('__FLAGS__', "$Flags $OverlayOpts $Geometry")
+    $ScriptBlock = $ScriptBlock.Replace('__READYPATHS__', $ReadyPathsLiteral)
+    $ScriptBlock = $ScriptBlock.Replace('__WAITSECONDS__', $RelayReadyWait.ToString([cultureinfo]::InvariantCulture))
+    $ScriptBlock = $ScriptBlock.Replace('__STAGGERMS__', ($i * $StaggerMs).ToString([cultureinfo]::InvariantCulture))
     
     # Encode to Base64 to completely bypass Windows Terminal quoting/bracket errors
     $Bytes = [System.Text.Encoding]::Unicode.GetBytes($ScriptBlock)
