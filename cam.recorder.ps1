@@ -2325,6 +2325,23 @@ function Write-CamStatusFile {
         [Parameter(Mandatory = $true)]$Children,
         [Parameter(Mandatory = $true)][DateTime]$StartedAt,
         [Parameter(Mandatory = $true)][ValidateSet('running', 'stopped')][string]$State,
+
+        # HOW it stopped, which is the whole point of alerting on a stop:
+        #
+        #   requested    the stop flag was seen - cam.ps1 -Stop, -Recorder -Stop
+        #   interrupted  the pipeline was stopped - Ctrl+C in the pane, or the
+        #                tab closing. A human did it, so it is not an alert.
+        #   unexpected   the loop threw, or the process was killed and never
+        #                wrote this at all. THIS is what alerts.
+        #
+        # Empty while State is running.
+        [ValidateSet('', 'requested', 'interrupted', 'unexpected')][string]$StopKind = '',
+
+        # The last unexpected stop, carried forward from the previous status
+        # file so it survives a restart: the Operator wants to see that the NVR
+        # went down at 20:30 even though it is back up now.
+        $LastUnexpectedStop,
+
         $Archive,
         $PruneState,
         $Relay,
@@ -2512,6 +2529,8 @@ function Write-CamStatusFile {
     $document = [pscustomobject]@{
         Schema        = 1
         State         = $State
+        StopKind      = $StopKind
+        LastUnexpectedStop = $LastUnexpectedStop
         SupervisorPid = $PID
         StartedAt     = Format-CamTimestamp -Value $StartedAt
         UpdatedAt     = Format-CamTimestamp -Value $now
@@ -3077,11 +3096,18 @@ function Invoke-CamSupervisor {
     # One supervisor per archive. Two would each start a child per camera, and
     # these cameras serve only two RTSP sessions each - the second supervisor
     # would take the dashboard's slot and neither set would be healthy.
-    $existing = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
+    $previous = Get-CamStatusSnapshot -Config $Config
+    $existing = Get-CamSupervisorState -Config $Config -Snapshot $previous
     if ($existing.Running) {
         Write-CamHost -Message ("A supervisor is already running: {0}. Refusing to start a second one - use -Stop first." -f $existing.Reason) -Colour 'Red'
-        exit 1
+        exit 20
     }
+
+    # Carried across the restart rather than reset: the Operator wants to see
+    # that the NVR went down at 20:30 even though it is back up now. Only an
+    # explicit clear or a later unexpected stop replaces it.
+    $lastUnexpectedStop = $null
+    if ($previous) { $lastUnexpectedStop = $previous.LastUnexpectedStop }
 
     if (Test-Path -LiteralPath $stopFlag) {
         Remove-Item -LiteralPath $stopFlag -Force -ErrorAction SilentlyContinue
@@ -3120,6 +3146,7 @@ function Invoke-CamSupervisor {
     $lastPrune = [DateTime]::MinValue
     $lastArchiveScan = [DateTime]::MinValue
     $stopRequested = $false
+    $faultMessage = ''
 
     Write-CamHost -Message ''
     Write-CamHost -Message '=== cam.recorder supervisor ===' -Colour 'Cyan'
@@ -3358,7 +3385,7 @@ function Invoke-CamSupervisor {
                 try {
                     Write-CamStatusFile -Config $Config -Path $statusPath -Cameras $cameras -Children $children `
                         -StartedAt $startedAt -State 'running' -Archive $archive -PruneState $pruneState -Relay $relay `
-                        -SupervisorLogPath $supervisorLog
+                        -SupervisorLogPath $supervisorLog -LastUnexpectedStop $lastUnexpectedStop
                 }
                 catch {
                     Write-CamLog -Path $supervisorLog -Message ("status write failed: {0}" -f $_.Exception.Message) -MaxBytes $maxBytes
@@ -3374,9 +3401,35 @@ function Invoke-CamSupervisor {
             Start-Sleep -Seconds 1
         }
     }
+    catch {
+        # The loop threw. The teardown in the finally still runs, but this is
+        # not a shutdown anybody asked for, and the host above has to be told
+        # so through the status file rather than through an exit code it can
+        # confuse with a clean stop.
+        $faultMessage = $_.Exception.Message
+    }
     finally {
+        # Three ways out, and they are not the same event:
+        #   break on the stop flag -> requested
+        #   the catch above ran    -> unexpected
+        #   neither                -> the pipeline was stopped under us, which
+        #                             is Ctrl+C in the pane or the tab closing.
+        $stopKind = 'interrupted'
+        if ($stopRequested) { $stopKind = 'requested' }
+        elseif ($faultMessage) { $stopKind = 'unexpected' }
+
         $reason = 'supervisor shutdown'
         if ($stopRequested) { $reason = 'stop requested' }
+        elseif ($faultMessage) { $reason = "the supervisor loop failed: $faultMessage" }
+
+        if ($stopKind -eq 'unexpected') {
+            $lastUnexpectedStop = [pscustomobject]@{
+                At            = Format-CamTimestamp -Value ([DateTime]::Now)
+                Reason        = Get-CamRedacted -Text $reason
+                SupervisorPid = $PID
+                DetectedBy    = 'supervisor'
+            }
+        }
 
         Write-CamHost -Message 'shutting down, stopping children' -Colour 'Cyan'
         Write-CamLog -Path $supervisorLog -Message ("supervisor shutting down: {0}" -f $reason) -MaxBytes $maxBytes
@@ -3398,16 +3451,21 @@ function Invoke-CamSupervisor {
         # cleanly at T" instead of showing a snapshot they cannot account for.
         try {
             Write-CamStatusFile -Config $Config -Path $statusPath -Cameras $cameras -Children $children `
-                -StartedAt $startedAt -State 'stopped' -Archive $archive -PruneState $pruneState -Relay $relay `
-                -SupervisorLogPath $supervisorLog
+                -StartedAt $startedAt -State 'stopped' -StopKind $stopKind -Archive $archive -PruneState $pruneState `
+                -Relay $relay -SupervisorLogPath $supervisorLog -LastUnexpectedStop $lastUnexpectedStop
         }
         catch { }
 
         if (Test-Path -LiteralPath $stopFlag) { Remove-Item -LiteralPath $stopFlag -Force -ErrorAction SilentlyContinue }
 
-        Write-CamLog -Path $supervisorLog -Message 'supervisor stopped' -MaxBytes $maxBytes
+        Write-CamLog -Path $supervisorLog -Message ("supervisor stopped ({0})" -f $stopKind) -MaxBytes $maxBytes
         Write-CamHost -Message 'stopped' -Colour 'Cyan'
     }
+
+    # Distinct codes, because the host that restarts this process must not
+    # treat "another supervisor is already running" as a crash to retry.
+    if ($faultMessage) { exit 21 }
+    exit 0
 }
 
 
