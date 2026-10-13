@@ -175,6 +175,7 @@ function Get-CamComponentState {
         Inventory       = $inventory
         Supervisor      = @($inventory | Where-Object { $_.Role -eq 'Supervisor' })
         NvrHost         = @($inventory | Where-Object { $_.Role -eq 'NvrHost' })
+        NvrWarden       = @($inventory | Where-Object { $_.Role -eq 'NvrWarden' })
         RecorderChild   = @($inventory | Where-Object { $_.Role -eq 'Recorder' })
         Relay           = @($inventory | Where-Object { $_.Role -eq 'Relay' })
         Warden          = @($inventory | Where-Object { $_.Role -eq 'Warden' })
@@ -184,6 +185,8 @@ function Get-CamComponentState {
         LogonTasks      = @(Get-CamLogonTaskReport)
         SupervisorState = (Get-CamSupervisorState -Config $Config -Snapshot $snapshot)
         JobExists       = [CamJob]::Exists((Get-CamDashboardJobName))
+        NvrJobExists    = [CamJob]::Exists((Get-CamNvrJobName))
+        NvrWindows      = @(Get-CamTerminalWindow -Title (Get-CamNvrWindowTitle)).Count
         GridWindows     = @(Get-CamTerminalWindow -Title (Get-CamDashboardWindowTitle)).Count
         HealthWindows   = @(Get-CamTerminalWindow -Title 'cam.health').Count
         ReadyPaths      = $readyPaths
@@ -210,6 +213,15 @@ function Show-CamStatus {
     Write-Host ("  ffmpeg       {0} recording child(ren)" -f $State.RecorderChild.Count)
     foreach ($item in $State.Supervisor) {
         Write-Host ("               pid {0}, {1}" -f $item.ProcessId, $item.Detail) -ForegroundColor DarkGray
+    }
+    # The NVR window and the job it owns. A job with no window is the state
+    # that used to make the recorder unstartable - item [63].
+    Write-Host ("  nvr          {0} host, {1} warden, {2} window(s) titled '{3}', job '{4}' exists: {5}" -f `
+        $State.NvrHost.Count, $State.NvrWarden.Count, $State.NvrWindows, (Get-CamNvrWindowTitle), `
+        (Get-CamNvrJobName), $State.NvrJobExists)
+    if ($State.NvrJobExists -and $State.NvrWindows -eq 0 -and $State.Supervisor.Count -eq 0) {
+        Write-Host ("  STALE        the '{0}' job is held with no window and nothing recording. -Start -Recorder clears it." -f `
+            (Get-CamNvrJobName)) -ForegroundColor Yellow
     }
 
     Write-CamSection 'relay'
@@ -283,6 +295,8 @@ function Get-CamStopCount {
     param([Parameter(Mandatory = $true)]$State)
 
     return [pscustomobject]@{
+        NvrHost    = $State.NvrHost.Count
+        NvrWarden  = $State.NvrWarden.Count
         Supervisor = $State.Supervisor.Count
         Ffmpeg     = $State.RecorderChild.Count
         MediaMtx   = $State.Relay.Count
@@ -300,9 +314,10 @@ function Show-CamStopCount {
         [Parameter(Mandatory = $true)]$Count
     )
 
-    Write-Host ("  {0,-7} supervisor={1} ffmpeg={2} mediamtx={3} warden={4} panes={5} mpv={6} health={7}" -f `
-        $Label, $Count.Supervisor, $Count.Ffmpeg, $Count.MediaMtx, $Count.Warden, `
-        $Count.Panes, $Count.Mpv, $Count.Health)
+    # nvr is host/warden: the NVR window's pane and the process holding its job.
+    Write-Host ("  {0,-7} nvr={1}/{2} supervisor={3} ffmpeg={4} mediamtx={5} warden={6} panes={7} mpv={8} health={9}" -f `
+        $Label, $Count.NvrHost, $Count.NvrWarden, $Count.Supervisor, $Count.Ffmpeg, $Count.MediaMtx, `
+        $Count.Warden, $Count.Panes, $Count.Mpv, $Count.Health)
 }
 
 
@@ -370,6 +385,24 @@ function Invoke-CamStopAll {
                 Write-Host ("  still alive: {0}" -f (($stop.Survived | Sort-Object) -join ', ')) -ForegroundColor Red
             }
         }
+
+        # Last, the NVR window itself. The supervisor stopping does not end it:
+        # the host pane stays at a prompt with the log on screen and the warden
+        # goes on holding the cam.nvr job, which is what made the next -Start
+        # refuse and record nothing - item [63]. It is last on purpose, after
+        # the orderly stop and after the sweep above, because releasing the job
+        # is a kernel kill of everything still inside it.
+        $nvr = Stop-CamNvr -Config $Config
+        if ($nvr.Wardens.Count -eq 0 -and $nvr.Hosts.Count -eq 0) {
+            Write-Host '  the NVR window was not open' -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host ("  stopped the NVR window: {0} host, {1} warden; the '{2}' job is released: {3}" -f `
+                $nvr.Hosts.Count, $nvr.Wardens.Count, $nvr.JobName, (-not $nvr.JobExists))
+            if ($nvr.Survived.Count -gt 0) {
+                Write-Host ("  still alive: {0}" -f (($nvr.Survived | Sort-Object) -join ', ')) -ForegroundColor Red
+            }
+        }
     }
 
     $after = Get-CamComponentState
@@ -383,7 +416,7 @@ function Invoke-CamStopAll {
         }
     }
     if ($WantRecorder) {
-        foreach ($name in @('Supervisor', 'Ffmpeg', 'MediaMtx')) {
+        foreach ($name in @('NvrHost', 'NvrWarden', 'Supervisor', 'Ffmpeg', 'MediaMtx')) {
             if ($counts.$name -gt 0) { [void]$left.Add(("{0}={1}" -f $name, $counts.$name)) }
         }
     }
@@ -410,6 +443,12 @@ function Invoke-CamStartAll {
         panes on direct connections.
     #>
 
+    # A start that started nothing must not report success. Before item [63]
+    # this path printed "did not report running within 20s" and exited 0, so a
+    # stop followed by a start left the cameras recording nothing and said it
+    # had worked - and the UI now presses this as a button.
+    $recorderProblem = ''
+
     if ($WantRecorder) {
         Write-CamSection 'recorder'
         $state = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
@@ -421,6 +460,7 @@ function Invoke-CamStartAll {
             if (-not $task) {
                 Write-Host ("  the '{0}' task is not registered. Install it with:" -f $RecorderTaskName) -ForegroundColor Yellow
                 Write-Host ("    .\cam.recorder.ps1 -InstallAutostart") -ForegroundColor Yellow
+                $recorderProblem = "the '$RecorderTaskName' task is not registered, so there is nothing to start. Install it with .\cam.recorder.ps1 -InstallAutostart"
             }
             else {
                 Write-Host ("  starting the '{0}' task" -f $RecorderTaskName)
@@ -431,7 +471,10 @@ function Invoke-CamStartAll {
                     if ($state.Running) { break }
                 }
                 if ($state.Running) { Write-Host ("  up - {0}" -f $state.Reason) -ForegroundColor Green }
-                else { Write-Host ("  did not report running within 20s - {0}" -f $state.Reason) -ForegroundColor Yellow }
+                else {
+                    Write-Host ("  did not report running within 20s - {0}" -f $state.Reason) -ForegroundColor Red
+                    $recorderProblem = "the supervisor did not report running within 20s - {0}" -f $state.Reason
+                }
             }
         }
     }
@@ -459,6 +502,16 @@ function Invoke-CamStartAll {
 
         Write-CamSection 'dashboard'
         & $DashboardScript
+    }
+
+    if ($recorderProblem) {
+        Write-Host ''
+        Write-Host ("NOT RECORDING: {0}" -f $recorderProblem) -ForegroundColor Red
+        Write-Host ("  the task forwards to '.\cam.recorder.ps1 -Nvr', which opens the NVR window. Run that directly to see what it says,") -ForegroundColor Yellow
+        Write-Host ("  and read the launcher's own log at {0}." -f `
+            (Join-Path -Path (Get-CamAutostartDir) -ChildPath 'autostart.log')) -ForegroundColor Yellow
+        Write-Host '  cam.ps1 -Status shows the NVR host, its warden and whether the job is still held.' -ForegroundColor Yellow
+        return 1
     }
 
     return 0
@@ -562,9 +615,28 @@ function Invoke-CamRemoveDashboardAutostart {
 }
 
 
+function Get-CamReturnedCode {
+    <#
+        The exit code one of the Invoke-Cam* functions returned.
+
+        Each ends in `return 0` or `return 1`, but each also calls another
+        script on the way - the recorder's own -Stop, the dashboard launcher -
+        and anything either of those leaves on the pipeline comes back as part
+        of the same return value. Taking the last integer keeps the exit code
+        honest whatever else came past, which matters now that a caller acts on
+        it: exit 0 from a start that started nothing is item [63].
+    #>
+    param([AllowEmptyCollection()][AllowNull()]$Returned)
+
+    $codes = @(@($Returned) | Where-Object { $_ -is [int] })
+    if ($codes.Count -eq 0) { return 0 }
+    return $codes[-1]
+}
+
+
 switch ($PSCmdlet.ParameterSetName) {
-    'Stop' { exit (Invoke-CamStopAll) }
-    'Start' { exit (Invoke-CamStartAll) }
+    'Stop' { exit (Get-CamReturnedCode -Returned (Invoke-CamStopAll)) }
+    'Start' { exit (Get-CamReturnedCode -Returned (Invoke-CamStartAll)) }
     'InstallDashboardAutostart' { exit (Invoke-CamInstallDashboardAutostart) }
     'RemoveDashboardAutostart' { exit (Invoke-CamRemoveDashboardAutostart) }
     default {

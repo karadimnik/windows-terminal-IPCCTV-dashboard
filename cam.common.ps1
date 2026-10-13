@@ -1087,6 +1087,100 @@ function Get-CamRelayConfigText {
 }
 
 
+function Get-CamRelayConfigPathNames {
+    <#
+        The path names declared in a rendered MediaMTX config, in file order.
+
+        Only the paths: block is read. pathDefaults: has children at the same
+        indent and would otherwise be collected as two phantom cameras, so the
+        block is entered on its own key and left again at the next top-level
+        key.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+
+    $names = New-Object System.Collections.ArrayList
+    $inPaths = $false
+    foreach ($line in [regex]::Split($Text, "`r`n|`n")) {
+        if (-not $inPaths) {
+            if ($line -match '^paths:\s*$') { $inPaths = $true }
+            continue
+        }
+        if ($line -match '^\S') { break }
+        if ($line -match '^  ([A-Za-z0-9_]+):\s*$') { [void]$names.Add($Matches[1]) }
+    }
+    return @($names)
+}
+
+
+function Test-CamRelayConfigCurrent {
+    <#
+        Whether the MediaMTX config on disk still covers exactly the cameras in
+        cameras.json - and nothing more.
+
+        WHAT "CURRENT" MEANS HERE, and why it is not the whole file. The only
+        thing in that file that depends on cameras.json is the SET OF PATH
+        NAMES, one per camera, each named from the camera's NAME. Nothing else
+        about a camera is written: every path keeps `source: publisher` and the
+        real source URL is handed to MediaMTX at launch in
+        MTX_PATHS_<NAME>_SOURCE, which is the only reason the password never
+        reaches the disk.
+
+        Comparing the rendered text instead reports a file that is working
+        perfectly as out of date, because the generator writes the camera's
+        current IP into a COMMENT beside its path. Two cameras took new DHCP
+        addresses on 2026-10-13 and both the self-test and the supervisor
+        started claiming the relay config was stale while all six paths were
+        serving. A check that cries wolf about a correct file teaches the
+        Operator to ignore it, which is worse than not having it.
+
+        A renamed, added or removed camera DOES change the set, and that is the
+        case that matters: a camera with no path is never pulled and quietly
+        stays on a direct connection, taking the second of its two sessions.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$PathMap,
+        [Parameter(Mandatory = $true)][string]$ConfigPath
+    )
+
+    $result = [pscustomobject]@{
+        Current  = $false
+        Readable = $false
+        Expected = @($PathMap.Keys)
+        Found    = @()
+        Missing  = @()
+        Extra    = @()
+        Detail   = ''
+    }
+
+    $actual = $null
+    try { $actual = [System.IO.File]::ReadAllText($ConfigPath) } catch { }
+    if ($null -eq $actual) {
+        $result.Detail = "could not be read at $ConfigPath"
+        return $result
+    }
+    $result.Readable = $true
+
+    $result.Found = @(Get-CamRelayConfigPathNames -Text $actual)
+    $result.Missing = @($result.Expected | Where-Object { $result.Found -notcontains $_ })
+    $result.Extra = @($result.Found | Where-Object { $result.Expected -notcontains $_ })
+    $result.Current = ($result.Missing.Count -eq 0 -and $result.Extra.Count -eq 0)
+
+    if ($result.Current) {
+        $result.Detail = '{0} has a path for every camera in cameras.json: {1}' -f `
+            $ConfigPath, (($result.Found | Sort-Object) -join ', ')
+    }
+    else {
+        $parts = New-Object System.Collections.ArrayList
+        if ($result.Missing.Count -gt 0) { [void]$parts.Add('no path for ' + (($result.Missing | Sort-Object) -join ', ')) }
+        if ($result.Extra.Count -gt 0) { [void]$parts.Add('a path for no camera: ' + (($result.Extra | Sort-Object) -join ', ')) }
+        $result.Detail = '{0} no longer covers cameras.json - {1}. Run cam.recorder.ps1 -InstallRestreamer' -f `
+            $ConfigPath, ($parts -join '; ')
+    }
+    return $result
+}
+
+
 # ---------------------------------------------------------------------------
 # Paths and the ffmpeg command
 # ---------------------------------------------------------------------------
@@ -3363,19 +3457,67 @@ function Start-CamNvrWindow {
         WindowFound = $false
         Title       = $title
         JobName     = $jobName
+        Cleaned     = @()
     }
 
-    if (@(Get-CamTerminalWindow -Title $title).Count -ge 1) {
-        $report.AlreadyOpen = $true
-        $report.WindowFound = $true
-        return $report
+    # WHAT IS ALREADY THERE, and what that means. Three facts are read before
+    # anything is started: whether a supervisor is actually recording, whether
+    # a window carries the NVR's title, and whether the job is held. They do
+    # not move together, and item [63] was the cost of treating a window or a
+    # job as proof that the NVR was alive.
+    #
+    # Recording is read from the PROCESS TREE first - the supervisor is the
+    # parent of every ffmpeg - and from the heartbeat second. Never from the
+    # status file alone: it still says "running" after a supervisor has been
+    # killed.
+    $inventory = @(Get-CamProcessInventory -Config $Config)
+    $live = @($inventory | Where-Object { $_.Role -eq 'Supervisor' })
+    $heartbeat = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
+    $recording = ($live.Count -gt 0 -or $heartbeat.Running)
+    $windows = @(Get-CamTerminalWindow -Title $title).Count
+
+    if ($recording) {
+        if ($windows -ge 1) {
+            $report.AlreadyOpen = $true
+            $report.WindowFound = $true
+            return $report
+        }
+
+        # Recording, but no window answers to the title. Windows Terminal
+        # adopts a foreign console as a tab, and while that tab is active the
+        # window's title is the foreign tab's - so the search finds nothing
+        # even though the NVR is perfectly alive. Clearing the job here would
+        # kill a working supervisor, MediaMTX and six ffmpeg. Refuse, and name
+        # the pids doing the work.
+        throw ("The NVR IS running (supervisor {0}) but no window titled '{1}' could be found, so a second one cannot be started - most likely a foreign console has been adopted as a tab in its window, which hides the title. Nothing has been changed and recording is unaffected. Stop the whole NVR with cam.ps1 -Stop -Recorder first if you really want to restart it." -f `
+                $(if ($live.Count -gt 0) { ($live | ForEach-Object { $_.ProcessId }) -join ', ' } else { "pid $($heartbeat.Pid) by heartbeat" }), $title)
     }
 
-    # A job that exists with no window means a warden is still watching for
-    # one. Starting a second NVR would give the second warden an exclusive
-    # create that fails, and leave a window nothing owns.
-    if ([CamJob]::Exists($jobName)) {
-        throw "The job '$jobName' already exists but no window titled '$title' is open. A warden is still watching for one, or an NVR is shutting down. Run cam.ps1 -Status, and cam.ps1 -Stop -Recorder if it is stuck."
+    # Nothing is recording, so any window or job still here is a corpse, not an
+    # NVR. This is the state cam.ps1 -Stop -Recorder used to leave behind: the
+    # host pane sitting at a -NoExit prompt with its window still open and the
+    # warden still holding the job, which made the window look open and the job
+    # look taken while nothing recorded. Clearing it is the published recovery,
+    # so do it here rather than leave a system its own start command cannot
+    # start. Item [63].
+    if ($windows -ge 1 -or [CamJob]::Exists($jobName)) {
+        $stale = Stop-CamNvr -Config $Config
+        $report.Cleaned = $stale.Stopped
+        Write-Host ("cleared a dead NVR: {0} window(s) titled '{1}' and job '{2}' held with nothing recording; stopped pid(s) {3}" -f `
+                $windows, $title, $jobName, `
+                $(if ($stale.Stopped.Count -gt 0) { ($stale.Stopped | Sort-Object) -join ', ' } else { 'none' })) -ForegroundColor Yellow
+
+        $deadline = (Get-Date).AddSeconds(10)
+        while ((Get-Date) -lt $deadline) {
+            $windows = @(Get-CamTerminalWindow -Title $title).Count
+            if ($windows -eq 0 -and -not [CamJob]::Exists($jobName)) { break }
+            Start-Sleep -Milliseconds 250
+        }
+        if ($windows -ge 1 -or [CamJob]::Exists($jobName)) {
+            throw ("Nothing is recording, but {0} window(s) titled '{1}' and job '{2}' held: {3} are still there after stopping the NVR host and warden (stopped: {4}; survived: {5}). Something outside this project holds them. Run cam.ps1 -Status, close that window, and try again." -f `
+                    $windows, $title, $jobName, [CamJob]::Exists($jobName), `
+                    (($stale.Stopped | Sort-Object) -join ', '), (($stale.Survived | Sort-Object) -join ', '))
+        }
     }
 
     $wardenLog = Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath 'nvr-warden.log'
@@ -3413,6 +3555,81 @@ function Start-CamNvrWindow {
         Start-Sleep -Milliseconds 500
     }
 
+    return $report
+}
+
+
+function Stop-CamNvr {
+    <#
+        Takes the NVR window itself down: the warden that holds the cam.nvr
+        job, and the host pane the window runs. Call it only AFTER the
+        recorder's own orderly stop has finished.
+
+        Why it has to exist. The supervisor stopping does not end the NVR. The
+        host returns once the stop was asked for, and the pane's powershell
+        was launched with -NoExit so the window stays open with the last log
+        lines on screen - which is wanted when a human is reading it, and
+        fatal for a scripted stop: the warden is still holding the cam.nvr
+        job, so the next launch finds the job present with a window that the
+        control surface may no longer be able to match, refuses to create a
+        second one, and nothing records. Measured on 2026-10-13, item [63].
+
+        THE WARDEN GOES FIRST, and by termination:
+
+        - its handle is the LAST handle to cam.nvr, so closing it is what
+          fires KILL_ON_JOB_CLOSE and has the kernel take the host pane and
+          anything else still inside the job in one sweep;
+        - a terminated warden never reaches its "the window is gone" branch,
+          which stops the viewers through cam.ps1 -Stop -Dashboard. Stopping
+          the recorder must not stop the dashboard that was not asked about.
+
+        Anything still alive after the sweep is stopped directly: a host that
+        failed to join the job is not a member of it and the kernel will not
+        take it.
+    #>
+    param([AllowNull()]$Config)
+
+    Import-CamJobApi
+    $jobName = Get-CamNvrJobName
+    $inventory = @(Get-CamProcessInventory -Config $Config)
+    $wardens = @($inventory | Where-Object { $_.Role -eq 'NvrWarden' } | ForEach-Object { [int]$_.ProcessId })
+    $hosts = @($inventory | Where-Object { $_.Role -eq 'NvrHost' } | ForEach-Object { [int]$_.ProcessId })
+
+    $report = [pscustomobject]@{
+        Wardens   = $wardens
+        Hosts     = $hosts
+        Stopped   = @()
+        Survived  = @()
+        JobExists = [CamJob]::Exists($jobName)
+        JobName   = $jobName
+    }
+    if ($wardens.Count -eq 0 -and $hosts.Count -eq 0) { return $report }
+
+    $stopped = New-Object System.Collections.ArrayList
+    if ($wardens.Count -gt 0) {
+        $result = Stop-CamProcessList -ProcessId $wardens
+        foreach ($id in $result.Stopped) { [void]$stopped.Add([int]$id) }
+
+        # The kernel sweep is immediate once the handle is gone, but the
+        # warden has to die first and a terminated process is reaped
+        # asynchronously.
+        $deadline = (Get-Date).AddSeconds(10)
+        while ((Get-Date) -lt $deadline) {
+            $alive = @($hosts | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+            if ($alive.Count -eq 0 -and -not [CamJob]::Exists($jobName)) { break }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    $left = @($hosts | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    if ($left.Count -gt 0) {
+        $result = Stop-CamProcessList -ProcessId $left
+        foreach ($id in $result.Stopped) { [void]$stopped.Add([int]$id) }
+    }
+
+    $report.Stopped = @($stopped)
+    $report.Survived = @(@($wardens) + @($hosts) | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    $report.JobExists = [CamJob]::Exists($jobName)
     return $report
 }
 

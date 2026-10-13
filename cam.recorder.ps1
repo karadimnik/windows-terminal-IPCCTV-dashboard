@@ -501,6 +501,10 @@ function Invoke-CamStartNvr {
         return
     }
 
+    if ($report.Cleaned.Count -gt 0) {
+        Write-CamHost -Message ("  cleared   a dead NVR was holding the job '{0}': stopped pid(s) {1}" -f `
+                $report.JobName, (($report.Cleaned | Sort-Object) -join ', ')) -Colour 'Yellow'
+    }
     Write-CamHost -Message ("  warden    pid {0}, owns the job '{1}'" -f $report.WardenPid, $report.JobName)
     Write-CamHost -Message ("  window    titled '{0}', wt.exe -w {1}" -f $report.Title, (Get-CamNvrWtWindowName))
 
@@ -1369,12 +1373,16 @@ function Test-CamRestreamer {
         Add-CamTestResult -Check 'restreamer config' -Status 'FAIL' -Detail "missing at $configPath - run -InstallRestreamer"
     }
     else {
-        $expected = Get-CamRelayConfigText -Config $Config -PathMap $pathMap
+        # The path names are the whole dependency on cameras.json - see
+        # Test-CamRelayConfigCurrent. Comparing the rendered text would fail on
+        # a correct file every time a camera took a new DHCP address, because
+        # the generator writes the address into a comment.
+        $covered = Test-CamRelayConfigCurrent -Config $Config -PathMap $pathMap -ConfigPath $configPath
+        Add-CamTestResult -Check 'restreamer config' -Status $(if ($covered.Current) { 'PASS' } else { 'FAIL' }) `
+            -Detail $covered.Detail
+
         $actual = ''
         try { $actual = [System.IO.File]::ReadAllText($configPath) } catch { }
-        $current = ($actual -eq $expected)
-        Add-CamTestResult -Check 'restreamer config' -Status $(if ($current) { 'PASS' } else { 'FAIL' }) `
-            -Detail $(if ($current) { "$configPath matches cameras.json" } else { "$configPath is out of date with cameras.json - run -InstallRestreamer" })
 
         # Only the password could leak here, and it is never written, so this
         # asserts the shape the generated file must always have.
@@ -1937,17 +1945,14 @@ function Start-CamRelayChild {
     $pathMap = Get-CamRelayPathMap -Cameras (Get-CamList)
     $Entry.PathMap = $pathMap
 
-    # The generated config is rendered from cameras.json, so re-rendering it is
-    # the whole staleness test - no YAML parsing, and one source of truth. A
-    # camera missing from the file would come up with no path at all and would
-    # quietly stay on the direct input, so this is said loudly and started
-    # anyway: a stale relay still serves the cameras it does know.
-    $expected = Get-CamRelayConfigText -Config $Config -PathMap $pathMap
-    $actual = ''
-    try { $actual = [System.IO.File]::ReadAllText($configPath) } catch { }
-    if ($actual -ne $expected) {
-        $message = "WARNING: '$configPath' no longer matches cameras.json. Run cam.recorder.ps1 -InstallRestreamer. Starting the restreamer with the file as it is."
-        Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
+    # A camera missing from the file comes up with no path at all and quietly
+    # stays on the direct input, so this is said loudly and started anyway: a
+    # stale relay still serves the cameras it does know. The test is the set of
+    # path names, not the rendered text - see Test-CamRelayConfigCurrent.
+    $covered = Test-CamRelayConfigCurrent -Config $Config -PathMap $pathMap -ConfigPath $configPath
+    if (-not $covered.Current) {
+        Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes `
+            -Message ("WARNING: {0} Starting the restreamer with the file as it is." -f $covered.Detail)
     }
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
