@@ -4105,9 +4105,10 @@ function Get-CamUiListenAddress {
 
 function Split-CamUiListenAddress {
     <#
-        host:port split into something connectable. An empty host means every
-        interface, which is reachable through loopback, so that is what a probe
-        should connect to. An IPv6 literal keeps its brackets off.
+        host:port split into something connectable. A wildcard host - empty,
+        0.0.0.0 or :: - means every interface, and every interface includes
+        loopback, so that is the address to probe and the one to print. An
+        IPv6 literal keeps its brackets off.
     #>
     param([Parameter(Mandatory = $true)][string]$Address)
 
@@ -4119,7 +4120,7 @@ function Split-CamUiListenAddress {
         throw "The camui listen address '$Address' has no numeric port."
     }
     $probeHost = $listenHost
-    if (-not $probeHost) { $probeHost = '127.0.0.1' }
+    if (-not $probeHost -or $probeHost -eq '0.0.0.0' -or $probeHost -eq '::') { $probeHost = '127.0.0.1' }
 
     return [pscustomobject]@{
         Address   = $Address
@@ -4306,7 +4307,7 @@ function Test-StubServing {
     $separator = $Address.LastIndexOf(':')
     if ($separator -lt 0) { return $false }
     $probeHost = $Address.Substring(0, $separator).Trim('[', ']')
-    if (-not $probeHost) { $probeHost = '127.0.0.1' }
+    if (-not $probeHost -or $probeHost -eq '0.0.0.0' -or $probeHost -eq '::') { $probeHost = '127.0.0.1' }
     $port = 0
     if (-not [int]::TryParse($Address.Substring($separator + 1), [ref]$port)) { return $false }
 
