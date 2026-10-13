@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'uileak', 'procs', 'relay', 'viewer')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'leak', 'uileak', 'procs', 'relay', 'viewer')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'leak', 'uileak', 'procs')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'leak', 'uileak', 'procs')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -836,6 +836,127 @@ function Invoke-CamCheckUiLeak {
 }
 
 
+function Invoke-CamCheckCrashSafe {
+    <#
+        The crash-safety contract, in a sandbox, with no camera touched:
+
+          1. a killed supervisor is restarted by the NVR host
+          2. the kill is recorded as StopKind 'unexpected' with a
+             LastUnexpectedStop carrying its timestamp and reason
+          3. the kill raises an alert on the toast and event-log channels
+          4. an orderly -Stop is NOT restarted and raises NO alert
+
+        Point 4 is the one that decides whether the feature is worth having.
+        Alerting on an expected stop teaches the Operator to ignore alerts, at
+        which point the unexpected ones cost him nothing but noise.
+
+        The cameras are deliberately unreachable: this check is about the
+        supervisor's lifecycle, and ffmpeg failing to connect exercises it
+        exactly as well as ffmpeg recording would.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $hostProcess = $null
+
+    $sandbox = New-CamTestSandbox -Name 'crashsafe' -Cameras @(
+        [pscustomobject]@{ Name = 'crashsafe-a'; IP = '10.255.255.11'; Quality = 'main'; Record = $true }
+    ) -Config @{ StatusIntervalSeconds = 2; ReconcileSeconds = 2 }
+
+    $lib = Join-Path -Path $sandbox.Dir -ChildPath 'cam.common.ps1'
+    $log = Join-Path -Path $sandbox.Root -ChildPath '_logs\recorder.log'
+    $readStatus = {
+        $read = Get-CamTestStatusJson -Sandbox $sandbox
+        if ($read) { return $read.Snapshot }
+        return $null
+    }
+    $alertLines = { if (Test-Path -LiteralPath $log) { @(Get-Content -LiteralPath $log | Select-String -Pattern 'ALERT ').Count } else { 0 } }
+    $livePid = {
+        param($snapshot)
+        if (-not $snapshot) { return 0 }
+        $id = [int]$snapshot.SupervisorPid
+        if ($id -gt 0 -and (Get-Process -Id $id -ErrorAction SilentlyContinue)) { return $id }
+        return 0
+    }
+
+    try {
+        $hostProcess = Start-CamDetachedProcess -Script (". '{0}'`nStart-CamNvrHost -RecorderPath '{1}' -RestartDelaySeconds 3" -f `
+                $lib.Replace("'", "''"), $sandbox.Recorder.Replace("'", "''"))
+        $evidence += ("nvr host pid {0}" -f $hostProcess.Id)
+
+        $first = 0
+        $deadline = (Get-Date).AddSeconds(60)
+        while ((Get-Date) -lt $deadline) {
+            $snapshot = & $readStatus
+            if ($snapshot -and $snapshot.State -eq 'running') { $first = & $livePid $snapshot }
+            if ($first -gt 0) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if ($first -le 0) {
+            Add-CamTestResult -Run $Run -Check 'crashsafe' -Status 'FAIL' `
+                -Message 'the NVR host did not bring a supervisor up within 60s' -Evidence $evidence
+            return
+        }
+        $evidence += ("supervisor #1 pid {0}, status says running" -f $first)
+
+        $alertsBefore = & $alertLines
+        Stop-Process -Id $first -Force
+        $evidence += ("killed pid {0} with Stop-Process -Force - no stop flag, no cleanup" -f $first)
+
+        $second = 0
+        $deadline = (Get-Date).AddSeconds(90)
+        while ((Get-Date) -lt $deadline) {
+            $snapshot = & $readStatus
+            if ($snapshot -and $snapshot.State -eq 'running') {
+                $candidate = & $livePid $snapshot
+                if ($candidate -gt 0 -and $candidate -ne $first) { $second = $candidate; break }
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        $evidence += ("supervisor #2 pid {0} after the kill" -f $second)
+        if ($second -le 0) { $ok = $false; $evidence += 'FAIL: the supervisor was not restarted' }
+
+        $record = (& $readStatus).LastUnexpectedStop
+        $evidence += ("LastUnexpectedStop: {0}" -f ($record | ConvertTo-Json -Compress))
+        if (-not $record -or -not $record.At -or -not $record.Reason -or [int]$record.SupervisorPid -ne $first) {
+            $ok = $false; $evidence += 'FAIL: the kill was not recorded with its timestamp, reason and pid'
+        }
+
+        $alertsAfterKill = & $alertLines
+        $evidence += ("ALERT lines in the supervisor log: {0} before the kill, {1} after" -f $alertsBefore, $alertsAfterKill)
+        if ($alertsAfterKill -le $alertsBefore) { $ok = $false; $evidence += 'FAIL: the kill raised no alert' }
+
+        # Now the distinction that keeps alerting worth reading.
+        [void](Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-Stop'))
+        Start-Sleep -Seconds 8
+        $snapshot = & $readStatus
+        $evidence += ("after -Stop: State={0} StopKind='{1}' host alive={2}" -f `
+                $snapshot.State, $snapshot.StopKind, [bool](Get-Process -Id $hostProcess.Id -ErrorAction SilentlyContinue))
+        if ($snapshot.StopKind -ne 'requested') { $ok = $false; $evidence += 'FAIL: an orderly stop was not recorded as requested' }
+
+        $alertsAfterStop = & $alertLines
+        $evidence += ("ALERT lines after the orderly stop: {0} (was {1})" -f $alertsAfterStop, $alertsAfterKill)
+        if ($alertsAfterStop -ne $alertsAfterKill) { $ok = $false; $evidence += 'FAIL: an orderly stop raised an alert' }
+
+        Start-Sleep -Seconds 6
+        $snapshot = & $readStatus
+        $restarted = (& $livePid $snapshot)
+        $evidence += ("6s later: a supervisor is running = {0}" -f ($restarted -gt 0))
+        if ($restarted -gt 0) { $ok = $false; $evidence += 'FAIL: the host restarted a supervisor that was asked to stop' }
+    }
+    finally {
+        if ($hostProcess) {
+            try { if (Get-Process -Id $hostProcess.Id -ErrorAction SilentlyContinue) { Stop-Process -Id $hostProcess.Id -Force } } catch { }
+        }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'crashsafe' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'a killed supervisor is restarted and alerted on; an orderly stop is neither' `
+        -Evidence $evidence
+}
+
+
 function Invoke-CamCheckProcs {
     <#
         Asserts that no ffmpeg or MediaMTX is left over from a test run.
@@ -1174,6 +1295,7 @@ foreach ($check in $Checks) {
         'strip'      { Invoke-CamCheckStrip      -Run $run }
         'sections'   { Invoke-CamCheckSections   -Run $run }
         'autostart'  { Invoke-CamCheckAutostart  -Run $run }
+        'crashsafe'  { Invoke-CamCheckCrashSafe  -Run $run }
         'leak'       { Invoke-CamCheckLeak       -Run $run }
         'uileak'     { Invoke-CamCheckUiLeak     -Run $run }
         'procs'      { Invoke-CamCheckProcs      -Run $run }
