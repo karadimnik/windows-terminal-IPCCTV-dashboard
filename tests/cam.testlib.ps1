@@ -28,7 +28,7 @@ $script:CamTestRepo = Split-Path -Path $script:CamTestRoot -Parent
 # updates these two constants in the same commit, deliberately. The pin exists
 # to catch a TEST RUN mutating the file, not to freeze the Operator's choices:
 # this value is all six cameras with Record true, which is how he runs it.
-$script:CamTestCameraListSha256 = 'f9bda083e8696badd80e3775a12d125ee2698e41ea3fc79bf2c579f9f5a07ae4'
+$script:CamTestCameraListSha256 = '950627520b799752bce4f2192f8f794c3f8a3832b3d82d6dc9af3e5ce6d9b131'
 $script:CamTestCameraListBom = 'efbbbf'
 
 
