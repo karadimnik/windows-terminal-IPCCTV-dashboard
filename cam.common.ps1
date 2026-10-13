@@ -1387,6 +1387,237 @@ function Get-CamFreeSpaceGB {
 
 
 # ---------------------------------------------------------------------------
+# Alerting
+# ---------------------------------------------------------------------------
+#
+# Three channels, because a 24/7 recorder that stops has to reach the Operator
+# whether he is at the machine, looking at the dashboard, or reading back
+# afterwards:
+#
+#   toast      he finds out without looking
+#   event log  a durable, greppable record that outlives every log rotation
+#   status     a field the UI can render
+#
+# The status field is written by whoever writes status.json. The other two live
+# here. Nothing in this section throws: an alert that fails must never be the
+# thing that takes the recorder down.
+
+function Get-CamAlertEventSource {
+    <# The custom Application-log source this project writes under. #>
+    return 'IPCCTV'
+}
+
+
+function Get-CamAlertFallbackEventSource {
+    <#
+        Where alerts go when the custom source is not registered.
+
+        Registering an event source writes to HKLM and needs elevation, which
+        an unelevated recorder does not have and must not demand. Measured
+        2026-10-13 on this machine as a standard user: creating the source
+        fails every way round - eventcreate.exe, New-EventLog and a direct
+        registry write all return Access denied - but WRITING to the
+        Application log under an ALREADY registered source succeeds. 'Application'
+        is registered on every Windows install, so it is the one source that is
+        always there and always writable.
+
+        Every message carries the 'IPCCTV: ' prefix either way, so one grep
+        finds them under either provider.
+    #>
+    return 'Application'
+}
+
+
+function Get-CamAlertMessagePrefix {
+    return 'IPCCTV: '
+}
+
+
+function Test-CamAlertEventSource {
+    <#
+        Whether the custom event source is registered.
+
+        Read from the registry, NOT with [EventLog]::SourceExists: that method
+        walks every event log and an unelevated caller cannot open Security, so
+        it THROWS "the source was not found, but some or all event logs could
+        not be searched" instead of answering false. Measured 2026-10-13.
+    #>
+    param([string]$Source = (Get-CamAlertEventSource))
+
+    try { return [bool](Test-Path -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\$Source") }
+    catch { return $false }
+}
+
+
+function Write-CamEventLogEntry {
+    <#
+        Writes one Application-log entry under the custom source when it is
+        registered and under the fallback source when it is not, and reports
+        which. Never throws.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Message,
+        [int]$EventId = 100,
+        [ValidateSet('Information', 'Warning', 'Error')][string]$EntryType = 'Warning'
+    )
+
+    $result = @{ Written = $false; Source = ''; Registered = $false; Problem = '' }
+    $text = (Get-CamAlertMessagePrefix) + (Get-CamRedacted -Text $Message)
+
+    $sources = @()
+    if (Test-CamAlertEventSource) { $result.Registered = $true; $sources += (Get-CamAlertEventSource) }
+    $sources += (Get-CamAlertFallbackEventSource)
+
+    foreach ($source in $sources) {
+        try {
+            Write-EventLog -LogName 'Application' -Source $source -EventId $EventId `
+                -EntryType $EntryType -Message $text -ErrorAction Stop
+            $result.Written = $true
+            $result.Source = $source
+            return $result
+        }
+        catch { $result.Problem = $_.Exception.Message }
+    }
+
+    return $result
+}
+
+
+function Show-CamToast {
+    <#
+        One Windows toast, unelevated, with no dependency to install.
+
+        WinRT's ToastNotificationManager rather than BurntToast or msg.exe: it
+        is in the box, it does not steal focus - which the Operator asked for
+        explicitly - and the toast stays in the Action Center afterwards, so an
+        alert raised while he was away is still there when he comes back.
+
+        The AppUserModelID is Windows PowerShell's own. A toast has to be shown
+        under an AUMID that has a Start menu entry, and inventing one would
+        need a shortcut installed first. The cost is that the toast is headed
+        "Windows PowerShell"; the body says what it is. Measured rendering
+        2026-10-13.
+
+        Never throws: a machine with notifications turned off must not take the
+        recorder down.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message
+    )
+
+    $result = @{ Shown = $false; Problem = '' }
+    try {
+        [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+        [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime]
+
+        $xml = '<toast><visual><binding template="ToastText02"><text id="1">{0}</text><text id="2">{1}</text></binding></visual></toast>' -f `
+            [System.Security.SecurityElement]::Escape((Get-CamRedacted -Text $Title)), `
+            [System.Security.SecurityElement]::Escape((Get-CamRedacted -Text $Message))
+
+        $document = New-Object Windows.Data.Xml.Dom.XmlDocument
+        $document.LoadXml($xml)
+        $toast = New-Object Windows.UI.Notifications.ToastNotification $document
+        $aumid = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($aumid).Show($toast)
+        $result.Shown = $true
+    }
+    catch { $result.Problem = $_.Exception.Message }
+
+    return $result
+}
+
+
+function Send-CamAlert {
+    <#
+        Raises one alert on the toast and event-log channels and records it in
+        the supervisor log. The caller publishes the state for the UI, because
+        only the caller knows which document the fact belongs in.
+
+        Returns what each channel did, so the log line can say so and a test
+        can assert on it rather than on "an alert was sent".
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message,
+        [int]$EventId = 100,
+        [ValidateSet('Information', 'Warning', 'Error')][string]$EntryType = 'Warning',
+        [AllowEmptyString()][string]$LogPath = '',
+        [int]$LogMaxBytes = 0
+    )
+
+    $title = Get-CamRedacted -Text $Title
+    $body = Get-CamRedacted -Text $Message
+
+    $toast = Show-CamToast -Title $title -Message $body
+    $entry = Write-CamEventLogEntry -Message ("{0} - {1}" -f $title, $body) -EventId $EventId -EntryType $EntryType
+
+    $channels = "toast {0}, event log {1}" -f `
+        $(if ($toast.Shown) { 'shown' } else { 'FAILED (' + $toast.Problem + ')' }), `
+        $(if ($entry.Written) { "written as source '" + $entry.Source + "'" } else { 'FAILED (' + $entry.Problem + ')' })
+
+    if (-not [string]::IsNullOrEmpty($LogPath)) {
+        try { Write-CamLog -Path $LogPath -Message ("ALERT {0} - {1} [{2}]" -f $title, $body, $channels) -MaxBytes $LogMaxBytes }
+        catch { }
+    }
+
+    return @{ Title = $title; Message = $body; Toast = $toast; Event = $entry; Channels = $channels }
+}
+
+
+function Install-CamAlertEventSource {
+    <#
+        Registers the custom Application-log source. Needs elevation ONCE, and
+        says so rather than failing obscurely when it does not have it.
+
+        Everything works without it - alerts go to the Application log under
+        the fallback source with the same prefix and the same text - so this is
+        a tidiness switch, not a prerequisite.
+    #>
+    $source = Get-CamAlertEventSource
+    $result = @{ Source = $source; AlreadyRegistered = $false; Registered = $false; Elevated = $false; Problem = '' }
+
+    $result.Elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+    if (Test-CamAlertEventSource -Source $source) {
+        $result.AlreadyRegistered = $true
+        $result.Registered = $true
+        return $result
+    }
+
+    if (-not $result.Elevated) {
+        $result.Problem = "registering an event source writes to HKLM and needs an elevated session. Alerts still reach the Application log under the '$(Get-CamAlertFallbackEventSource)' source with the '$(Get-CamAlertMessagePrefix)' prefix until this is run elevated."
+        return $result
+    }
+
+    try {
+        # The message resource matters. A source with no message DLL leaves
+        # Get-WinEvent's .Message EMPTY and the text only reachable through
+        # .Properties[0].Value - measured 2026-10-13. EventCreate.exe carries a
+        # generic resource covering event IDs 1-1000, which is the same one the
+        # eventcreate tool points its own sources at, so the entry renders.
+        New-EventLog -LogName 'Application' -Source $source `
+            -MessageResourceFile (Join-Path -Path $env:SystemRoot -ChildPath 'System32\EventCreate.exe') -ErrorAction Stop
+        $result.Registered = $true
+    }
+    catch { $result.Problem = $_.Exception.Message }
+
+    return $result
+}
+
+
+function Get-CamAlertEventIdList {
+    <#
+        The event IDs this project writes. Needed to read the alerts back: the
+        fallback source is shared, so the IDs are what separate our entries
+        from everyone else's.
+    #>
+    return @(100, 101, 102, 110)
+}
+
+
+# ---------------------------------------------------------------------------
 # State files shared between the supervisor and the CLI
 # ---------------------------------------------------------------------------
 

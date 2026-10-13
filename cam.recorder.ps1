@@ -81,6 +81,9 @@ param(
     [Parameter(ParameterSetName = 'RemoveAutostart')]
     [switch]$RemoveAutostart,
 
+    [Parameter(ParameterSetName = 'InstallEventSource')]
+    [switch]$InstallEventSource,
+
     [Parameter(ParameterSetName = 'SelfTest')]
     [switch]$SelfTest,
 
@@ -513,6 +516,40 @@ function Invoke-CamStartNvr {
 
     Write-CamHost -Message 'the NVR is open. Closing that window stops the supervisor, MediaMTX, every ffmpeg and the viewers.' -Colour 'Green'
     Write-CamHost -Message 'Closing any other terminal does nothing.' -Colour 'DarkGray'
+}
+
+
+function Invoke-CamInstallEventSource {
+    <#
+        Registers the custom Application-log event source. One-off, needs an
+        elevated session, and is OPTIONAL: without it every alert still reaches
+        the Application log under the fallback source with the same prefix.
+    #>
+    Write-CamHost -Message ''
+    Write-CamHost -Message '=== the IPCCTV event source ===' -Colour 'Cyan'
+
+    $report = Install-CamAlertEventSource
+
+    $provider = $(if ($report.Registered) { $report.Source } else { Get-CamAlertFallbackEventSource })
+    $ids = (Get-CamAlertEventIdList) -join ','
+    $reader = "  Get-WinEvent -FilterHashtable @{{ LogName = 'Application'; ProviderName = '{0}'; Id = {1} }} |`n" +
+    "    Select-Object TimeCreated, Id, LevelDisplayName, @{{ n = 'Text'; e = {{ if (`$_.Message) {{ `$_.Message }} else {{ `$_.Properties[0].Value }} }} }}"
+
+    if ($report.AlreadyRegistered) {
+        Write-CamHost -Message ("the source '{0}' is already registered - alerts appear under that provider." -f $report.Source) -Colour 'Green'
+    }
+    elseif ($report.Registered) {
+        Write-CamHost -Message ("registered the source '{0}'. Alerts now appear under that provider." -f $report.Source) -Colour 'Green'
+    }
+    else {
+        Write-CamHost -Message ("could not register the source '{0}': {1}" -f $report.Source, $report.Problem) -Colour 'Yellow'
+        Write-CamHost -Message 'Alerting works without it - this only changes which provider the entries carry.' -Colour 'DarkGray'
+        Write-CamHost -Message 'To register it, run this once from an elevated PowerShell:' -Colour 'DarkGray'
+        Write-CamHost -Message ("  New-EventLog -LogName Application -Source {0} -MessageResourceFile `$env:SystemRoot\System32\EventCreate.exe" -f $report.Source) -Colour 'DarkGray'
+    }
+
+    Write-CamHost -Message 'Read the alerts back with:' -Colour 'DarkGray'
+    Write-CamHost -Message ($reader -f $provider, $ids) -Colour 'DarkGray'
 }
 
 
@@ -3413,6 +3450,9 @@ elseif ($InstallAutostart) {
 elseif ($RemoveAutostart) {
     Invoke-CamRemoveAutostart -Config $config
 }
+elseif ($InstallEventSource) {
+    Invoke-CamInstallEventSource
+}
 elseif ($Run) {
     Invoke-CamSupervisor -Config $config
 }
@@ -3430,4 +3470,5 @@ else {
     Write-CamHost -Message '  cam.recorder.ps1 -RemoveRestreamer     delete it again'
     Write-CamHost -Message '  cam.recorder.ps1 -InstallAutostart     open the NVR window at logon as this user'
     Write-CamHost -Message '  cam.recorder.ps1 -RemoveAutostart      remove that logon task'
+    Write-CamHost -Message '  cam.recorder.ps1 -InstallEventSource  register the IPCCTV event source (needs elevation once)'
 }
