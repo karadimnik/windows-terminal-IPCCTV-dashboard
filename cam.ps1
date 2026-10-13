@@ -48,12 +48,23 @@
     Removes that task and its launcher. A clean no-op when they are not
     there, and it never touches the recorder's task either.
 
+.PARAMETER InstallUi
+    Registers a logon task that starts the control UI, camui.exe, and leaves
+    the recorder's and the dashboard's tasks completely alone. Idempotent,
+    unelevated. It does not start the UI; it prints the one command that does.
+
+.PARAMETER RemoveUi
+    Removes that task and its launcher. A clean no-op when they are not
+    there, and it never touches the other two tasks. A camui already running
+    keeps running.
+
 .EXAMPLE
     .\cam.ps1
     .\cam.ps1 -Stop
     .\cam.ps1 -Stop -Dashboard
     .\cam.ps1 -Start
     .\cam.ps1 -InstallDashboardAutostart
+    .\cam.ps1 -InstallUi
 #>
 # The bare invocation is -Status, which needs saying explicitly: with several
 # parameter sets and no mandatory parameter in any of them, PowerShell cannot
@@ -75,6 +86,12 @@ param(
 
     [Parameter(ParameterSetName = 'RemoveDashboardAutostart')]
     [switch]$RemoveDashboardAutostart,
+
+    [Parameter(ParameterSetName = 'InstallUi')]
+    [switch]$InstallUi,
+
+    [Parameter(ParameterSetName = 'RemoveUi')]
+    [switch]$RemoveUi,
 
     # Scope. Neither given means everything, which is the point of the script.
     [Parameter(ParameterSetName = 'Start')]
@@ -108,6 +125,19 @@ $DashboardStubLogPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'autost
 $DashboardStubWaitSeconds = 300
 $DashboardStubPollSeconds = 5
 
+# The third task: the control UI. camui.exe is built into this directory by
+# ui/build.sh and is not in the repository, camui.config.json is optional and
+# is where a listen address and a token go, and camui's own output is pumped
+# into camui.log beside the launcher logs.
+$UiTaskName = 'IPCCTV-Ui'
+$UiExePath = Join-Path -Path $ScriptDir -ChildPath 'camui.exe'
+$UiConfigPath = Join-Path -Path $ScriptDir -ChildPath 'camui.config.json'
+$UiStubPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'start-ui.ps1'
+$UiStubLogPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'autostart-ui.log'
+$UiLogPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'camui.log'
+$UiStubWaitSeconds = 300
+$UiStubPollSeconds = 5
+
 # Neither scope switch means both, so the bare verb always means everything.
 $WantRecorder = $Recorder -or -not ($Recorder -or $Dashboard)
 $WantDashboard = $Dashboard -or -not ($Recorder -or $Dashboard)
@@ -140,6 +170,12 @@ function Get-CamLogonTaskReport {
             What      = 'the viewer dashboard'
             Launcher  = $DashboardStubPath
             InstallBy = '.\cam.ps1 -InstallDashboardAutostart'
+        },
+        [pscustomobject]@{
+            Name      = $UiTaskName
+            What      = 'the control UI'
+            Launcher  = $UiStubPath
+            InstallBy = '.\cam.ps1 -InstallUi'
         }
     )
 
@@ -183,6 +219,7 @@ function Get-CamComponentState {
         Viewer          = @($inventory | Where-Object { $_.Role -eq 'Viewer' })
         Health          = @($inventory | Where-Object { $_.Role -eq 'Health' })
         LogonTasks      = @(Get-CamLogonTaskReport)
+        Ui              = (Get-CamUiRuntimeState -ExePath $UiExePath -ConfigPath $UiConfigPath)
         SupervisorState = (Get-CamSupervisorState -Config $Config -Snapshot $snapshot)
         JobExists       = [CamJob]::Exists((Get-CamDashboardJobName))
         NvrJobExists    = [CamJob]::Exists((Get-CamNvrJobName))
@@ -257,6 +294,47 @@ function Show-CamStatus {
     $unowned = @($State.Viewer | Where-Object { $_.Detail -eq 'no pane owns it' })
     if ($unowned.Count -gt 0) {
         Write-Host ("  ORPHANS      {0} mpv with no pane: {1}" -f $unowned.Count, (($unowned.ProcessId | Sort-Object) -join ', ')) -ForegroundColor Red
+    }
+
+    Write-CamSection 'ui'
+    $ui = $State.Ui
+    $uiTask = @($State.LogonTasks | Where-Object { $_.Name -eq $UiTaskName } | Select-Object -First 1)[0]
+    if ($ui.Problem) {
+        Write-Host ("  camui        cannot tell: {0}" -f $ui.Problem) -ForegroundColor Red
+    }
+    elseif ($ui.Listening -and $ui.IsCamUi) {
+        Write-Host ("  camui        SERVING {0} - pid {1}" -f $ui.Url, $ui.OwnerPid) -ForegroundColor Green
+    }
+    elseif ($ui.Listening) {
+        # The port is taken by something that is not camui. Saying which pid
+        # owns it is the whole value of reporting this at all.
+        $owner = $ui.OwnerPath
+        if (-not $owner) { $owner = 'its path is not readable from here' }
+        Write-Host ("  camui        NOT serving - pid {0} ({1}) is listening on {2} instead" -f `
+            $ui.OwnerPid, $owner, $ui.Address) -ForegroundColor Red
+    }
+    else {
+        Write-Host ("  camui        stopped - nothing is listening on {0}" -f $ui.Address) -ForegroundColor Yellow
+    }
+    Write-Host ("  binary       {0}{1}" -f $ui.ExePath, `
+        $(if ($ui.ExeBuilt) { '' } else { '  MISSING - cross-compile it with ui/build.sh' }))
+    $addressFrom = "camui's own default, with no camui.config.json"
+    if ($ui.ConfigExists) { $addressFrom = $ui.ConfigPath }
+    Write-Host ("  address      {0}, from {1}" -f $ui.Address, $addressFrom)
+    if ($ui.TokenConfigured) {
+        Write-Host '  auth         a token is configured, so every request needs it'
+    }
+    else {
+        Write-Host '  auth         none, and loopback only - camui refuses a non-loopback bind without a token'
+    }
+    Write-Host ("  logon task   {0}" -f $uiTask.State)
+    if (-not $ui.Listening) {
+        if ($uiTask.Registered) {
+            Write-Host ("  start it     Start-ScheduledTask -TaskName {0}" -f $UiTaskName) -ForegroundColor Cyan
+        }
+        else {
+            Write-Host '  install it   .\cam.ps1 -InstallUi' -ForegroundColor Cyan
+        }
     }
 
     Write-CamSection 'logon tasks'
@@ -631,6 +709,128 @@ function Invoke-CamRemoveDashboardAutostart {
 }
 
 
+function Invoke-CamInstallUi {
+    <#
+        Registers the logon task that starts the control UI, camui.exe.
+
+        A third task, for the same reason there are already two: the recorder
+        is a headless service, the dashboard is a desktop artifact, and the UI
+        is a local web server that must outlive both. One task for several of
+        them would couple lifetimes that have nothing to do with each other.
+
+        It registers IPCCTV-Ui and nothing else. The recorder's and the
+        dashboard's tasks are not read for anything but a line of reporting,
+        not re-registered and not removed.
+
+        It does not start camui. The task is the one start path - running it by
+        hand is exactly what logon does - so this prints that command rather
+        than starting the binary a second way that could drift from it.
+    #>
+
+    Write-CamSection 'install the control UI logon task'
+
+    if (-not (Test-Path -LiteralPath $UiExePath)) {
+        Write-Host ("  camui.exe is not here: {0}" -f $UiExePath) -ForegroundColor Red
+        Write-Host '  The binary is deliberately not in the repository. Cross-compile it with ui/build.sh' -ForegroundColor Red
+        Write-Host '  (see docs/go-toolchain.md for the one-time Go install), then run this again.' -ForegroundColor Red
+        Write-Host '  Nothing was installed.' -ForegroundColor Red
+        return 1
+    }
+
+    $stubPath = New-CamUiLauncherStub -StubPath $UiStubPath -ExePath $UiExePath `
+        -ConfigPath $UiConfigPath -LogPath $UiStubLogPath -UiLogPath $UiLogPath `
+        -TimeoutSeconds $UiStubWaitSeconds -PollSeconds $UiStubPollSeconds
+
+    $registration = Register-CamLogonTask -TaskName $UiTaskName -StubPath $stubPath `
+        -Description 'Starts the IPCCTV control UI (camui) at logon.'
+
+    if ($registration.Existed) {
+        Write-Host ("  updated the existing task '{0}'" -f $UiTaskName) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("  created the task '{0}'" -f $UiTaskName) -ForegroundColor Green
+    }
+    $ui = Get-CamUiRuntimeState -ExePath $UiExePath -ConfigPath $UiConfigPath
+    Write-Host ("  runs      {0} {1}" -f $registration.Executable, $registration.Arguments)
+    Write-Host ("  launcher  {0}" -f $stubPath)
+    Write-Host ("  starts    {0} (waits up to {1}s for that path)" -f $UiExePath, $UiStubWaitSeconds)
+    Write-Host ("  serves    {0}" -f $ui.Url)
+    Write-Host ("  log       {0}, and camui's own output in {1}" -f $UiStubLogPath, $UiLogPath)
+    Write-Host ("  as        {0} (interactive token, no elevation)" -f $registration.Account)
+    Write-Host ("  trigger   at logon of {0}" -f $registration.Account)
+    Write-Host ("  limits    {0}" -f $registration.Policy)
+    Write-Host ("  state     {0}" -f $registration.Task.State)
+    Write-Host ("  registered task(s) with this name: {0}" -f `
+        @(Get-ScheduledTask -TaskName $UiTaskName -ErrorAction SilentlyContinue).Count)
+    foreach ($other in @($RecorderTaskName, $DashboardTaskName)) {
+        $task = Get-CamLogonTask -TaskName $other
+        $state = 'not registered'
+        if ($task) { $state = [string]$task.State }
+        Write-Host ("  the '{0}' task is untouched by this: {1}" -f $other, $state) -ForegroundColor DarkGray
+    }
+
+    Write-Host ''
+    Write-Host ("Start it now with:  Start-ScheduledTask -TaskName {0}" -f $UiTaskName) -ForegroundColor Cyan
+    Write-Host ("Then open:          {0}" -f $ui.Url) -ForegroundColor Cyan
+    Write-Host 'Verify it with:     schtasks /query /tn IPCCTV-Ui /fo list' -ForegroundColor Cyan
+    Write-Host 'Remove it with:     .\cam.ps1 -RemoveUi' -ForegroundColor Cyan
+    return 0
+}
+
+
+function Invoke-CamRemoveUi {
+    <#
+        Unregisters the control UI's logon task and deletes its launcher. A
+        clean no-op when neither is there, and it never touches the recorder's
+        or the dashboard's task.
+
+        A camui that is running now keeps running: nothing here stops a
+        process. -Status prints the pid that owns the port when you want it
+        gone.
+    #>
+
+    Write-CamSection 'remove the control UI logon task'
+
+    if (Unregister-CamLogonTask -TaskName $UiTaskName) {
+        Write-Host ("  removed the task '{0}'" -f $UiTaskName) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("  no task named '{0}' is registered" -f $UiTaskName) -ForegroundColor Yellow
+    }
+
+    if (Remove-CamLauncherStub -StubPath $UiStubPath) {
+        Write-Host ("  removed the launcher '{0}'" -f $UiStubPath) -ForegroundColor Green
+    }
+    else {
+        Write-Host ("  no launcher at '{0}'" -f $UiStubPath) -ForegroundColor Yellow
+    }
+
+    foreach ($log in @($UiStubLogPath, $UiLogPath)) {
+        if (Test-Path -LiteralPath $log) {
+            Write-Host ("  kept the log '{0}' - delete it by hand if you do not want it" -f $log)
+        }
+    }
+
+    foreach ($other in @($RecorderTaskName, $DashboardTaskName)) {
+        $task = Get-CamLogonTask -TaskName $other
+        $state = 'not registered'
+        if ($task) { $state = [string]$task.State }
+        Write-Host ("  the '{0}' task is untouched by this: {1}" -f $other, $state) -ForegroundColor DarkGray
+    }
+
+    $ui = Get-CamUiRuntimeState -ExePath $UiExePath -ConfigPath $UiConfigPath
+    Write-Host ''
+    if ($ui.Listening -and $ui.IsCamUi) {
+        Write-Host ("A camui is still serving {0} as pid {1} and stays up. Stop it with:  Stop-Process -Id {1}" -f `
+            $ui.Url, $ui.OwnerPid) -ForegroundColor Cyan
+    }
+    else {
+        Write-Host ("Nothing is serving {0}." -f $ui.Address) -ForegroundColor Cyan
+    }
+    return 0
+}
+
+
 function Get-CamReturnedCode {
     <#
         The exit code one of the Invoke-Cam* functions returned.
@@ -655,6 +855,8 @@ switch ($PSCmdlet.ParameterSetName) {
     'Start' { exit (Get-CamReturnedCode -Returned (Invoke-CamStartAll)) }
     'InstallDashboardAutostart' { exit (Invoke-CamInstallDashboardAutostart) }
     'RemoveDashboardAutostart' { exit (Invoke-CamRemoveDashboardAutostart) }
+    'InstallUi' { exit (Invoke-CamInstallUi) }
+    'RemoveUi' { exit (Invoke-CamRemoveUi) }
     default {
         # -Status, and the bare invocation, which is the same question.
         Show-CamStatus -State (Get-CamComponentState)

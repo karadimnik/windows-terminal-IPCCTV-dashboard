@@ -4063,3 +4063,343 @@ function Unregister-CamLogonTask {
     }
     return $true
 }
+
+
+# ---------------------------------------------------------------------------
+# The control UI (camui.exe)
+#
+# camui owns no state: it reads status.json and shells the scripts. These
+# helpers are what cam.ps1 needs to install it, to report it, and to say where
+# it is - nothing here starts, stops or configures it.
+# ---------------------------------------------------------------------------
+
+# Must match defaultListen in ui/config.go. camui takes its listen address from
+# camui.config.json or its own default; this is the same answer, for reporting
+# and for the launcher's readiness probe.
+$script:CamUiDefaultListen = '127.0.0.1:8787'
+
+
+function Get-CamUiListenAddress {
+    <#
+        The host:port camui will bind, from camui.config.json if there is one,
+        otherwise camui's own default.
+
+        Reads the "listen" key and nothing else. A token, if one is
+        configured, is never read here and never printed anywhere.
+    #>
+    param([Parameter(Mandatory = $true)][string]$ConfigPath)
+
+    if (Test-Path -LiteralPath $ConfigPath) {
+        try {
+            $parsed = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+            if ($parsed -and $parsed.listen) { return [string]$parsed.listen }
+        }
+        catch {
+            # A malformed config is camui's problem to report when it starts;
+            # here it only means the address is the default one.
+        }
+    }
+    return $script:CamUiDefaultListen
+}
+
+
+function Split-CamUiListenAddress {
+    <#
+        host:port split into something connectable. An empty host means every
+        interface, which is reachable through loopback, so that is what a probe
+        should connect to. An IPv6 literal keeps its brackets off.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Address)
+
+    $separator = $Address.LastIndexOf(':')
+    if ($separator -lt 0) { throw "The camui listen address '$Address' is not host:port." }
+    $listenHost = $Address.Substring(0, $separator).Trim('[', ']')
+    $port = 0
+    if (-not [int]::TryParse($Address.Substring($separator + 1), [ref]$port)) {
+        throw "The camui listen address '$Address' has no numeric port."
+    }
+    $probeHost = $listenHost
+    if (-not $probeHost) { $probeHost = '127.0.0.1' }
+
+    return [pscustomobject]@{
+        Address   = $Address
+        Host      = $listenHost
+        ProbeHost = $probeHost
+        Port      = $port
+        Url       = ("http://{0}:{1}/" -f $probeHost, $port)
+    }
+}
+
+
+function Get-CamUiRuntimeState {
+    <#
+        What the control UI is doing: where it would be, whether anything is
+        serving there, and which process owns that listening socket.
+
+        The process is identified by the socket it OWNS, never by image name -
+        the same rule the process inventory follows. That also makes the answer
+        honest when something else has taken the port: the pid is reported
+        either way and the caller can see it is not camui.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][string]$ConfigPath
+    )
+
+    $address = Get-CamUiListenAddress -ConfigPath $ConfigPath
+    $parsed = $null
+    $problem = ''
+    try { $parsed = Split-CamUiListenAddress -Address $address }
+    catch { $problem = $_.Exception.Message }
+
+    $ownerPid = 0
+    $ownerPath = ''
+    $listening = $false
+    if ($parsed) {
+        $connection = @(Get-NetTCPConnection -LocalPort $parsed.Port -State Listen -ErrorAction SilentlyContinue) |
+            Select-Object -First 1
+        if ($connection) {
+            $listening = $true
+            $ownerPid = [int]$connection.OwningProcess
+            try { $ownerPath = [string](Get-Process -Id $ownerPid -ErrorAction Stop).Path } catch { $ownerPath = '' }
+        }
+    }
+
+    # A token being configured is reported; the token itself is not read.
+    $tokenConfigured = $false
+    if (Test-Path -LiteralPath $ConfigPath) {
+        try {
+            $config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+            if ($config -and $config.token -and ([string]$config.token).Trim()) { $tokenConfigured = $true }
+        }
+        catch { }
+    }
+    if ($env:CAMUI_TOKEN -and $env:CAMUI_TOKEN.Trim()) { $tokenConfigured = $true }
+
+    return [pscustomobject]@{
+        Address         = $address
+        Url             = $(if ($parsed) { $parsed.Url } else { '' })
+        Problem         = $problem
+        Listening       = $listening
+        OwnerPid        = $ownerPid
+        OwnerPath       = $ownerPath
+        IsCamUi         = ($ownerPath -and ($ownerPath -eq $ExePath))
+        ExePath         = $ExePath
+        ExeBuilt        = (Test-Path -LiteralPath $ExePath)
+        ConfigPath      = $ConfigPath
+        ConfigExists    = (Test-Path -LiteralPath $ConfigPath)
+        TokenConfigured = $tokenConfigured
+    }
+}
+
+
+function New-CamUiLauncherStub {
+    <#
+        Writes the launcher the UI's logon task runs, and returns its path.
+
+        It is not New-CamLauncherStub because the target is not a script to
+        forward to. Two things follow from camui being a long-lived console
+        program:
+
+        - It must outlive this launcher and every terminal window on the
+          machine, so it is started in a console of its OWN with no window -
+          CreateNoWindow with UseShellExecute false. Start-Process
+          -WindowStyle Hidden would hand it this launcher's console instead,
+          and a console created WITH a window is handed to the default
+          terminal application, which on this machine makes it a TAB in the
+          Operator's Windows Terminal window and kills it when that window is
+          closed. That is measured, and it is how the recording supervisor
+          died four times in one day.
+
+        - camui logs to stdout only, so a thin powershell.exe holds the pipe
+          and appends it to a log file. That is the one process that waits for
+          camui, which is also what makes camui identifiable from its parent.
+
+        The binary is NOT copied anywhere. The launcher waits for its path the
+        same way the other launchers wait for a script's, so a rebuilt
+        camui.exe takes effect the next time it starts, with no reinstall.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$StubPath,
+        [Parameter(Mandatory = $true)][string]$ExePath,
+        [Parameter(Mandatory = $true)][string]$ConfigPath,
+        [Parameter(Mandatory = $true)][string]$LogPath,
+        [Parameter(Mandatory = $true)][string]$UiLogPath,
+        [int]$TimeoutSeconds = 300,
+        [int]$PollSeconds = 5,
+        [int]$ServingWaitSeconds = 30,
+        [int]$UiLogMaxBytes = 10485760
+    )
+
+    # Every substituted value lands inside a single-quoted literal in the
+    # generated file, so a single quote in a path has to be doubled.
+    $template = @'
+# IPCCTV camui launcher - GENERATED FILE, do not edit.
+# Written by .\cam.ps1 -InstallUi and deleted by .\cam.ps1 -RemoveUi.
+#
+# What this has to get right, and why it is not one line:
+#
+#   camui.exe can live on a path that is not there yet when the logon task
+#   fires (\\wsl.localhost resolves only once WSL is running), so this waits
+#   for it rather than failing.
+#
+#   camui is a console program that must outlive this launcher and every
+#   terminal window on the machine, so it is started in a console of its OWN
+#   with no window. A console created WITH a window is handed to the default
+#   terminal application and arrives as a TAB in an existing Windows Terminal
+#   window, which kills it when that window is closed.
+#
+#   camui logs to stdout only, so a thin powershell.exe holds the pipe and
+#   appends it to the UI log.
+#
+#   Starting a second camui would only fail to bind the port, so if the
+#   address is already being served this exits without starting anything.
+
+$Exe                = '__EXE__'
+$ConfigPath         = '__CONFIG__'
+$DefaultListen      = '__LISTEN__'
+$LogPath            = '__LOG__'
+$UiLogPath          = '__UILOG__'
+$TimeoutSeconds     = __TIMEOUT__
+$PollSeconds        = __POLL__
+$ServingWaitSeconds = __SERVINGWAIT__
+$UiLogMaxBytes      = __UILOGMAX__
+
+function Write-StubLog {
+    param([string]$Message)
+    $line = '{0} {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Message
+    try {
+        $dir = Split-Path -Path $LogPath -Parent
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+    }
+    catch { }
+    Write-Host $line
+}
+
+function Test-StubTarget {
+    # A path on a share that is not up can fail rather than answer false.
+    try { return [bool](Test-Path -LiteralPath $Exe) } catch { return $false }
+}
+
+function Get-StubListenAddress {
+    # camui.config.json wins if it is there, exactly as camui itself reads it.
+    if (Test-Path -LiteralPath $ConfigPath) {
+        try {
+            $parsed = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+            if ($parsed -and $parsed.listen) { return [string]$parsed.listen }
+        }
+        catch {
+            Write-StubLog ('could not read {0}: {1}' -f $ConfigPath, $_.Exception.Message)
+        }
+    }
+    return $DefaultListen
+}
+
+function Test-StubServing {
+    # Something answering on the address is camui already up. The listening
+    # socket is the only honest test; an image name is never one.
+    param([string]$Address)
+
+    $separator = $Address.LastIndexOf(':')
+    if ($separator -lt 0) { return $false }
+    $probeHost = $Address.Substring(0, $separator).Trim('[', ']')
+    if (-not $probeHost) { $probeHost = '127.0.0.1' }
+    $port = 0
+    if (-not [int]::TryParse($Address.Substring($separator + 1), [ref]$port)) { return $false }
+
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $attempt = $client.BeginConnect($probeHost, $port, $null, $null)
+        if (-not $attempt.AsyncWaitHandle.WaitOne(1000)) { return $false }
+        $client.EndConnect($attempt)
+        return $true
+    }
+    catch { return $false }
+    finally { $client.Close() }
+}
+
+Write-StubLog ('launcher starting, waiting up to {0}s for {1}' -f $TimeoutSeconds, $Exe)
+
+$waited = 0
+while (-not (Test-StubTarget)) {
+    if ($waited -ge $TimeoutSeconds) {
+        Write-StubLog ('FAILED: {0} did not appear within {1}s. If that is a \\wsl.localhost path, WSL was not running; if it is never there, build it with ui/build.sh. Exiting 2 so the task restart policy tries again.' -f $Exe, $TimeoutSeconds)
+        exit 2
+    }
+    Start-Sleep -Seconds $PollSeconds
+    $waited += $PollSeconds
+}
+
+$listen = Get-StubListenAddress
+if (Test-StubServing -Address $listen) {
+    Write-StubLog ('{0} is already being served, so nothing was started' -f $listen)
+    exit 0
+}
+
+# One log, rolled when it gets large: camui writes a line per request and
+# nothing else would ever bound it.
+try {
+    $existing = Get-Item -LiteralPath $UiLogPath -ErrorAction SilentlyContinue
+    if ($existing -and $existing.Length -gt $UiLogMaxBytes) {
+        Move-Item -LiteralPath $UiLogPath -Destination ($UiLogPath + '.prev') -Force
+        Write-StubLog ('rolled {0} at {1} bytes' -f $UiLogPath, $existing.Length)
+    }
+}
+catch { Write-StubLog ('could not roll {0}: {1}' -f $UiLogPath, $_.Exception.Message) }
+
+$arguments = ''
+if (Test-Path -LiteralPath $ConfigPath) {
+    $arguments = " -config '" + $ConfigPath.Replace("'", "''") + "'"
+}
+$pump = "& '" + $Exe.Replace("'", "''") + "'" + $arguments + " *>> '" + $UiLogPath.Replace("'", "''") + "'"
+$encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($pump))
+
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -EncodedCommand {0}' -f $encoded)
+$psi.UseShellExecute = $false
+$psi.CreateNoWindow = $true
+try {
+    $process = [System.Diagnostics.Process]::Start($psi)
+    [void]$process.Handle
+}
+catch {
+    Write-StubLog ('FAILED to start it: ' + $_.Exception.Message)
+    exit 3
+}
+Write-StubLog ('started camui under pid {0}, output appending to {1}' -f $process.Id, $UiLogPath)
+
+$waitedForServing = 0
+while (-not (Test-StubServing -Address $listen)) {
+    if ($waitedForServing -ge $ServingWaitSeconds) {
+        Write-StubLog ('FAILED: nothing is serving {0} after {1}s. Read {2}. Exiting 4 so the task restart policy tries again.' -f $listen, $ServingWaitSeconds, $UiLogPath)
+        exit 4
+    }
+    Start-Sleep -Seconds 1
+    $waitedForServing += 1
+}
+Write-StubLog ('camui is serving {0} after {1}s' -f $listen, $waitedForServing)
+exit 0
+'@
+
+    $body = $template.
+        Replace('__EXE__', $ExePath.Replace("'", "''")).
+        Replace('__CONFIG__', $ConfigPath.Replace("'", "''")).
+        Replace('__LISTEN__', $script:CamUiDefaultListen.Replace("'", "''")).
+        Replace('__LOG__', $LogPath.Replace("'", "''")).
+        Replace('__UILOG__', $UiLogPath.Replace("'", "''")).
+        Replace('__TIMEOUT__', [string]$TimeoutSeconds).
+        Replace('__POLL__', [string]$PollSeconds).
+        Replace('__SERVINGWAIT__', [string]$ServingWaitSeconds).
+        Replace('__UILOGMAX__', [string]$UiLogMaxBytes)
+
+    $dir = Split-Path -Path $StubPath -Parent
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    Set-Content -LiteralPath $StubPath -Value $body -Encoding UTF8
+    return $StubPath
+}
