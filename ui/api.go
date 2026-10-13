@@ -103,6 +103,8 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/cameras", a.handlePutCameras)
 	mux.HandleFunc("GET /api/config", a.handleGetConfig)
 	mux.HandleFunc("PUT /api/config", a.handlePutConfig)
+	mux.HandleFunc("GET /api/footage", a.handleFootage)
+	mux.HandleFunc("GET /api/clip", a.handleClip)
 }
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
