@@ -278,6 +278,12 @@ function render(payload, fetchError) {
       '<span class="t muted" style="margin-left:12px">' + esc(supervisor.reason) + "</span></li>";
   }
 
+  // The archive root is shown, never edited: moving it needs the recorder
+  // stopped, and it comes from the status document rather than /api/config. Set
+  // on every poll, not when the Settings tab opens: opening that tab before the
+  // first poll had returned left the field permanently blank.
+  if (status && status.RootPath) el("archiveRoot").value = status.RootPath;
+
   renderControls();
 }
 
@@ -553,9 +559,6 @@ async function loadConfig() {
       input.value = config[key] === null || config[key] === undefined ? "" : String(config[key]);
       clearFieldError(input.closest(".field"));
     }
-    // The archive root is shown, never edited: moving it needs the recorder
-    // stopped, and it comes from the status document rather than this endpoint.
-    el("archiveRoot").value = (last && last.status && last.status.RootPath) || "";
     note("configNote", "", "");
     configChanged();
   } catch (err) {

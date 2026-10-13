@@ -144,7 +144,7 @@ footer.note{margin-top:22px;color:var(--ink-3);font-size:12px;border-top:1px sol
 .field.bad input,.field.bad select{border-color:var(--critical)}
 .field.bad .hint{color:#f09a9a}
 
-.row{display:grid;grid-template-columns:1.4fr 1fr .8fr auto auto;gap:10px;align-items:center;
+.row{display:grid;grid-template-columns:1.4fr 1fr .8fr 96px 86px;gap:10px;align-items:center;
   padding:11px var(--pad);border-bottom:1px solid var(--line-soft)}
 .row:last-of-type{border-bottom:0}
 .row>label,.row>div{display:block;min-width:0}
@@ -169,6 +169,7 @@ footer.note{margin-top:22px;color:var(--ink-3);font-size:12px;border-top:1px sol
 @media(prefers-reduced-motion:reduce){.btn[aria-busy="true"]::after{animation:none;background:var(--accent)}}
 
 /* ---- toast: what the last action did, including what it printed ---- */
+#controls{margin-bottom:16px}
 #toast:not(:empty){margin-bottom:16px}
 .toast{display:flex;align-items:flex-start;gap:11px;padding:12px var(--pad);border-radius:var(--r)}
 .toast.good{background:#16231a;border:1px solid #2c5a33;color:#b4f0bd}
@@ -195,6 +196,12 @@ dialog p{margin:0;color:var(--ink-2)}
   .row>*[data-label]::before{content:attr(data-label);display:block;font-size:11px;
     color:var(--ink-3);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
   .row .tglwrap{justify-content:flex-start}
-  .row .linkbtn{justify-self:start;padding-left:0}
+  .row .linkbtn{justify-self:start;padding:8px 0;min-height:36px}
   .field{max-width:none}
+
+  /* Tap targets. A 40x22 switch is comfortably clickable with a mouse and
+     misses on a thumb; 52x32 with a 24 px knob clears the 34 px guideline. */
+  .tgl{width:52px;height:32px;border-radius:16px}
+  .tgl i{top:4px;left:4px;width:24px;height:24px}
+  .tgl[aria-checked="true"] i{left:24px}
 }
