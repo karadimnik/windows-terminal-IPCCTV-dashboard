@@ -1042,3 +1042,30 @@ was touched: the Operator was using it throughout.
       One code comment is still inaccurate - `Get-CamUiRuntimeState` is prefaced "the token itself
       is not read" - and was left alone because this commission's boundary was documentation plus
       the archive root. It is worth one line in a later pass.
+
+## [74] SIMPLIFY - the Operator's feedback, 2026-10-13
+
+> "I went through the readme - super complex stuff and commands. Are all these needed? I doubt it,
+> we need to simplify"
+
+He is right. The README is 443 lines with eleven install steps, seven Install/Remove command pairs
+and about forty config keys. Almost none of it is needed day to day: everything autostarts at logon
+and the normal state is that he touches nothing.
+
+The job is to work out what a person actually needs and demote the rest, NOT to delete capability.
+
+- [ ] **[74]** Restructure around the three real audiences, in this order:
+      1. **"It is running, where do I look?"** - the URL, and that is nearly all of it.
+      2. **"Something is wrong"** - a short symptom table.
+      3. **"I am installing this from scratch"** - the current step list, moved to the back or to
+         `docs/install.md`. Most readers never need it; it currently opens the document.
+- [ ] **[75]** Collapse the command surface. Seven `-Install*`/`-Remove*` pairs is a lot to carry.
+      Consider one `-Install` that does the lot and one `-Uninstall`, with the granular switches kept
+      but demoted to a reference section. Do not remove them - scripts and recovery paths use them.
+- [ ] **[76]** Move the config tables to `docs/configuration.md`. Four keys are editable from the UI;
+      the rest are tuning nobody should need. The README should name the four and link the rest.
+- [ ] **[77]** Cut every number that drifts. The GB/day figure already had to be corrected once; any
+      measurement baked into prose is a future lie. Point at `-Status`.
+
+Judge the result by a simple test: can someone who has never seen the project get to the UI and
+understand what they are looking at within two minutes of opening the README?
