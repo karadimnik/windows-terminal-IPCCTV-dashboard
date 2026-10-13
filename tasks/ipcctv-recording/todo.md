@@ -647,3 +647,84 @@ The supervisor log is echoed to the NVR window by `Set-CamLogEcho`, registered b
 `recorder.log` only - the per-camera logs carry raw ffmpeg stderr and would bury it. Fifteen
 `Write-CamHost` calls that printed the same event without a timestamp were removed; the echo covers
 them.
+
+
+## Crash safety and alerting, 2026-10-13 - items [54]-[58]
+
+- [x] **[54]** DONE 2026-10-13: the supervisor owns a job object of its own, so its death takes
+      MediaMTX and every ffmpeg with it. Measured twice on the live NVR: 4 ffmpeg + 1 MediaMTX to
+      zero in under one second, zero orphans.
+- [x] **[55]** DONE 2026-10-13: the NVR pane is now a HOST that runs the supervisor as a child and
+      restarts it when it stops without being asked to. Recovered in 11s and 13s in the two live
+      tests, with no intervention.
+- [x] **[56]** DONE 2026-10-13: an unexpected stop alerts on three channels - a Windows toast, an
+      Application-log entry, and `StopKind` plus `LastUnexpectedStop` in `status.json`. An orderly
+      `cam.ps1 -Stop` raises none of them.
+- [x] **[57]** DONE 2026-10-13: a camera that has written nothing for `CameraDownAlertMinutes`
+      alerts on the same three channels and publishes `DownSince` per camera.
+- [x] **[58]** DONE 2026-10-13: `cam.recorder.ps1 -InstallEventSource` registers the custom
+      `IPCCTV` event source when run elevated. Everything works without it.
+
+### Why the pane had to stop BEING the supervisor
+
+From outside, a deliberate window close and a supervisor crash were the same event: supervisor
+gone, `status.json` still saying `running`, window destroyed. The warden watching that window
+cannot tell them apart, and guessing wrong is bad either way - restart on a deliberate close and
+the Operator cannot stop his own NVR; stay down on a crash and the cameras record nothing.
+
+So the pane is now `Start-CamNvrHost`, which runs the supervisor as a child:
+
+- **window closed** - host and supervisor share a console, both take `CTRL_CLOSE_EVENT`, both die,
+  and the `cam.nvr` warden sweeps the rest exactly as before. Unchanged.
+- **supervisor died** - the host is untouched, the window is still open, and the child exiting IS
+  the signal. The restart happens in place: no window churn, no job handed between wardens, no race.
+
+Expected or not is read from what the supervisor recorded, never from an exit code alone, because a
+killed process has no say in its exit code. The stop flag, `StopKind` `requested` or `interrupted`,
+and exit 20 ("another supervisor is already running") all mean do not restart. Budget is 5 restarts
+in 30 minutes; out of budget it alerts once more and stays down rather than looping all night.
+
+### The two job objects are different questions
+
+| job | owner | fires when |
+|---|---|---|
+| `cam.nvr` | the warden, outside the window | the WINDOW closes |
+| `cam.supervisor.<hash of root>` | the supervisor itself | the SUPERVISOR dies, however abruptly |
+
+Jobs nest, so the supervisor being inside `cam.nvr` already is not an obstacle - measured
+2026-10-13, the outer job was unaffected and the inner one swept both children in under a second.
+The supervisor's job is named per archive root, so a test sandbox cannot collide with the live NVR.
+`CamJob::CreateAndJoin` is the mirror image of `JoinCurrentProcess`: the owner KEEPS its handle,
+and process exit closing that handle is the whole mechanism.
+
+### The event log needed measuring
+
+Registering a custom event source writes to HKLM. Measured on this machine as a standard user:
+`eventcreate.exe`, `New-EventLog` and a direct registry write all return **Access denied**. Writing
+to the Application log under an **already registered** source does not. So alerts go out under the
+`Application` source with an `IPCCTV: ` prefix and need no elevation anywhere;
+`-InstallEventSource` registers the custom source when run elevated and is optional.
+
+Two further traps: `[EventLog]::SourceExists()` THROWS unelevated because it cannot open the
+Security log, so the source probe reads the registry instead. And a source with no message resource
+leaves `Get-WinEvent`'s `.Message` EMPTY - the text is in `.Properties[0].Value`:
+
+    Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application'; Id = 100,101,102,110 } |
+      Select-Object TimeCreated, Id, LevelDisplayName, @{ n = 'Text'; e = { if ($_.Message) { $_.Message } else { $_.Properties[0].Value } } }
+
+`-InstallEventSource` registers with `EventCreate.exe` as the message resource, which makes
+`.Message` render, and prints the right reader command either way.
+
+### Camera-down is judged on file progress, never on process liveness
+
+A camera that cannot be reached has its ffmpeg restarted every backoff period, so it is alive half
+the time and its `StartedAt` is always recent. Segments either appear or they do not. The
+supervisor's own start is the floor, so a camera that was already dead before this run is not
+reported as down for longer than there has been anything watching it.
+
+### Known gap, not fixed here
+
+After an orderly `cam.ps1 -Stop -Recorder` the NVR window stays open with its pane at a prompt, and
+`cam.ps1 -Start` then finds a window titled `cam.nvr` and reports "there is nothing to do" without
+starting anything. Pre-existing - the pane could not be made to run a second supervisor before
+either. The restore today is to close the window and run `-Nvr` again.
