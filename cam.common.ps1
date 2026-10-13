@@ -2286,8 +2286,20 @@ function Stop-CamTerminalWindow {
           panes still running  window gone in under 1500 ms, no overlay,
                                and the warden then stopped the panes
 
-        So this window never raises that confirmation. It is one tab holding
-        six panes, and the confirmation is about closing several TABS.
+        So a window of OURS never raises that confirmation: it is one tab,
+        holding six panes in the grid's case, and the confirmation is about
+        closing several TABS.
+
+        It does raise it once a foreign console has been ADOPTED into the
+        window as a second tab. Measured on 2026-10-13 against the NVR window,
+        which had acquired a tab named 'nk': the first WM_CLOSE left the
+        window open with the overlay waiting, 25 s later nothing had closed,
+        and the window was still there three hours afterwards. A second
+        WM_CLOSE answered the overlay and the close then completed in under a
+        second. So a return of 1 from this function can mean "an overlay is
+        waiting for an answer", and calling it again is a reasonable response -
+        but it is the Operator's windowingBehavior that decides whether a
+        foreign tab can land there at all.
 
         A window that will not close within the timeout is REPORTED, never
         forced.

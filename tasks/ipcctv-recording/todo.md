@@ -780,8 +780,21 @@ captured."
 
 ### The known gap above, measured - and it is not in camui
 
-- [ ] **[63]** NOT FIXED, and it bit this commission: after `cam.ps1 -Stop -Recorder`, the NVR's
-      pane and warden survive, so the next `-Start -Recorder` cannot bring the supervisor back and
+- [x] **[63]** FIXED 2026-10-13. `-Stop -Recorder` now takes the NVR window down with the
+      supervisor (`Stop-CamNvr`: the warden first, because its handle is the last one on the
+      `cam.nvr` job, so the kernel sweeps the host pane with it and a terminated warden never
+      reaches the branch that would also stop the dashboard). `-Start -Recorder` exits 1 and says
+      NOT RECORDING when the supervisor does not report in, and its wait went from 20s to 60s
+      because the measured launch takes 18-32s and 20s was itself producing false alarms.
+      `Start-CamNvrWindow` now reads what is actually recording from the process tree, clears a
+      dead NVR itself, and refuses only when clearing would kill a working supervisor whose window
+      cannot be matched. Verified: two stop-then-start cycles leave 6/6 recording and exit 0; a
+      `cam.nvr` job held by a stray warden with no window is cleared automatically by
+      `-Start -Recorder`; a job held by something that is neither the host nor the warden exits 1
+      and names the recovery. As measured, for the record:
+
+      The original report: after `cam.ps1 -Stop -Recorder`, the NVR's
+      pane and warden survived, so the next `-Start -Recorder` cannot bring the supervisor back and
       exits 0 anyway. Measured today with the Operator's dashboard open, which makes it worse: the
       NVR tab had been ADOPTED into the dashboard's Windows Terminal window, so no window titled
       `cam.nvr` existed at all and `-Nvr` refused with "the job 'cam.nvr' already exists but no
