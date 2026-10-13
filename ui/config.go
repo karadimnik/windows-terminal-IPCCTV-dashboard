@@ -19,7 +19,9 @@ const minTokenLength = 16
 // changes it deliberately.
 const defaultListen = "127.0.0.1:8787"
 
-// defaultArchiveRoot matches RootPath in recorder.config.json.
+// defaultArchiveRoot is the last resort, used only when nothing is configured
+// here and the recorder's own RootPath cannot be read. It is the recorder's own
+// built-in default, so the two agree on a machine that has configured neither.
 const defaultArchiveRoot = `E:\cameras`
 
 // Config is the whole of camui's configuration. It comes from a JSON file, from
@@ -29,7 +31,9 @@ type Config struct {
 	// exclusively to loopback addresses requires Token.
 	Listen string `json:"listen"`
 
-	// ArchiveRoot is the recorder's RootPath. StatusFile defaults to
+	// ArchiveRoot is the recorder's RootPath. Left unset it is read from
+	// RootPath in recorder.config.json, so moving the archive needs no
+	// second edit here. StatusFile defaults to
 	// <ArchiveRoot>\_state\status.json.
 	ArchiveRoot string `json:"archiveRoot"`
 
@@ -59,6 +63,12 @@ func (c Config) RecorderConfigFile() string {
 
 // LoadConfig merges the config file (if any), the flag values, and CAMUI_TOKEN,
 // then fills in defaults. A flag wins over the file; an empty flag means unset.
+//
+// The archive root has three sources in this order: whatever is set here by
+// flag or config file, then RootPath from the recorder's own
+// recorder.config.json, then defaultArchiveRoot. The middle one exists because
+// the recorder is the authority on where it writes, and a UI pointed at the
+// wrong root does not fail - it shows an empty archive and says nothing.
 func LoadConfig(configPath string, flags Config) (Config, error) {
 	cfg := Config{}
 
@@ -91,12 +101,8 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = defaultListen
 	}
-	if cfg.ArchiveRoot == "" {
-		cfg.ArchiveRoot = defaultArchiveRoot
-	}
-	if cfg.StatusFile == "" {
-		cfg.StatusFile = filepath.Join(cfg.ArchiveRoot, "_state", "status.json")
-	}
+	// The script directory is resolved first because the recorder's config -
+	// the next source for the archive root - is found relative to it.
 	if cfg.ScriptDir == "" {
 		// The binary is built into the repository root beside the scripts, so
 		// its own directory is the right default and needs no configuration on
@@ -107,9 +113,35 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 		}
 		cfg.ScriptDir = filepath.Dir(exe)
 	}
+	if cfg.ArchiveRoot == "" {
+		cfg.ArchiveRoot = recorderRootPath(cfg.RecorderConfigFile())
+	}
+	if cfg.ArchiveRoot == "" {
+		cfg.ArchiveRoot = defaultArchiveRoot
+	}
+	if cfg.StatusFile == "" {
+		cfg.StatusFile = filepath.Join(cfg.ArchiveRoot, "_state", "status.json")
+	}
 	cfg.Token = strings.TrimSpace(cfg.Token)
 
 	return cfg, nil
+}
+
+// recorderRootPath returns RootPath from the recorder's own configuration, or
+// "" when the file is absent, unreadable, not JSON, or carries no RootPath.
+// Every one of those falls through to the next default rather than refusing to
+// start: a recorder that has not been configured yet is not a reason to serve
+// nothing, and the file is the Operator's to get right.
+func recorderRootPath(path string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(stripBOM(raw), &parsed); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(jsonString(parsed["RootPath"]))
 }
 
 // Validate enforces the loopback guard: camui refuses to start on any address

@@ -171,7 +171,7 @@ Install it with `.\cam.ps1 -InstallUi` and let the logon task run it - that is t
 | `.\camui.exe` | Runs it in the foreground on `http://127.0.0.1:8787/`, with its log on screen. Useful when you want to watch what it is doing; Ctrl+C stops it. |
 | `-listen <host:port>` | Where to bind. Default `127.0.0.1:8787`. It **refuses to start** on any non-loopback address unless a token of at least 16 characters is configured. |
 | `-config <path>` | A JSON config file: `listen`, `archiveRoot`, `statusFile`, `scriptDir`, `token`. The installed launcher passes `camui.config.json` from beside the binary if that file exists, and nothing else needs to change to use it. |
-| `-archive-root <path>` `-status-file <path>` `-script-dir <path>` | Override what it reads. The defaults are `E:\cameras`, `<archive root>\_state\status.json`, and the directory holding the binary. |
+| `-archive-root <path>` `-status-file <path>` `-script-dir <path>` | Override what it reads. The archive root is taken from `RootPath` in the `recorder.config.json` beside the binary, so moving the archive needs no second edit here, and falls back to `E:\cameras` only when that file cannot be read; the status file defaults to `<archive root>\_state\status.json` and the script directory to the directory holding the binary. Precedence for the root is this flag or `archiveRoot` in the config file, then `RootPath`, then the built-in. |
 | `-version` | Prints the build stamp and exits. |
 
 The token is never taken from a flag, because a command line is readable by every process on the machine: it comes from the config file or from `CAMUI_TOKEN` in the environment.

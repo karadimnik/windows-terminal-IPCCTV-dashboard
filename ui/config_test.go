@@ -3,6 +3,8 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -82,6 +84,133 @@ func TestLoadConfigDefaultsAndPrecedence(t *testing.T) {
 	}
 	if cfg.Token != goodToken {
 		t.Errorf("CAMUI_TOKEN ignored: %q", cfg.Token)
+	}
+}
+
+// TestArchiveRootPrecedence pins the three sources of the archive root in
+// order. The middle one is the point: the recorder owns RootPath, and a UI that
+// ignored it showed an empty archive with nothing to say why when the Operator
+// moved it.
+func TestArchiveRootPrecedence(t *testing.T) {
+	const recorderRoot = `R:\recorded`
+
+	// scriptDir returns a directory holding a recorder.config.json with the
+	// given body, or no such file at all when body is empty.
+	scriptDir := func(t *testing.T, body string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if body != "" {
+			if err := os.WriteFile(filepath.Join(dir, "recorder.config.json"), []byte(body), 0o644); err != nil {
+				t.Fatalf("write recorder.config.json: %v", err)
+			}
+		}
+		return dir
+	}
+
+	// camuiConfig returns the path to a camui config file with the given body.
+	camuiConfig := func(t *testing.T, body string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "camui.config.json")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write camui.config.json: %v", err)
+		}
+		return path
+	}
+
+	cases := []struct {
+		name       string
+		recorder   string
+		configPath string
+		flags      Config
+		want       string
+	}{
+		{
+			name:     "RootPath is used when nothing explicit is set",
+			recorder: `{"RootPath": "R:\\recorded", "SegmentSeconds": 900}`,
+			want:     recorderRoot,
+		},
+		{
+			name:     "a UTF-8 BOM does not hide RootPath",
+			recorder: "\ufeff" + `{"RootPath": "R:\\recorded"}`,
+			want:     recorderRoot,
+		},
+		{
+			name:     "an explicit flag beats RootPath",
+			recorder: `{"RootPath": "R:\\recorded"}`,
+			flags:    Config{ArchiveRoot: `F:\flagged`},
+			want:     `F:\flagged`,
+		},
+		{
+			name:       "an explicit config file beats RootPath",
+			recorder:   `{"RootPath": "R:\\recorded"}`,
+			configPath: `{"archiveRoot": "C:\\configured"}`,
+			want:       `C:\configured`,
+		},
+		{
+			name: "no recorder config at all falls back to the constant",
+			want: defaultArchiveRoot,
+		},
+		{
+			name:     "a recorder config with no RootPath falls back to the constant",
+			recorder: `{"SegmentSeconds": 900}`,
+			want:     defaultArchiveRoot,
+		},
+		{
+			name:     "a blank RootPath falls back to the constant",
+			recorder: `{"RootPath": "   "}`,
+			want:     defaultArchiveRoot,
+		},
+		{
+			name:     "a malformed recorder config falls back to the constant rather than refusing to start",
+			recorder: `{"RootPath": "R:\\recorded"`,
+			want:     defaultArchiveRoot,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			flags := tc.flags
+			flags.ScriptDir = scriptDir(t, tc.recorder)
+
+			path := ""
+			if tc.configPath != "" {
+				path = camuiConfig(t, tc.configPath)
+			}
+
+			cfg, err := LoadConfig(path, flags)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.ArchiveRoot != tc.want {
+				t.Errorf("archive root = %q, want %q", cfg.ArchiveRoot, tc.want)
+			}
+			// The status file is derived, so getting the root right is only
+			// useful if it carries through.
+			if wantStatus := filepath.Join(tc.want, "_state", "status.json"); cfg.StatusFile != wantStatus {
+				t.Errorf("status file = %q, want %q", cfg.StatusFile, wantStatus)
+			}
+		})
+	}
+}
+
+// TestArchiveRootDoesNotOverrideAnExplicitStatusFile keeps the two independent:
+// an Operator who names a status file gets that file whatever the archive root
+// resolves to.
+func TestArchiveRootDoesNotOverrideAnExplicitStatusFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "recorder.config.json"), []byte(`{"RootPath": "R:\\recorded"}`), 0o644); err != nil {
+		t.Fatalf("write recorder.config.json: %v", err)
+	}
+
+	cfg, err := LoadConfig("", Config{ScriptDir: dir, StatusFile: `S:\elsewhere\status.json`})
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ArchiveRoot != `R:\recorded` {
+		t.Errorf("archive root = %q, want the recorder's RootPath", cfg.ArchiveRoot)
+	}
+	if cfg.StatusFile != `S:\elsewhere\status.json` {
+		t.Errorf("status file = %q, want the explicit one", cfg.StatusFile)
 	}
 }
 

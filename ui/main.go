@@ -48,7 +48,7 @@ func main() {
 		showVer    bool
 	)
 	flag.StringVar(&flags.Listen, "listen", "", "host:port to bind (default "+defaultListen+"; a non-loopback address requires a token)")
-	flag.StringVar(&flags.ArchiveRoot, "archive-root", "", "recorder archive root (default "+defaultArchiveRoot+")")
+	flag.StringVar(&flags.ArchiveRoot, "archive-root", "", "recorder archive root (default: RootPath from recorder.config.json, else "+defaultArchiveRoot+")")
 	flag.StringVar(&flags.StatusFile, "status-file", "", "status.json path (default <archive-root>\\_state\\status.json)")
 	flag.StringVar(&flags.ScriptDir, "script-dir", "", "directory holding cam.ps1, cameras.json and recorder.config.json (default: the directory holding camui.exe)")
 	flag.StringVar(&configPath, "config", "", "path to a JSON config file")
@@ -117,6 +117,7 @@ func run(cfg Config, log *slog.Logger) error {
 	log.Info("camui listening",
 		"version", version,
 		"address", listener.Addr().String(),
+		"archiveRoot", cfg.ArchiveRoot,
 		"statusFile", cfg.StatusFile,
 		"scriptDir", cfg.ScriptDir,
 		"auth", map[bool]string{true: "token required", false: "none (loopback only)"}[cfg.RequiresToken()],
