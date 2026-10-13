@@ -804,3 +804,64 @@ captured."
       Two fixes, neither in U2's scope: `"windowingBehavior": "useNew"` in the Operator's own Windows
       Terminal settings (already his to make), and `-Stop -Recorder` taking the NVR host down with
       the supervisor so `-Start` has nothing stale to trip over.
+
+---
+
+## U3 delivered 2026-10-13 - footage browsing and playback
+
+Third commission of the V1 control UI. The plan numbers these U3 items **[54]-[56]**, but those
+numbers were spent on crash safety above, so they are recorded here as **[64]-[66]** in plan order.
+
+- [x] **[64]** (plan [54]) `GET /api/footage`, answering in three shapes: the cameras that have
+      footage, one camera's dates, and one date's segments with its gaps. The whole index is parsed
+      from the filenames the recorder already writes - no database, and nothing opens a segment.
+      A segment's duration is its last-write time minus the start in its name, because ffmpeg stops
+      writing when the segment ends; checked against `ffprobe` on three real 15-minute segments
+      (900.047 vs 900.050, 900.018 vs 900.018, 900.047 vs 900.050 s). That is what makes gaps
+      visible: a segment the camera cut short ends early, and the silence until the next one starts
+      is the gap, with the leading and trailing silence of the day reported the same way. Each
+      segment is placed in absolute time by its OWN `%z` offset, so the hour that repeats on
+      25 October is one continuous recording rather than an overlap and that day is 25 hours long.
+- [x] **[65]** (plan [55]) `GET /api/clip`, streaming one segment as fragmented MP4 - video copied,
+      only the 8 kHz G.711 audio transcoded. Nothing is buffered; the first bytes are read before
+      the status is committed, so a failed remux is an error rather than a 200 with an empty video,
+      and the request's own context kills ffmpeg when the client goes away. Measured: 176,845,326
+      bytes in 8.6 s for a 15-minute segment, `h264` + `aac` under ffprobe, and the remux gone
+      0.42 s after an aborted request.
+- [x] **[66]** (plan [56]) The footage screen from the approved mockup: camera list, date list,
+      segment list, player and the empty state. The grid collapses to one column at 880 px and the
+      pickers are capped below the 760 px phone breakpoint so the player stays reachable, with every
+      row a 44 px tap target. The tab is driven by the URL fragment, so `#foot` opens the footage
+      browser directly - a headless browser has no way to click a tab, so without it the screen
+      could not be verified by rendering.
+
+### The in-progress segment: served, not hidden
+
+The newest file of every recording camera is open in ffmpeg right now. It is listed, flagged
+`inProgress`, and played like any other - measured safe rather than assumed: a remux of the live
+`Front_Entrance_20261013_193001+0300.mkv` returned HTTP 200 with `h264` + `aac` and 344 s of the
+340 s that existed when the request started, ffmpeg exited 0 with only `File ended prematurely` on
+stderr, and the recorder was untouched throughout - 6/6 recording, the same file growing
+62,652,416 -> 63,700,992 -> 67,108,864 bytes across the request and the twenty seconds after it.
+Excluding it would have hidden the footage the Operator is most likely to want.
+
+### Two defects found by running it, not by reading it
+
+**Two segments were flagged as recording at once.** A 90 s write window alone marks the segment that
+rolled over thirty seconds ago as still being written. ffmpeg writes exactly one file per camera at
+a time and it is always the newest by start time, so the question is only ever asked of that one.
+
+**The empty state talked about a date that was not selected.** A camera with no footage at all has
+no date, and "No footage for Front Entrance on this date" reads as a bug. Only a render of an empty
+archive showed it.
+
+### The screenshot instrument had to be rebuilt
+
+`--window-size=390` renders at 500 CSS px and crops - re-confirmed here against `--headless`,
+`--headless=new` and `--headless=old`, all three reporting `innerWidth=500`. The documented iframe
+workaround did NOT work for this page: the subframe's three sequential fetches never completed
+before the capture, under a 30 s budget, a 120 s budget, no budget at all, and with the host's load
+event held open. Every one of those produced a page with its data regions empty, which looks exactly
+like a broken screen. The capture is now driven over the DevTools protocol instead -
+`Emulation.setDeviceMetricsOverride` gives a real 390 px viewport with no clamp, and the wait is
+explicit rather than a virtual-time budget racing the page. The page reported `innerWidth=390`.
