@@ -1016,10 +1016,13 @@ el("fSegs").onclick = (event) => {
   if (button) playSegment(button.dataset.segment);
 };
 
-el("tabs").onclick = (event) => {
-  const button = event.target.closest("button");
-  if (!button) return;
-  for (const tab of el("tabs").children) tab.removeAttribute("aria-current");
+// showTab is driven by the URL fragment, so a screen can be linked to and
+// opened directly - #foot goes straight to the footage browser. An unknown
+// fragment falls back to the first tab.
+function showTab(name) {
+  const tabs = [...el("tabs").children];
+  const button = tabs.find((tab) => tab.dataset.t === name) || tabs[0];
+  for (const tab of tabs) tab.removeAttribute("aria-current");
   button.setAttribute("aria-current", "page");
   for (const section of document.querySelectorAll("section[data-tab]")) {
     section.classList.toggle("hide", section.dataset.tab !== button.dataset.t);
@@ -1031,7 +1034,17 @@ el("tabs").onclick = (event) => {
   // Re-read on every visit: a recording camera has new segments by now, and
   // the pruner may have taken the oldest away.
   if (button.dataset.t === "foot") loadFootage();
+}
+
+el("tabs").onclick = (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  history.replaceState(null, "", "#" + button.dataset.t);
+  showTab(button.dataset.t);
 };
+
+window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
+showTab(location.hash.slice(1) || "dash");
 
 // ---------------------------------------------------------------------------
 // Polling
