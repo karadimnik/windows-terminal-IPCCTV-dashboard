@@ -147,7 +147,12 @@ footer.note{margin-top:22px;color:var(--ink-3);font-size:12px;border-top:1px sol
 .row{display:grid;grid-template-columns:1.4fr 1fr .8fr 96px 86px;gap:10px;align-items:center;
   padding:11px var(--pad);border-bottom:1px solid var(--line-soft)}
 .row:last-of-type{border-bottom:0}
-.row>label,.row>div{display:block;min-width:0}
+/* min-width:0 only. Forcing display:block here also hit .tglwrap, whose flex
+   row is what puts the On/Off word beside the switch - the word lost its 9 px
+   gap and dropped onto the text baseline, half a line below the switch. A grid
+   item does not need display:block to behave. */
+.row>label{display:block;min-width:0}
+.row>div{min-width:0}
 .row input,.row select{background:var(--surface-2);border:1px solid var(--line);border-radius:7px;
   padding:7px 9px;color:var(--ink);font:inherit;min-width:0;width:100%}
 .row input.bad,.row select.bad{border-color:var(--critical)}
