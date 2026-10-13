@@ -301,7 +301,7 @@ archive. Reduced to a 256-colour palette, 894 KB instead of 2.4 MB, strip text u
 - [ ] **[29]** TECHNICAL DEBT, unchanged and now due: `cam.recorder.ps1` is 3,432 lines. The feature
       is complete and green, so the split can be commissioned.
 - [ ] **[32]** `Restreamer.Paths` still counts CONFIGURED paths, not READY ones. Documented as README
-      limitation 12 rather than fixed.
+      limitation 14 rather than fixed.
 - [ ] **[23]/[24]** The long-run paths named in [24] remain unexercised: log rotation at
       `LogMaxBytes`, the full 900 s segment, `HealthyResetSeconds`, the 2250 s stall watchdog,
       `MaxRetentionDays`. README limitation 7 says so plainly.
@@ -909,3 +909,51 @@ explicit rather than a virtual-time budget racing the page. The page reported `i
       job released, and no "recording again" alert. It was started by hand and was recording 6/6
       twenty seconds later. The new camera-free `windowclose` check in the harness covers both the
       close and the terminate-the-warden case that must stay silent.
+
+
+---
+
+## U4 delivered 2026-10-13 - the UI installs like everything else, and the README covers it
+
+Last commission of the V1 control UI. The plan numbers these U4 items **[57]-[58]**, but those numbers
+were spent on the camera-down alert and the event source above, so they are recorded here as
+**[68]-[69]** in plan order. **V1 is complete.**
+
+- [x] **[68]** (plan [57]) `cam.ps1 -InstallUi` / `-RemoveUi`, on the launcher-stub and logon-task
+      pattern the recorder and the dashboard already use. The stub is NOT `New-CamLauncherStub`:
+      camui is not a script to forward to but a long-lived console program, so the launcher starts it
+      in a console of its OWN with no window (`CreateNoWindow` with `UseShellExecute` false). A
+      console created WITH a window is adopted as a tab in the Operator's Windows Terminal, which is
+      the measured failure that killed the supervisor four times on 2026-10-12. camui logs to stdout
+      only, so a thin `powershell.exe` holds the pipe and appends it to
+      `%LOCALAPPDATA%\IPCCTV\camui.log`, rolled past 10 MB.
+
+      The binary is never copied: the launcher waits for its path exactly as the other two wait for a
+      script's, so a rebuilt `camui.exe` takes effect on the next start with no reinstall. Starting a
+      second camui would only fail to bind, so the launcher exits without starting anything when the
+      address is already served, and exits non-zero when nothing is serving afterwards, which hands
+      the retry to the task's restart policy. `-InstallUi` refuses to install when `camui.exe` has not
+      been built, and does not start the UI - it prints the one command that does, which is the same
+      path logon takes.
+
+      Measured: install, reinstall and remove leave exactly one task and one launcher or none;
+      `-RemoveUi` with nothing installed is a clean exit 0 twice over; and `IPCCTV-Recorder`'s and
+      `IPCCTV-Dashboard`'s exported task XML is **byte-identical** (same md5) before the install,
+      after it and after the removal. A real `camui.config.json` was exercised end to end: the
+      launcher passed it, camui bound 127.0.0.1:8788 instead of the default, `-Status` reported the
+      new address and named the file it came from, and removing the file put it back on 8787.
+
+- [x] **[69]** (plan [58]) `cam.ps1 -Status` reports the UI - serving or stopped, its URL, the pid
+      that owns the port, the binary, where its address came from, whether a token is configured and
+      its logon task - and the README now documents the whole system. `cam.ps1` had no command
+      reference at all before this. Added: the UI as a feature and a prerequisite note, install steps
+      9 to 11, a `cam.ps1` and a `camui.exe` command reference, how the UI works including the
+      loopback guard and the exact config that exposes it with a token, the three logon tasks, the
+      five event ids with their levels, a "read this first" block at the top of Troubleshooting, and
+      limitations 12 and 13 (no seeking ahead of the buffer, and the two harness checks that skip
+      permanently on a live NVR). Limitation 7 corrected: the 900 s production segment is no longer
+      an unexercised path.
+
+      The UI is identified by the socket it OWNS, never by image name, so `-Status` stays honest when
+      something else has the port: it names that pid instead. It reads whether a token is configured,
+      never the token.
