@@ -1069,3 +1069,50 @@ The job is to work out what a person actually needs and demote the rest, NOT to 
 
 Judge the result by a simple test: can someone who has never seen the project get to the UI and
 understand what they are looking at within two minutes of opening the README?
+
+## Two UI defects the Operator found by using it, 2026-10-14 - items [78]-[79]
+
+> "the screenshot shows a persisting notification at the top, why is that? Such critical errors must
+> be logged, I must be notified accordingly but I need to also be able to close that notification
+> once I see it."
+>
+> "When clicking start, stop etc, it takes a while but the 'loading' animation is not showing that
+> well and it seems that it's stuck"
+
+- [x] **[78]** The persistent banner can be dismissed. `status.json` keeps `LastUnexpectedStop` and
+      `LastWindowClose` after the recorder is running again, deliberately - an outage must not be
+      erased by the recovery that followed it - so the banner stayed for ever with no way to say
+      "seen". Each now carries a Dismiss control.
+
+      The acknowledgement is keyed by the **event's own timestamp**, so it acknowledges one event
+      and is not a mute switch: a later stop carries a later timestamp, does not match, and appears.
+      Proved by constructing exactly that case against a test status file. It is stored server-side
+      in `_state\camui-acknowledged.json`, so it holds from any browser and survives a reload, and
+      never in `status.json`, which the supervisor rewrites every few seconds and which camui is not
+      a writer of. `POST /api/acknowledge` takes a closed list of notice keys; `GET /api/status`
+      reports what has been acknowledged. An unreadable sidecar reports nothing acknowledged, so the
+      banner shows - the safe direction for a notice about an outage.
+
+      `LastWindowClose` had a record written for it by the warden and nothing that ever rendered it.
+      It is now shown and dismissed by the same code path, which is what "every banner of this
+      class" required.
+
+- [x] **[79]** A long action now shows its elapsed seconds. Measured here: start everything 52.1s,
+      start recorder 27.3s, stop recorder 19.7s, stop everything 17.3s, stop viewers 15.2s, start
+      viewers 12.5s. The old indicator was a static toast reading "this takes a few seconds" plus a
+      sweep animation, neither of which changes over 52 seconds.
+
+      The seconds tick once a second on the pressed button and in a progress line beside it, which
+      also says how long that particular action usually takes, says plainly when it has run longer
+      than usual, and says plainly when it has passed the three-minute ceiling `controlTimeout`
+      allows. **No progress bar**: nothing can know what fraction of a start is done, and a bar
+      stalled at 80% is a worse lie than an honest counter. Every other action control and every
+      camera toggle stays disabled for the duration, as before.
+
+      Verified in one browser session driven over DevTools: the counter read 10s, 40s, 60s and 70s
+      at those moments, with the over-expectation message appearing past 52.1s.
+
+Deliberately NOT done, and left here rather than built: the camera record toggle still shows a
+static "…" while it is in flight. It was left alone because the commission named the six control
+actions and supplied measured durations only for those, and a toggle is one config rewrite rather
+than a process lifecycle operation. Its real duration has not been measured.
