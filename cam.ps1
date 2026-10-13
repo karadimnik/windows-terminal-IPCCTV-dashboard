@@ -174,6 +174,7 @@ function Get-CamComponentState {
     return [pscustomobject]@{
         Inventory       = $inventory
         Supervisor      = @($inventory | Where-Object { $_.Role -eq 'Supervisor' })
+        NvrHost         = @($inventory | Where-Object { $_.Role -eq 'NvrHost' })
         RecorderChild   = @($inventory | Where-Object { $_.Role -eq 'Recorder' })
         Relay           = @($inventory | Where-Object { $_.Role -eq 'Relay' })
         Warden          = @($inventory | Where-Object { $_.Role -eq 'Warden' })
@@ -266,7 +267,7 @@ function Show-CamStatus {
     }
     else {
         $State.Inventory |
-            Sort-Object @{ Expression = { @('Supervisor', 'Recorder', 'Relay', 'Warden', 'Pane', 'Viewer', 'Health').IndexOf($_.Role) } }, ProcessId |
+            Sort-Object @{ Expression = { @('NvrHost', 'Supervisor', 'Recorder', 'Relay', 'NvrWarden', 'Warden', 'Pane', 'Viewer', 'Health').IndexOf($_.Role) } }, ProcessId |
             Format-Table -AutoSize @{ Label = 'role'; Expression = { $_.Role } },
                 @{ Label = 'pid'; Expression = { $_.ProcessId } },
                 @{ Label = 'parent'; Expression = { $_.ParentProcessId } },

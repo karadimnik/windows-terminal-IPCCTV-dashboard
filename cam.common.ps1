@@ -1781,6 +1781,60 @@ function Get-CamStatusSnapshot {
 }
 
 
+function Set-CamStatusUnexpectedStop {
+    <#
+        Marks the status file as having stopped unexpectedly, in place.
+
+        Written by the NVR host rather than by the supervisor, because the case
+        that matters is the one where the supervisor was killed and never got
+        to write anything - the file is left saying "running" with a dead pid,
+        which is how 20:30 on 2026-10-12 looked for half an hour.
+
+        Patches rather than rewrites: everything else in the document - the
+        camera rows, the disk figures, the event tail - is the last true
+        reading and the UI still wants it. Through the same temp-then-rename
+        path as every other writer, so no reader sees a half-written file.
+
+        Never throws. Returns $true when the file was patched.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [int]$SupervisorPid = 0,
+        [string]$DetectedBy = 'nvr host'
+    )
+
+    $path = Get-CamStatusFilePath -Config $Config
+    $record = [pscustomobject]@{
+        At            = Format-CamTimestamp -Value ([DateTime]::Now)
+        Reason        = Get-CamRedacted -Text $Reason
+        SupervisorPid = $SupervisorPid
+        DetectedBy    = $DetectedBy
+    }
+
+    try {
+        $document = Get-CamStatusSnapshot -Config $Config
+        if (-not $document) {
+            $document = [pscustomobject]@{ Schema = 1; SupervisorPid = $SupervisorPid; UpdatedAt = $record.At }
+        }
+
+        $document | Add-Member -NotePropertyName 'State' -NotePropertyValue 'stopped' -Force
+        $document | Add-Member -NotePropertyName 'StopKind' -NotePropertyValue 'unexpected' -Force
+        $document | Add-Member -NotePropertyName 'LastUnexpectedStop' -NotePropertyValue $record -Force
+        $document | Add-Member -NotePropertyName 'UpdatedAt' -NotePropertyValue $record.At -Force
+
+        $json = Get-CamRedacted -Text (ConvertTo-Json -InputObject $document -Depth 6)
+        $dir = Split-Path -Path $path -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $temp = "$path.tmp"
+        [System.IO.File]::WriteAllText($temp, $json + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+        Move-CamFileAtomic -TempPath $temp -Path $path
+        return $true
+    }
+    catch { return $false }
+}
+
+
 function Get-CamSupervisorState {
     <#
         Decides whether the supervisor behind a snapshot is actually running.
@@ -2667,6 +2721,13 @@ function Get-CamProcessInventory {
         $decoded = Get-CamDecodedCommand -CommandLine $line
         $text = $line + "`n" + $decoded
 
+        if ($text -match 'Start-CamNvrHost') {
+            # The NVR pane. Not the supervisor - that is its child - but
+            # killing it would stop the restarts, so it is on the keep list
+            # with the rest of the recorder.
+            Add-InventoryItem 'NvrHost' $process 'the NVR pane, restarts the supervisor if it dies'
+            continue
+        }
         if ($text -match 'Start-CamNvrWarden') {
             # A role of its own, deliberately. Stop-CamDashboard stops every
             # 'Warden' it finds, and the NVR warden holds the only handle to
@@ -2834,7 +2895,7 @@ function Get-CamRecorderKeepList {
     if (-not $Inventory) { $Inventory = Get-CamProcessInventory }
     $keep = New-Object System.Collections.ArrayList
     foreach ($item in $Inventory) {
-        if ($item.Role -in @('Supervisor', 'Recorder', 'Relay', 'NvrWarden')) {
+        if ($item.Role -in @('Supervisor', 'Recorder', 'Relay', 'NvrWarden', 'NvrHost')) {
             if (-not $keep.Contains([int]$item.ProcessId)) { [void]$keep.Add([int]$item.ProcessId) }
         }
     }
@@ -3105,6 +3166,145 @@ function Start-CamNvrWarden {
 }
 
 
+function Start-CamNvrHost {
+    <#
+        The NVR pane. Runs the supervisor as a child, waits for it, and starts
+        it again when it stopped without being asked to.
+
+        WHY A HOST PROCESS AT ALL, when the pane could simply BE the
+        supervisor, as it was until now. Because from outside, a deliberate
+        window close and a crash look identical: both end with the supervisor
+        gone, the status file still saying "running" and the window destroyed,
+        and the warden watching that window cannot tell which it was. Guessing
+        wrong either way is bad - restart on a deliberate close and the
+        Operator cannot stop his own NVR; stay down on a crash and the cameras
+        record nothing until somebody looks.
+
+        Splitting the pane from the supervisor makes the two cases different
+        events rather than one ambiguous one:
+
+          window closed   this process and the supervisor share a console, so
+                          both take CTRL_CLOSE_EVENT and both die. The window
+                          goes. The cam.nvr warden sweeps the rest, exactly as
+                          before.
+          supervisor died this process is untouched, the window is still open,
+                          and the child exiting IS the signal. No window churn,
+                          no job handed over, no race with the warden: the
+                          restart happens here, in place, and the window keeps
+                          its log.
+
+        Expected or not is decided from what the supervisor recorded, never
+        from an exit code alone - a killed process has no say in its exit code:
+
+          stop flag present          somebody asked for this, even if the
+                                     orderly path had to be finished by a kill
+          StopKind requested         the supervisor saw the flag itself
+          StopKind interrupted       Ctrl+C or the tab, so a human did it
+          exit 20                    it refused to start, restarting cannot help
+          anything else              unexpected: alert and restart
+
+        The restart budget exists because a supervisor that dies on startup
+        would otherwise be restarted for ever. Out of budget, it alerts once
+        more and stops, leaving the window open with the reason on screen.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$RecorderPath,
+
+        # Enough to ride out a transient fault, few enough that a supervisor
+        # which cannot start is not restarted all night.
+        [int]$MaxRestarts = 5,
+        [int]$RestartWindowMinutes = 30,
+        [int]$RestartDelaySeconds = 5
+    )
+
+    Import-CamJobApi
+    $config = Get-CamConfig
+    $paths = Get-CamPaths -Config $config
+    $log = Join-Path -Path $paths.LogDir -ChildPath 'recorder.log'
+    $maxBytes = [int]$config.LogMaxBytes
+    $stopFlag = Get-CamStopFlagPath -Config $config
+    $jobName = Get-CamSupervisorJobName -Config $config
+    $powershell = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $restarts = New-Object System.Collections.ArrayList
+
+    Write-CamLog -Path $log -Message ("nvr host pid {0} starting the supervisor; it will be restarted if it stops without being asked to" -f $PID) -MaxBytes $maxBytes
+
+    while ($true) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $powershell
+        # -Command rather than -File: -File binds an array parameter as one
+        # string, and this console is inherited either way, which is what puts
+        # the supervisor's log on the NVR window.
+        $psi.Arguments = ("-NoProfile -ExecutionPolicy Bypass -Command ""& '{0}' -Run""" -f $RecorderPath.Replace("'", "''"))
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $false
+        $child = [System.Diagnostics.Process]::Start($psi)
+        [void]$child.Handle
+        $startedAt = [DateTime]::Now
+
+        $child.WaitForExit()
+        $code = $child.ExitCode
+        $ranFor = ([DateTime]::Now - $startedAt).TotalSeconds
+
+        $requested = (Test-Path -LiteralPath $stopFlag)
+        $stopKind = ''
+        $snapshot = Get-CamStatusSnapshot -Config $config
+        if ($snapshot) { $stopKind = [string]$snapshot.StopKind }
+
+        if ($requested -or $stopKind -eq 'requested' -or $stopKind -eq 'interrupted') {
+            Write-CamLog -Path $log -Message ("the supervisor (pid {0}) stopped as asked after {1}s, exit {2} ({3}). The NVR host is done." -f `
+                    $child.Id, [int]$ranFor, $code, $(if ($stopKind) { $stopKind } else { 'stop flag present' })) -MaxBytes $maxBytes
+            return
+        }
+
+        if ($code -eq 20) {
+            Write-CamLog -Path $log -Message ("the supervisor refused to start: another one is already running. Restarting would not help, so the NVR host is done." -f $code) -MaxBytes $maxBytes
+            return
+        }
+
+        # Everything left is a stop nobody asked for.
+        $reason = "the supervisor (pid {0}) stopped after {1}s without being asked to (exit {2})" -f $child.Id, [int]$ranFor, $code
+        if ($stopKind -eq 'unexpected' -and $snapshot -and $snapshot.LastUnexpectedStop) {
+            $reason = "{0}: {1}" -f $reason, [string]$snapshot.LastUnexpectedStop.Reason
+        }
+        else {
+            # It was killed outright, so it never recorded anything. The status
+            # file still claims it is running; say otherwise before alerting,
+            # so the UI and the alert agree.
+            [void](Set-CamStatusUnexpectedStop -Config $config -Reason $reason -SupervisorPid $child.Id)
+        }
+
+        $cutoff = [DateTime]::Now.AddMinutes(-$RestartWindowMinutes)
+        while ($restarts.Count -gt 0 -and $restarts[0] -lt $cutoff) { $restarts.RemoveAt(0) }
+
+        if ($restarts.Count -ge $MaxRestarts) {
+            [void](Send-CamAlert -Title 'the NVR has stopped and is NOT coming back' `
+                    -Message ("{0}. It has already been restarted {1} times in {2} minutes, so it is not being restarted again. Nothing is recording." -f `
+                        $reason, $restarts.Count, $RestartWindowMinutes) `
+                    -EventId 102 -EntryType 'Error' -LogPath $log -LogMaxBytes $maxBytes)
+            return
+        }
+
+        [void](Send-CamAlert -Title 'the NVR stopped unexpectedly' `
+                -Message ("{0}. MediaMTX and every ffmpeg stopped with it. Restarting it in {1}s." -f $reason, $RestartDelaySeconds) `
+                -EventId 100 -EntryType 'Error' -LogPath $log -LogMaxBytes $maxBytes)
+
+        # The next supervisor creates a job of the same name, so wait for the
+        # kernel to finish sweeping the last one rather than letting it start
+        # without crash safety.
+        $deadline = [DateTime]::Now.AddSeconds(20)
+        while ([CamJob]::Exists($jobName) -and [DateTime]::Now -lt $deadline) { Start-Sleep -Milliseconds 250 }
+
+        Start-Sleep -Seconds $RestartDelaySeconds
+        [void]$restarts.Add([DateTime]::Now)
+        [void](Send-CamAlert -Title 'the NVR is recording again' `
+                -Message ("restarted the supervisor after an unexpected stop; this is restart {0} of {1} allowed in {2} minutes." -f `
+                    $restarts.Count, $MaxRestarts, $RestartWindowMinutes) `
+                -EventId 101 -EntryType 'Warning' -LogPath $log -LogMaxBytes $maxBytes)
+    }
+}
+
+
 function Start-CamNvrWindow {
     <#
         Opens the NVR: one Windows Terminal window of its own, titled
@@ -3183,10 +3383,12 @@ function Start-CamNvrWindow {
         Start-Sleep -Milliseconds 250
     }
 
-    # The pane joins the job, then becomes the supervisor. One process: the
-    # pane IS the supervisor, so the inventory finds it as the parent of every
-    # ffmpeg exactly as before.
-    $paneScript = ". '{0}'`nAdd-CamJobMember -JobName '{1}'`n& '{2}' -Run" -f `
+    # The pane joins the job, then hosts the supervisor as a child so that a
+    # crash is distinguishable from the Operator closing the window - see
+    # Start-CamNvrHost. The supervisor inherits this pane's job membership and
+    # its console, so MediaMTX and every ffmpeg are still swept by the window
+    # closing and the supervisor log is still on screen.
+    $paneScript = ". '{0}'`nAdd-CamJobMember -JobName '{1}'`nStart-CamNvrHost -RecorderPath '{2}'" -f `
         $libPath.Replace("'", "''"), $jobName.Replace("'", "''"), $recorderPath.Replace("'", "''")
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($paneScript))
 
