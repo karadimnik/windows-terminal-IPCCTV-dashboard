@@ -728,3 +728,66 @@ After an orderly `cam.ps1 -Stop -Recorder` the NVR window stays open with its pa
 `cam.ps1 -Start` then finds a window titled `cam.nvr` and reports "there is nothing to do" without
 starting anything. Pre-existing - the pane could not be made to run a second supervisor before
 either. The restore today is to close the window and run `-Nvr` again.
+
+
+## U2 delivered 2026-10-13 - control actions and settings editing
+
+Second commission of the V1 control UI (plan `~/.claude/plans/luminous-wibbling-allen.md`). The plan
+numbers these U2 items **[50]-[53]**, but those numbers were already spent on the NVR window above,
+so they are recorded here as **[59]-[62]** in plan order. (This file already notes [42] being used
+twice for the same reason.)
+
+- [x] **[59]** (plan [50]) `POST /api/control` taking `{scope: all|recorder|dashboard, action:
+      start|stop}` and shelling to `cam.ps1`, plus `POST /api/cameras/{name}/record` taking
+      `{enabled}` and shelling to `cam.recorder.ps1 -Enable|-Disable`. One action at a time: a second
+      request while one is running is answered 409 rather than allowed to race it. The page shows the
+      pressed button as `Stopping...`, disables every other action, and keeps polling.
+- [x] **[60]** (plan [51]) `GET/PUT /api/cameras`. Name non-empty, filesystem-safe, not a reserved
+      Windows device name, no duplicate and no two names that would collide to the same archive
+      FOLDER; address a valid IP literal or RFC 1123 hostname with no scheme, port, path or
+      userinfo; stream name non-empty and conservative. Any invalid row refuses the WHOLE request
+      with 422 and a per-field message, and the writer is not invoked at all. Writes go through
+      `Set-CamList` by way of `ui/scripts/camui-apply.ps1`, which is embedded in the binary.
+- [x] **[61]** (plan [52]) `GET/PUT /api/config` over the allow-list `SegmentSeconds`, `ReserveGB`,
+      `PruneHysteresisGB`, `MaxRetentionDays`, with ranges and a message that says what would be
+      right. The GET is built key by key FROM the allow-list rather than by removing keys from the
+      document, so a key added to `recorder.config.json` later cannot leak through it.
+- [x] **[62]** (plan [53]) Confirmation on exactly the actions that stop footage being written: stop
+      everything, stop the recorder, turn a camera's recording off, remove a camera row, and saving a
+      camera list that does either. Starting anything and stopping the VIEWERS are not confirmed -
+      a prompt on a harmless action teaches the Operator to dismiss prompts.
+
+### Three defects found by running it, not by reading it
+
+**A control action hung on the processes it started.** `POST /api/control
+{scope:dashboard,action:start}` brought six viewer panes up in 20 s and then did not return for over
+four minutes, holding the action lock so the next six requests were all answered 409.
+`cmd.CombinedOutput` gives the child a PIPE and Wait blocks until every holder closes it - and the
+panes inherit it and live for hours. The child's output now goes to a temp `*os.File`, which Go hands
+over directly with no copying goroutine, so Wait returns when the script exits.
+
+**The camera writer matched no rows at all.** `@(Get-CamList)` nests: the function ends in
+`return , @($parsed)` to stop a one-camera list collapsing to a scalar, and wrapping that CALL in
+`@()` yields one element whose value is the whole list. Every name comparison then ran against a
+space-joined string of all six names, so a valid save was refused with "No camera named 'X' is in
+cameras.json". Assign first, then wrap. Already in the executor memory store as
+`powershell-array-return-nesting.md`, and it fired exactly as written there.
+
+**A start was reported as success when nothing started.** `cam.ps1 -Start -Recorder` exited 0 having
+printed "did not report running within 20s". The page now reads the outcome back from `/api/status`
+and says "...returned success, but the recorder is still not running: <reason>. Nothing is being
+captured."
+
+### The known gap above, measured - and it is not in camui
+
+- [ ] **[63]** NOT FIXED, and it bit this commission: after `cam.ps1 -Stop -Recorder`, the NVR's
+      pane and warden survive, so the next `-Start -Recorder` cannot bring the supervisor back and
+      exits 0 anyway. Measured today with the Operator's dashboard open, which makes it worse: the
+      NVR tab had been ADOPTED into the dashboard's Windows Terminal window, so no window titled
+      `cam.nvr` existed at all and `-Nvr` refused with "the job 'cam.nvr' already exists but no
+      window titled 'cam.nvr' is open". **`cam.ps1 -Start -Recorder` run directly from a plain
+      PowerShell failed identically, so this is a recorder-side gap, not a UI one.** Recovery was to
+      stop the `NvrHost` and `NvrWarden` by pid from `Get-CamProcessInventory` and run `-Nvr` again.
+      Two fixes, neither in U2's scope: `"windowingBehavior": "useNew"` in the Operator's own Windows
+      Terminal settings (already his to make), and `-Stop -Recorder` taking the NVR host down with
+      the supervisor so `-Start` has nothing stale to trip over.
