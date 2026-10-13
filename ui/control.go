@@ -249,7 +249,6 @@ func runPowerShell(scriptDir string, timeout time.Duration, script string, args 
 	// Belt and braces for the timeout path: if the context kills the script,
 	// do not wait indefinitely for anything else it left behind.
 	cmd.WaitDelay = 5 * time.Second
-	hideChildWindow(cmd)
 
 	runErr := cmd.Run()
 	result.Duration = time.Since(started)

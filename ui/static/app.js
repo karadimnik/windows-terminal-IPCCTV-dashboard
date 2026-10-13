@@ -358,18 +358,37 @@ async function runControl(scope, action) {
   try {
     const { ok, payload } = await sendJSON("POST", "api/control", { scope, action });
     const verb = action === "start" ? "Start" : "Stop";
-    if (ok && payload.ok) {
-      toast("good", verb + " " + SCOPE_LABEL[scope] + " finished in " +
-        (payload.durationMs / 1000).toFixed(1) + "s.", payload.output);
-    } else {
+    if (!ok || !payload.ok) {
       toast("crit", verb + " " + SCOPE_LABEL[scope] + " failed: " + (payload.error || "unknown error"), payload.output);
+      return;
+    }
+
+    // An exit code of zero is not proof that the state changed. cam.ps1 -Start
+    // can return 0 having reported that the supervisor never came up, and
+    // reporting that as success is how a UI tells the Operator he is recording
+    // when he is not. The outcome is read back from the status endpoint, which
+    // decides liveness from the supervisor's own process.
+    await poll();
+    const took = (payload.durationMs / 1000).toFixed(1) + "s";
+    const running = !!(last && last.supervisor && last.supervisor.running);
+    const touchesRecorder = scope === "all" || scope === "recorder";
+    if (touchesRecorder && action === "start" && !running) {
+      toast("warn", verb + " " + SCOPE_LABEL[scope] + " ran for " + took +
+        " and returned success, but the recorder is still not running: " +
+        ((last && last.supervisor && last.supervisor.reason) || "no status") +
+        ". Nothing is being captured.", payload.output);
+    } else if (touchesRecorder && action === "stop" && running) {
+      toast("warn", verb + " " + SCOPE_LABEL[scope] + " ran for " + took +
+        " and returned success, but the recorder is still running.", payload.output);
+    } else {
+      toast("good", verb + " " + SCOPE_LABEL[scope] + " finished in " + took + ".", payload.output);
     }
   } catch (err) {
     toast("crit", "The server could not be reached: " + (err.message || err));
   } finally {
     busyControl = null;
     renderControls();
-    poll();
+    await poll();
   }
 }
 

@@ -340,6 +340,7 @@ function Start-CamTestUi {
     param(
         [int]$Port = 18787,
         [string]$StatusFile,
+        [string]$ScriptDir,
         [string]$Token
     )
 
@@ -350,6 +351,11 @@ function Start-CamTestUi {
     if (-not $StatusFile) {
         $StatusFile = Join-Path -Path ([string](Get-CamConfig).RootPath) -ChildPath '_state\status.json'
     }
+    # The repository, not the %TEMP% copy's own directory: /api/cameras and
+    # /api/config read cameras.json and recorder.config.json from here, and the
+    # point of the leak scan is to prove the OPERATOR's real files do not leak.
+    # Both endpoints are read-only in this scan; nothing is written.
+    if (-not $ScriptDir) { $ScriptDir = Get-CamTestRepo }
 
     $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\camui'
     [void](New-Item -ItemType Directory -Path $dir -Force)
@@ -362,7 +368,7 @@ function Start-CamTestUi {
 
     if ($Token) { $env:CAMUI_TOKEN = $Token } else { Remove-Item Env:\CAMUI_TOKEN -ErrorAction SilentlyContinue }
     $process = Start-Process -FilePath $exe `
-        -ArgumentList '-listen', ("127.0.0.1:{0}" -f $Port), '-status-file', $StatusFile `
+        -ArgumentList '-listen', ("127.0.0.1:{0}" -f $Port), '-status-file', $StatusFile, '-script-dir', $ScriptDir `
         -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
 
     $base = "http://127.0.0.1:$Port"
@@ -384,6 +390,7 @@ function Start-CamTestUi {
         BaseUrl    = $base
         Port       = $Port
         StatusFile = $StatusFile
+        ScriptDir  = $ScriptDir
         StdOut     = $out
         StdErr     = $err
     }
@@ -429,6 +436,14 @@ function Invoke-CamUiCredentialLeakScan {
             catches Restreamer.RelayBase and an ffmpeg error carrying an
             rtsp:// URL.
 
+        /api/cameras is in the list and is the one response that legitimately
+        contains camera addresses: cameras.json is the Operator's own file and
+        an editor that cannot show what it is editing is not an editor. A bare
+        dotted quad is therefore not a hit - but a URL of any scheme still is,
+        so a credential or a relay base appearing there is still caught. The
+        allow-list behind /api/config is what the URL rule tests there:
+        RelayBase lives in recorder.config.json and must not come through.
+
         Needles are read from the DPAPI store into memory and are never printed
         or written anywhere. A clean scan proves nothing on its own, so a
         synthetic body carrying all three shapes is run through the same
@@ -436,7 +451,7 @@ function Invoke-CamUiCredentialLeakScan {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [string[]]$Paths = @('/', '/index.html', '/style.css', '/app.js', '/api/status'),
+        [string[]]$Paths = @('/', '/index.html', '/style.css', '/app.js', '/api/status', '/api/cameras', '/api/config'),
         [string]$Token
     )
 

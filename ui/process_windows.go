@@ -2,10 +2,7 @@
 
 package main
 
-import (
-	"os/exec"
-	"syscall"
-)
+import "syscall"
 
 // processQueryLimitedInformation is the least access that answers "does this
 // PID exist and has it exited". PROCESS_QUERY_INFORMATION would also work and
@@ -33,11 +30,4 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return code == stillActive
-}
-
-// hideChildWindow keeps a shelled-out powershell.exe from flashing a console
-// window of its own. It does not affect the NVR window, which cam.recorder.ps1
-// opens through wt.exe as a window in its own right.
-func hideChildWindow(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 }

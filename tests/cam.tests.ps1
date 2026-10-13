@@ -775,7 +775,9 @@ function Invoke-CamCheckUiLeak {
         The same question as 'leak', asked of the WIRE instead of the disk:
         camui.exe is started on loopback and every endpoint it serves is
         fetched and scanned for the camera password, for the username in URL
-        userinfo shape, and for any URL at all.
+        userinfo shape, and for any URL at all. That now includes the two
+        settings endpoints, /api/cameras and /api/config, which read the
+        Operator's own cameras.json and recorder.config.json.
 
         Frigate's CVE-2026-33469 leaked camera RTSP credentials to any
         logged-in viewer, so a redacted status file is not the deliverable -
@@ -812,7 +814,9 @@ function Invoke-CamCheckUiLeak {
         })
         $evidence += @($result.Hits | ForEach-Object { 'HIT ' + $_ })
 
-        # RelayBase by name: the one status field that always carries a URL.
+        # RelayBase by name, in BOTH places it lives. In status.json it is
+        # Restreamer.RelayBase; in recorder.config.json it is a top-level key,
+        # and keeping it out of /api/config is the whole job of the allow-list.
         $raw = (New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + '/api/status'))
         if ($raw -match 'RelayBase') {
             $ok = $false
@@ -824,6 +828,46 @@ function Invoke-CamCheckUiLeak {
         $status = ($raw | ConvertFrom-Json)
         $relayKeys = @(($status.status.Restreamer | Get-Member -MemberType NoteProperty).Name)
         $evidence += ('  Restreamer keys served: ' + ($relayKeys -join ', '))
+
+        $configRaw = (New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + '/api/config'))
+        $config = ($configRaw | ConvertFrom-Json)
+        $servedKeys = @(($config.config | Get-Member -MemberType NoteProperty).Name)
+        $expectedKeys = @('SegmentSeconds', 'ReserveGB', 'PruneHysteresisGB', 'MaxRetentionDays')
+        $unexpected = @($servedKeys | Where-Object { $expectedKeys -notcontains $_ })
+        if ($unexpected.Count -gt 0) {
+            $ok = $false
+            $evidence += ('HIT /api/config served keys outside the allow-list: ' + ($unexpected -join ', '))
+        }
+        else {
+            $evidence += ('  /api/config served exactly the allow-list: ' + ($servedKeys -join ', '))
+        }
+        # The file holds more than the allow-list, so a filter that does nothing
+        # would pass the test above by accident. Prove the file is bigger.
+        $fileKeys = @(((Get-Content -Raw -LiteralPath (Join-Path -Path $repo -ChildPath 'recorder.config.json') |
+            ConvertFrom-Json) | Get-Member -MemberType NoteProperty).Name)
+        $evidence += ('  recorder.config.json holds {0} key(s); {1} are published' -f $fileKeys.Count, $servedKeys.Count)
+        if ($fileKeys.Count -le $servedKeys.Count) {
+            $ok = $false
+            $evidence += 'HIT the allow-list filtered nothing, so it proves nothing'
+        }
+
+        # The camera list is the one response allowed to carry addresses, and
+        # only because the Operator types them. Assert it carries NOTHING else:
+        # no credential field, and no field beyond the four that are editable.
+        $camerasRaw = (New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + '/api/cameras'))
+        $cameraRows = @(($camerasRaw | ConvertFrom-Json).cameras)
+        $rowKeys = @()
+        foreach ($row in $cameraRows) { $rowKeys += @(($row | Get-Member -MemberType NoteProperty).Name) }
+        $rowKeys = @($rowKeys | Select-Object -Unique)
+        $allowedRowKeys = @('name', 'ip', 'quality', 'record')
+        $extraRowKeys = @($rowKeys | Where-Object { $allowedRowKeys -notcontains $_ })
+        if ($extraRowKeys.Count -gt 0) {
+            $ok = $false
+            $evidence += ('HIT /api/cameras served fields outside the editable four: ' + ($extraRowKeys -join ', '))
+        }
+        else {
+            $evidence += ('  /api/cameras served {0} row(s) with only: {1}' -f $cameraRows.Count, ($rowKeys -join ', '))
+        }
     }
     finally {
         $logLines = @(Stop-CamTestUi -Ui $ui)
@@ -831,7 +875,7 @@ function Invoke-CamCheckUiLeak {
     $evidence += @($logLines | Where-Object { $_ -match 'msg="camui listening"' } | ForEach-Object { '  ' + $_ })
 
     Add-CamTestResult -Run $Run -Check 'uileak' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
-        -Message 'no camera password, no credential in URL userinfo shape and no URL of any scheme in any camui response' `
+        -Message 'no camera password, no credential in URL userinfo shape and no URL of any scheme in any camui response, including the two settings endpoints' `
         -Evidence $evidence
 }
 
