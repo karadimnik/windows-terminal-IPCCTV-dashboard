@@ -307,6 +307,13 @@ function Get-CamConfigDefault {
         # from the status cadence because it touches every segment file, which
         # is too much work to repeat every 5 s.
         ArchiveScanSeconds   = 60
+        # How long a camera may write nothing before the Operator is alerted,
+        # and how long before the same camera alerts again while still down.
+        # Measured from the later of the supervisor's own start and the
+        # camera's newest segment - NEVER from the child's StartedAt, which a
+        # camera that is failing to connect refreshes on every retry.
+        CameraDownAlertMinutes = 15
+        CameraDownRepeatHours  = 12
         # How long -Stop waits for the supervisor to tear its children down.
         StopTimeoutSeconds   = 30
         BackoffStartSeconds  = 3

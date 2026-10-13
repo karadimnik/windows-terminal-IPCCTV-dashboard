@@ -1565,6 +1565,10 @@ function New-CamChildEntry {
     $entry.Dir = $CameraDir
     $entry.Pattern = $Pattern
     $entry.Scan = $null
+    # When this camera was last seen writing, once it has been judged down, and
+    # when that was last alerted on. Null while it is healthy.
+    $entry.DownSince = $null
+    $entry.DownAlertedAt = $null
 
     return $entry
 }
@@ -2451,6 +2455,7 @@ function Write-CamStatusFile {
             LastErrorAt                   = $lastErrorAt
             ArchiveFiles                  = $(if ($scan) { $scan.Files } else { $null })
             ArchiveBytes                  = $(if ($scan) { $scan.Bytes } else { $null })
+            DownSince                     = $(if ($entry) { Format-CamTimestamp -Value $entry.DownSince } else { $null })
             ConfigError                   = Get-CamRedacted -Text ([string]$camera.Error)
         }
     }
@@ -3092,6 +3097,10 @@ function Invoke-CamSupervisor {
     $staggerMs = 300
     try { $staggerMs = [int]$Config.StartStaggerMs } catch { }
     if ($staggerMs -lt 0) { $staggerMs = 0 }
+    $downAlertSeconds = 900
+    try { $downAlertSeconds = [double]$Config.CameraDownAlertMinutes * 60 } catch { }
+    $downRepeatHours = 12
+    try { $downRepeatHours = [double]$Config.CameraDownRepeatHours } catch { }
 
     # One supervisor per archive. Two would each start a child per camera, and
     # these cameras serve only two RTSP sessions each - the second supervisor
@@ -3375,6 +3384,52 @@ function Invoke-CamSupervisor {
 
             if ($statusDue) {
                 $lastStatus = $now
+
+                # A camera that is down is as serious as a supervisor that
+                # stopped, and nothing was telling him: two of these cameras
+                # had been dark for 15 and 33 hours before anyone noticed.
+                #
+                # Judged on FILE PROGRESS alone. Process liveness is useless
+                # here - a camera that cannot be reached has its child
+                # restarted every backoff period, so it is alive half the time
+                # and its StartedAt is always recent. Segments either appear or
+                # they do not.
+                foreach ($entry in @($children.Values)) {
+                    $progress = $null
+                    if ($entry.Scan) {
+                        $progress = $entry.Scan.NewestClosedWrite
+                        if ($entry.Scan.CurrentCreated -and ($null -eq $progress -or $entry.Scan.CurrentCreated -gt $progress)) {
+                            $progress = $entry.Scan.CurrentCreated
+                        }
+                    }
+                    # The supervisor's own start is the floor: a camera that was
+                    # already dead before this run cannot be reported as down
+                    # for longer than there has been anything watching it.
+                    $reference = $startedAt
+                    if ($null -ne $progress -and [DateTime]$progress -gt $reference) { $reference = [DateTime]$progress }
+                    $downSeconds = ($now - $reference).TotalSeconds
+
+                    if ($downSeconds -le $downAlertSeconds) {
+                        if ($entry.DownSince) {
+                            Write-CamLog -Path $supervisorLog -Message ("{0} is writing again after {1} down" -f `
+                                    $entry.Name, (Format-CamAgeText -Seconds ($now - $entry.DownSince).TotalSeconds)) -MaxBytes $maxBytes
+                        }
+                        $entry.DownSince = $null
+                        $entry.DownAlertedAt = $null
+                        continue
+                    }
+
+                    if ($null -eq $entry.DownSince) { $entry.DownSince = $reference }
+                    $due = ($null -eq $entry.DownAlertedAt) -or (($now - $entry.DownAlertedAt).TotalHours -ge $downRepeatHours)
+                    if (-not $due) { continue }
+
+                    $entry.DownAlertedAt = $now
+                    [void](Send-CamAlert -Title 'a camera has stopped recording' `
+                            -Message ("{0} has written nothing for {1}. Last error: {2}" -f `
+                                $entry.Name, (Format-CamAgeText -Seconds $downSeconds), `
+                                $(if ($entry.LastError) { $entry.LastError } else { 'none recorded' })) `
+                            -EventId 110 -EntryType 'Warning' -LogPath $supervisorLog -LogMaxBytes $maxBytes)
+                }
 
                 if (($now - $lastArchiveScan).TotalSeconds -ge [double]$Config.ArchiveScanSeconds) {
                     $lastArchiveScan = $now
