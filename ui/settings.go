@@ -324,21 +324,21 @@ func validateCameras(rows []CameraPut) []FieldError {
 			invalid = append(invalid, FieldError{Row: i, Field: "name", Message: message})
 		} else {
 			key := strings.ToUpper(strings.TrimSpace(row.Name))
+			safe := strings.ToUpper(safeCameraName(row.Name))
+
 			if first, seen := names[key]; seen {
 				invalid = append(invalid, FieldError{Row: i, Field: "name",
 					Message: fmt.Sprintf("another camera on row %d already has this name", first+1)})
-			} else {
-				names[key] = i
-			}
-
-			// Two names that differ only in a character the filesystem cannot
-			// keep would share one archive directory, and the second camera's
-			// footage would land in the first camera's folder.
-			safe := strings.ToUpper(safeCameraName(row.Name))
-			if first, seen := safeNames[safe]; seen {
+			} else if first, seen := safeNames[safe]; seen {
+				// Checked only when the names themselves differ, so a plain
+				// duplicate is reported once rather than twice: two names that
+				// differ only in a character the filesystem cannot keep would
+				// still share one archive directory, and the second camera's
+				// footage would land in the first camera's folder.
 				invalid = append(invalid, FieldError{Row: i, Field: "name",
 					Message: fmt.Sprintf("this name and the one on row %d would share the same folder on disk (%s)", first+1, safeCameraName(row.Name))})
 			} else {
+				names[key] = i
 				safeNames[safe] = i
 			}
 		}
