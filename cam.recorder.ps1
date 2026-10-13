@@ -3051,6 +3051,20 @@ function Invoke-CamSupervisor {
         Write-CamLog -Path $supervisorLog -Message 'cleared a leftover stop request from an earlier run' -MaxBytes $maxBytes
     }
 
+    # BEFORE anything is started: job membership is inherited at creation, so
+    # MediaMTX and every ffmpeg have to be spawned from inside the job. This is
+    # what makes a crash take the children with it; the cam.nvr job only fires
+    # when the window closes, and nothing was watching for the supervisor
+    # simply dying.
+    $jobResult = Enter-CamSupervisorJob -Config $Config
+    if ($jobResult.Joined) {
+        Write-CamLog -Path $supervisorLog -Message ("owns the job '{0}' - MediaMTX and every ffmpeg stop if this process dies" -f $jobResult.JobName) -MaxBytes $maxBytes
+    }
+    else {
+        Write-CamLog -Path $supervisorLog -Message ("WARNING: could not create the job '{0}': {1}. Recording continues, but ffmpeg and MediaMTX would OUTLIVE a crash of this process." -f `
+                $jobResult.JobName, $jobResult.Problem) -MaxBytes $maxBytes
+    }
+
     $startedAt = [DateTime]::Now
     $children = @{}
     $cameras = @()

@@ -2098,6 +2098,43 @@ public static class CamJob
         return true;
     }
 
+    // Creates the job, arms it, puts THIS process in it and KEEPS the handle.
+    // The opposite of JoinCurrentProcess: here the caller IS the owner, so the
+    // handle must stay open for as long as it lives. Its death - however
+    // abrupt - closes the handle, and that close is what takes everything it
+    // started afterwards.
+    //
+    // A process already inside another job can still do this: jobs nest, and
+    // the new job becomes a child of the one it is already in. Measured
+    // 2026-10-13 - the outer job was unaffected and the inner one swept both
+    // children in under a second.
+    public static IntPtr CreateAndJoin(string name)
+    {
+        IntPtr job = CreateJobObject(IntPtr.Zero, name);
+        int err = Marshal.GetLastWin32Error();
+        if (job == IntPtr.Zero) {
+            throw new InvalidOperationException("CreateJobObject failed, error " + err);
+        }
+        if (err == AlreadyExists) {
+            CloseHandle(job);
+            throw new InvalidOperationException("a job object named '" + name + "' already exists");
+        }
+        try { SetKillOnClose(job, true); }
+        catch { CloseHandle(job); throw; }
+        if (!AssignProcessToJobObject(job, GetCurrentProcess())) {
+            int assignError = Marshal.GetLastWin32Error();
+            CloseHandle(job);
+            throw new InvalidOperationException("AssignProcessToJobObject failed, error " + assignError);
+        }
+        bool inJob;
+        IsProcessInJob(GetCurrentProcess(), job, out inJob);
+        if (!inJob) {
+            CloseHandle(job);
+            throw new InvalidOperationException("assign reported success but membership did not take");
+        }
+        return job;
+    }
+
     // Called by each pane. Closing our handle is what makes the owner's
     // handle the last one, and the last one is what arms the kill.
     public static string JoinCurrentProcess(string name)
@@ -2187,6 +2224,62 @@ function Get-CamNvrWtWindowName {
         stop the whole system. With -w the NVR is a window of its own.
     #>
     return 'ipcctv-nvr'
+}
+
+
+function Get-CamSupervisorJobName {
+    <#
+        The job the SUPERVISOR owns and holds the only handle to, so that its
+        own death - a crash, a kill, anything that skips the finally block -
+        takes MediaMTX and every ffmpeg with it.
+
+        Distinct from the cam.nvr job, which is owned by the warden and fires
+        on the WINDOW closing. The supervisor is a member of both: cam.nvr
+        covers "the Operator closed the NVR", this one covers "the supervisor
+        died on its own". Before it existed, a supervisor that crashed left
+        four ffmpeg writing with no pruner, no watchdog and no status.
+
+        Named per archive root, because "one supervisor per archive" is the
+        invariant the whole design rests on. A test sandbox recording
+        somewhere else therefore gets a job of its own and does not collide
+        with the live NVR.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $root = [string]$Config.RootPath
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($root.ToLowerInvariant())) }
+    finally { $sha.Dispose() }
+    $short = ([System.BitConverter]::ToString($hash, 0, 4)).Replace('-', '').ToLowerInvariant()
+    return "cam.supervisor.$short"
+}
+
+
+function Enter-CamSupervisorJob {
+    <#
+        Puts the calling supervisor into a job object of its own and keeps the
+        handle for the life of the process. Call it BEFORE starting MediaMTX or
+        any ffmpeg - membership is inherited at creation, so anything started
+        before the join stays outside and would survive.
+
+        Never throws. Crash safety is worth a great deal and recording is worth
+        more, so a supervisor that cannot create its job says so loudly and
+        records anyway.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    Import-CamJobApi
+    $name = Get-CamSupervisorJobName -Config $Config
+    $result = @{ JobName = $name; Joined = $false; Problem = '' }
+    try {
+        # Held in a script-scoped variable so the intent is visible. The handle
+        # is a value type with no finaliser, so nothing but process exit can
+        # close it - which is exactly the lifetime wanted.
+        $script:CamSupervisorJobHandle = [CamJob]::CreateAndJoin($name)
+        $result.Joined = $true
+    }
+    catch { $result.Problem = $_.Exception.Message }
+    return $result
 }
 
 
