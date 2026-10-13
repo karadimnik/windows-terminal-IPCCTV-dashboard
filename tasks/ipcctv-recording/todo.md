@@ -865,3 +865,47 @@ event held open. Every one of those produced a page with its data regions empty,
 like a broken screen. The capture is now driven over the DevTools protocol instead -
 `Emulation.setDeviceMetricsOverride` gives a real 390 px viewport with no clamp, and the wait is
 explicit rather than a virtual-time budget racing the page. The page reported `innerWidth=390`.
+
+---
+
+## The window close now tells him - item [67], 2026-10-13
+
+- [x] **[67]** DONE 2026-10-13. Closing the NVR window raises one alert on all three channels and
+      **nothing auto-restarts** - the Operator's explicit decision. The close stays deliberate and
+      absolute; he just finds out it happened.
+
+      The gap it closes was measured the same day. At 19:00:36 something closed the NVR window, the
+      warden did exactly what it is designed to do, and the machine sat with nothing recording and
+      no dashboard for 66 seconds until a human noticed. The `IPCCTV-Recorder` task had already run
+      to completion when it opened the window, so its restart-on-failure policy had nothing to
+      restart and the only automatic recovery was the next logon.
+
+      `Start-CamJobWarden` gained `-AlertOnWindowClose`, passed only by `Start-CamNvrWarden`: the
+      viewer grid closing costs nothing the Operator cannot see for himself, and alerting on it
+      would be the noise that teaches him to ignore the alerts that matter. The alert goes after
+      the job handle closes, never before - anything that runs there leaves the job's members
+      orphaned for as long as it takes - and before the viewers are stopped, because that call goes
+      through `cam.ps1` and takes twenty seconds.
+
+      **Event id 103, not another 100.** 100 is "the supervisor stopped unexpectedly" and the log is
+      where he reads back what happened; a close and a crash need different answers from him. The
+      wording says the window was closed rather than that something stopped unexpectedly, because
+      nothing malfunctioned, and the entry is a Warning where the crash is an Error. `status.json`
+      gets `StopKind` `window-closed` and a `LastWindowClose` record with its timestamp, written by
+      the warden because the supervisor took `CTRL_CLOSE_EVENT` with the window and never got to
+      write anything. `ui/` was not touched: `supervisor.go` already reports any non-requested
+      StopKind and `app.js` already renders it.
+
+      **`cam.ps1 -Stop` still raises nothing, and it is structural rather than a condition to get
+      right.** `Stop-CamNvr` terminates the warden while the window is still open, so it never
+      reaches the window-gone branch at all. Measured across an orderly stop: 37 event entries
+      before and 37 after, 18 `ALERT` lines in `recorder.log` before and 18 after, and
+      `StopKind` `requested` with no `LastWindowClose`.
+
+      Verified live on the Operator's own NVR, twice. The toast rendered (screenshotted), the
+      id-103 entry landed 1.4s after the close, `status.json` recorded
+      `2026-10-13T20:34:24.98+03:00`, and across +15s, +30s, +60s, +90s and +120s after a second
+      close nothing came back: 0 ffmpeg, 0 supervisor, 0 mediamtx, 0 host, 0 warden, 0 windows, the
+      job released, and no "recording again" alert. It was started by hand and was recording 6/6
+      twenty seconds later. The new camera-free `windowclose` check in the harness covers both the
+      close and the terminate-the-warden case that must stay silent.
