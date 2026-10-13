@@ -113,6 +113,7 @@ Right-click the script and choose "Run with PowerShell", or run it from a termin
 | `-RemoveRestreamer` | Deletes that generated config. Recording and viewing continue on the direct camera inputs. |
 | `-Nvr` | Opens the NVR: one Windows Terminal window of its own, titled `cam.nvr`, running the supervisor as its only pane with the log on screen. Closing that window stops the supervisor, MediaMTX, every ffmpeg and the viewers. Closing any other terminal does nothing. |
 | `-InstallAutostart` | Registers the logon Scheduled Task. Unelevated and idempotent. |
+| `-InstallEventSource` | Registers the custom `IPCCTV` Application-log event source. Needs an elevated session, once, and is optional - alerting works without it. |
 | `-RemoveAutostart` | Unregisters the task and deletes the launcher it created. A clean no-op when nothing is installed. |
 | `-SelfTest [-Offline] [-MaxConcurrency <n>]` | Pre-flight report: tools, per-camera RTSP probe, measured connection limit, crash-safety proof, disk projection. `-Offline` skips every check that touches a camera. |
 
@@ -207,6 +208,38 @@ The task opens the NVR window rather than running the supervisor directly, and t
 
 The task does not point at `cam.recorder.ps1` directly. It points at a small generated launcher at `%LOCALAPPDATA%\IPCCTV\start-recorder.ps1`, which waits for the recorder's path to become reachable, logs what it saw to `%LOCALAPPDATA%\IPCCTV\autostart.log`, and then forwards to `cam.recorder.ps1 -Nvr`. That indirection exists because a repository kept inside WSL is reached over `\\wsl.localhost`, which does not resolve until WSL's file server is running, and a Scheduled Task has no way to wait for a path. The launcher holds no copy of the scripts, so it cannot drift from the repository. `-RemoveAutostart` deletes the launcher along with the task, keeping only the log.
 
+### When something stops unexpectedly
+
+Two job objects answer two different questions, and neither is a polling loop:
+
+| Job | Owner | Fires when |
+| --- | --- | --- |
+| `cam.nvr` | the warden, outside the window | the **window** closes |
+| `cam.supervisor.<hash of root>` | the supervisor itself | the **supervisor** dies, however abruptly |
+
+A job with `KILL_ON_JOB_CLOSE` terminates every process in it when the last handle closes, and process exit closes a handle whatever killed the process. So a supervisor that crashes takes MediaMTX and every `ffmpeg` with it - measured twice on the live system, four `ffmpeg` and MediaMTX to zero in under one second with no orphans. Jobs nest, so the supervisor being inside `cam.nvr` already is not an obstacle.
+
+The NVR pane is not the supervisor. It is a **host** that runs the supervisor as a child and restarts it when it stops without being asked to. That split exists because from outside, closing the window and a crash look identical - supervisor gone, `status.json` still saying `running`, window destroyed - and guessing wrong either way is bad. With the split they are different events: closing the window gives both processes `CTRL_CLOSE_EVENT` and they die together, while a crash leaves the host and the window untouched and the child exiting is the signal. Recovery took 11 and 13 seconds in the live tests, with no window churn and no intervention.
+
+Expected or not is read from what the supervisor recorded, never from an exit code alone, because a killed process has no say in its exit code. The stop flag, `StopKind` of `requested` or `interrupted`, and exit 20 all mean do not restart. The budget is five restarts in thirty minutes; out of budget it alerts once more and stays down rather than looping all night.
+
+**An unexpected stop alerts on three channels**, and an orderly `cam.ps1 -Stop` raises none of them:
+
+- a **Windows toast**, through WinRT under the Windows PowerShell AUMID. In the box, unelevated, does not steal focus, and the alert stays in the Action Center.
+- an **Application-log entry**, prefixed `IPCCTV: `. Registering a custom event source writes to `HKLM` and needs elevation, so by default the entries go out under the always-registered `Application` source and need no elevation anywhere. `-InstallEventSource`, run elevated once, registers the `IPCCTV` source instead.
+- **`StopKind` and `LastUnexpectedStop` in `status.json`**, the latter carrying the timestamp, the reason and the pid, and carried across restarts so the NVR being back up does not erase the fact that it went down.
+
+A camera that has written nothing for `CameraDownAlertMinutes` alerts the same three ways and publishes `DownSince` in its `status.json` row. It is judged on file progress alone: a camera that cannot be reached has its `ffmpeg` restarted every backoff period, so process liveness says nothing.
+
+Reading the alerts back:
+
+```powershell
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application'; Id = 100,101,102,110 } |
+  Select-Object TimeCreated, Id, LevelDisplayName, @{ n = 'Text'; e = { if ($_.Message) { $_.Message } else { $_.Properties[0].Value } } }
+```
+
+The `Properties[0].Value` fallback is needed because a source with no message resource leaves `Get-WinEvent`'s `.Message` empty. `-InstallEventSource` registers with `EventCreate.exe` as the message resource, which makes `.Message` render.
+
 ## Configuration
 
 `recorder.config.json` overlays the built-in defaults; any key you leave out keeps its default, and the file is read by the recorder, the health strip and the dashboard alike. Keys marked * are not in `recorder.config.example.json` and have to be added by hand if you want to change them.
@@ -242,6 +275,8 @@ The task does not point at `cam.recorder.ps1` directly. It points at a small gen
 | `BackoffStartSeconds` / `BackoffMaxSeconds` * | `3` / `60` | Restart backoff for a failing child. |
 | `HealthyResetSeconds` * | `300` | How long a child must stay up before its backoff resets. |
 | `StallFactor` * | `2.5` | Multiplied by `SegmentSeconds` for the stall watchdog. |
+| `CameraDownAlertMinutes` * | `15` | How long a camera may write nothing before it raises an alert. |
+| `CameraDownRepeatHours` * | `12` | How long before the same camera alerts again while still down. |
 | `LogMaxBytes` * | `2 MB` | Log rotation threshold. |
 | `LogRepeatSuppressSeconds` * | `60` | Collapses a repeating log line. |
 
