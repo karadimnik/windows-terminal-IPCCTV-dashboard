@@ -180,9 +180,11 @@ The token is never taken from a flag, because a command line is readable by ever
 
 | Command | What it does |
 | --- | --- |
-| `.\tests\cam.tests.ps1` | Runs every check that touches no camera: `parse`, `cameralist`, `selftest`, `layout`, `strip`, `sections`, `autostart`, `leak`, `procs`. Safe with the dashboard open. Exit code 0 means everything passed. |
+| `.\tests\cam.tests.ps1` | Runs all **fourteen** checks that touch no camera: `parse`, `cameralist`, `inputs`, `viewer`, `selftest`, `layout`, `strip`, `sections`, `autostart`, `crashsafe`, `windowclose`, `leak`, `uileak`, `procs`. Safe with the dashboard open. Exit code 0 means nothing failed. |
 | `-Checks <names>` | Run only these. |
-| `-Live -Checks relay` | Adds the relay lifecycle proof, which starts MediaMTX and `ffmpeg` against the real cameras in a sandbox. |
+| `-Live -Checks relay` | Adds the relay lifecycle proof, which starts MediaMTX and `ffmpeg` against the real cameras in a sandbox. It is the only check `-Live` unlocks. |
+
+**A check that skips is not a check that failed, and how many skip depends on the machine.** Exit code 0 means no check failed, so read the tally rather than counting on a fixed split. Four can skip: `autostart` and `procs` while the real recorder is installed and running (limitation 13), and `leak` and `uileak` when there is no `camera_creds.xml`, because then there is no password to scan for and a clean scan would prove nothing. `uileak` also skips when `camui.exe` has not been built or will not start.
 
 One trap worth knowing: `powershell.exe -File .\tests\cam.tests.ps1 -Checks parse,strip` binds the whole list as a single string and fails validation. Use `powershell.exe -Command "& '.\tests\cam.tests.ps1' -Checks parse,strip"`.
 
@@ -225,7 +227,7 @@ Segments are 15 minutes and aligned to the clock, give or take: a stream copy ca
 
 The pruner runs every `PruneIntervalSeconds` and watches free space rather than age. When free space falls below `ReserveGB` it deletes oldest-first until `ReserveGB + PruneHysteresisGB` is free, which stops it thrashing at the boundary. It never deletes the segment being written. Set `MaxRetentionDays` if you also want an age cap.
 
-Six cameras at `stream1` measured between 92 and 100 GB per day here, so plan on roughly three days per 300 GB of free space. `-Status` and the health strip both print the measured rate and the days of headroom left.
+**Do not plan from a number in this file.** The rate depends on how many cameras are up, which stream each one is on and how much the scenes move, so it drifts with the system rather than sitting still: observed here anywhere from the high forties to around 100 GB per day for six `stream1` cameras. `.\cam.ps1 -Status`, `.\cam.recorder.ps1 -Status` and the health strip all print the rate measured over the archive as it stands, with the days of headroom left - that figure is the one to plan from, because it is the only one that is current.
 
 ### Transport: the relay
 
@@ -269,9 +271,9 @@ It owns no state. Every number comes from `_state\status.json`, the same file th
 }
 ```
 
-Save that as `camui.config.json` next to `camui.exe`, restart the UI, and nothing else has to change: the launcher passes that file if it exists, and `-Status` reports the address it found and where it read it from. Every request then needs the token, which can arrive once as `?token=...` and is moved into an HttpOnly cookie so it stops appearing in the address bar, in history and in any `Referer`. The token itself is never read by the scripts and never printed; `-Status` says only whether one is configured.
+Save that as `camui.config.json` next to `camui.exe`, restart the UI, and nothing else has to change: the launcher passes that file if it exists, and `-Status` reports the address it found and where it read it from. Every request then needs the token, which can arrive once as `?token=...` and is moved into an HttpOnly cookie so it stops appearing in the address bar, in history and in any `Referer`. The scripts do read the token - `Get-CamUiRuntimeState` opens `camui.config.json` and looks at `CAMUI_TOKEN` to answer the one question `-Status` asks of it - but they never print it, log it or pass it on: `-Status` reports only whether one is configured.
 
-**How it runs.** `-InstallUi` registers `IPCCTV-Ui`, a logon task that runs a generated launcher at `%LOCALAPPDATA%\IPCCTV\start-ui.ps1`. The launcher waits for `camui.exe` to be reachable, exactly as the recorder's launcher waits for the scripts, then starts it in a console of its **own** with no window. That last part is not cosmetic: a console created with a window is handed to Windows Terminal as a tab in the window that already exists, and closing that window would take the UI with it. It starts nothing at all if the address is already being served, so a second start cannot fight the first one for the port, and it exits non-zero if nothing is serving afterwards, which hands the retry to the task's restart policy. camui logs to stdout only, so a thin `powershell.exe` holds the pipe and appends it to `%LOCALAPPDATA%\IPCCTV\camui.log`, rolled once past 10 MB because a line per request is otherwise unbounded. The launcher's own log is `autostart-ui.log` beside it.
+**How it runs.** `-InstallUi` registers `IPCCTV-Ui`, a logon task that runs a generated launcher at `%LOCALAPPDATA%\IPCCTV\start-ui.ps1`. The launcher waits for `camui.exe` to be reachable, exactly as the recorder's launcher waits for the scripts, then starts it in a console of its **own** with no window. That last part is not cosmetic: a console created with a window is handed to Windows Terminal as a tab in the window that already exists, and closing that window would take the UI with it. It starts nothing at all if the address is already being served, so a second start cannot fight the first one for the port, and it exits non-zero if nothing is serving afterwards, which hands the retry to the task's restart policy. camui logs to stdout only, so a thin `powershell.exe` holds the pipe and appends it to `%LOCALAPPDATA%\IPCCTV\camui.log`. **The roll happens in the launcher, not in a running UI:** at every start it checks that file, and if it is past 10 MB it renames it to `camui.log.prev` - replacing any previous `.prev` - and starts a fresh one. A UI that stays up for weeks therefore keeps appending to one file past 10 MB, with a line per request and nothing to bound it; stopping and starting it is what rolls the log. The launcher's own log is `autostart-ui.log` beside it, and that one has no rotation at all - it gets a handful of lines per start, so it grows slowly, but it grows forever. Delete either by hand when it is in the way; nothing reads them back.
 
 The binary is never copied anywhere, so a rebuild takes effect the next time the UI starts, with no reinstall. Stop it before rebuilding and start it again afterwards: a running process keeps the code it started with, and with the repository on the WSL share the write is not refused the way Windows refuses to overwrite a running binary on a local drive.
 
@@ -325,11 +327,15 @@ The five event ids, which are what separate these entries from everyone else's i
 Reading the alerts back:
 
 ```powershell
-Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application'; Id = 100,101,102,103,110 } |
-  Select-Object TimeCreated, Id, LevelDisplayName, @{ n = 'Text'; e = { if ($_.Message) { $_.Message } else { $_.Properties[0].Value } } }
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 100,101,102,103,110 } |
+  Select-Object TimeCreated, Id, LevelDisplayName, ProviderName,
+    @{ n = 'Text'; e = { if ($_.Message) { $_.Message } else { [string]$_.Properties[0].Value } } } |
+  Where-Object { $_.Text -like 'IPCCTV: *' }
 ```
 
-The `Properties[0].Value` fallback is needed because a source with no message resource leaves `Get-WinEvent`'s `.Message` empty. `-InstallEventSource` registers with `EventCreate.exe` as the message resource, which makes `.Message` render.
+It filters on the `IPCCTV: ` prefix rather than on a provider **on purpose**: the entries arrive under `Application` by default and under `IPCCTV` once `-InstallEventSource` has been run, so pinning `ProviderName = 'Application'` in the filter would quietly return nothing after the install. The prefix is on every message either way, which is what it is for, and the `ProviderName` column then tells you which source answered. Numbers alone are not enough to filter on: ids as low as 100 are not ours exclusively in a log every application writes to.
+
+The `Properties[0].Value` fallback is needed because a source with no message resource leaves `Get-WinEvent`'s `.Message` empty. `-InstallEventSource` registers with `EventCreate.exe` as the message resource, which makes `.Message` render. With no matching events at all, `Get-WinEvent` reports "No events were found that match the specified selection criteria", which is the quiet answer rather than a fault.
 
 ## Configuration
 
@@ -412,7 +418,7 @@ These are measured, not theoretical. None of them is hidden in the code.
 10. **Autostart depends on the recorder's path being reachable at logon.** If the repository lives inside WSL, the launcher polls `\\wsl.localhost` for up to 300 s and the task then retries up to three times, but nothing records while WSL is down. Keeping the repository on a local drive avoids the wait entirely. The launcher log at `%LOCALAPPDATA%\IPCCTV\autostart.log` is the first thing to read if autostart did not work.
 11. **The health strip does not quite reach the screen edges.** It paints x 6 to 1906 of 1920, so about 6 px of desktop shows at its left edge and 13 px at its right. Top and bottom are exact and no video is affected. It cannot be fixed while the strip is a Windows Terminal window: covering the full width needs a window rect wider than the screen, and that is exactly what makes Windows Terminal mis-size itself.
 12. **The footage player cannot seek ahead of what has arrived.** A clip is remuxed on demand and streamed, so the response carries `Accept-Ranges: none` and no length, and the browser can only seek inside what it has already buffered. Nothing is lost, it is just a wait: a 15-minute segment is about 170 MB and arrives in under ten seconds here, after which the whole clip is seekable.
-13. **Two harness checks always skip on a live NVR.** `autostart` refuses to run while a task named `IPCCTV-Recorder` is registered, because it would rewrite and then delete the real autostart, and `procs` refuses while the recorder is running, because the processes it hunts for already have a legitimate owner. On this machine both skip permanently, so a green run reads twelve passes and two skips.
+13. **Two harness checks always skip on a live NVR.** `autostart` refuses to run while a task named `IPCCTV-Recorder` is registered, because it would rewrite and then delete the real autostart, and `procs` refuses while the recorder is running, because the processes it hunts for already have a legitimate owner. On this machine both skip permanently, so a green run of the fourteen camera-free checks reads twelve passes and two skips. That split is not a constant: `leak` and `uileak` skip as well on a machine with no `camera_creds.xml`, and `uileak` skips if `camui.exe` is not there to start.
 14. **`status.json` reports configured relay paths, not ready ones.** The strip says `N path(s)` and tells relay from direct per camera in its `MODE` column, which is the honest signal; do not read the count as readiness.
 
 ## Troubleshooting
