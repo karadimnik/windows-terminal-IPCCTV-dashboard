@@ -101,7 +101,13 @@ function Set-ApplyCameraList {
     $rows = @($Request.cameras)
     if ($null -eq $Request.cameras) { throw 'The request has no "cameras" array.' }
 
-    $existing = @(Get-CamList)
+    # Assigned FIRST, then wrapped. Get-CamList ends in "return , @($parsed)"
+    # to stop a one-camera list collapsing to a scalar, and @(Get-CamList)
+    # NESTS that - the result is one element whose value is the whole array, so
+    # every name comparison then runs against a space-joined string and matches
+    # nothing. @($variable) enumerates correctly; only @(function-call) traps.
+    $fromFile = Get-CamList
+    $existing = @($fromFile)
     $before = ConvertTo-Json -InputObject $existing -Depth 10
 
     $output = @()
