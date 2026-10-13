@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -207,6 +208,15 @@ func errorText(result psResult) string {
 // would need -Command: powershell.exe -File binds -Checks a,b as one string.)
 // -NonInteractive turns a prompt into an error instead of a hang, which is what
 // a request waiting on it needs.
+//
+// The output goes to a FILE, not to cmd.CombinedOutput(). CombinedOutput gives
+// the child a pipe, and Wait then blocks until that pipe is closed by every
+// process holding it - not until the script exits. cam.ps1 -Start leaves six
+// viewer panes behind that inherit it, so the first measured call returned its
+// work in 20 s and then hung for over four minutes, holding the action lock and
+// answering every later request with 409. An *os.File is handed to the child
+// directly with no copying goroutine, so Wait returns when the script does and
+// the panes keep the handle harmlessly.
 func runPowerShell(scriptDir string, timeout time.Duration, script string, args ...string) psResult {
 	// An absolute path is used as given: the settings writer is embedded in the
 	// binary and runs from a temporary directory, not from the repository.
@@ -222,25 +232,45 @@ func runPowerShell(scriptDir string, timeout time.Duration, script string, args 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, powerShellExe, full...)
-	cmd.Dir = scriptDir
-	hideChildWindow(cmd)
+	result := psResult{Command: filepath.Base(script) + " " + strings.Join(args, " ")}
 
-	raw, err := cmd.CombinedOutput()
-	result := psResult{
-		Command:  filepath.Base(script) + " " + strings.Join(args, " "),
-		Output:   scrubLines(string(raw)),
-		Duration: time.Since(started),
-	}
-	if ctx.Err() != nil {
-		result.Err = fmt.Errorf("%s did not finish within %s", script, timeout)
+	console, err := os.CreateTemp("", "camui-console-")
+	if err != nil {
+		result.Err = fmt.Errorf("create a console log for %s: %w", script, err)
+		result.Duration = time.Since(started)
 		return result
 	}
-	if err != nil {
-		if exit, ok := err.(*exec.ExitError); ok {
+	consolePath := console.Name()
+
+	cmd := exec.CommandContext(ctx, powerShellExe, full...)
+	cmd.Dir = scriptDir
+	cmd.Stdout = console
+	cmd.Stderr = console
+	// Belt and braces for the timeout path: if the context kills the script,
+	// do not wait indefinitely for anything else it left behind.
+	cmd.WaitDelay = 5 * time.Second
+	hideChildWindow(cmd)
+
+	runErr := cmd.Run()
+	result.Duration = time.Since(started)
+	console.Close()
+
+	if raw, readErr := os.ReadFile(consolePath); readErr == nil {
+		result.Output = scrubLines(string(raw))
+	}
+	// A pane the script started still holds this file open, so on Windows the
+	// removal can fail. It is in the temp directory either way.
+	_ = os.Remove(consolePath)
+
+	if ctx.Err() != nil {
+		result.Err = fmt.Errorf("%s did not finish within %s", filepath.Base(script), timeout)
+		return result
+	}
+	if runErr != nil {
+		if exit, ok := runErr.(*exec.ExitError); ok {
 			result.ExitCode = exit.ExitCode()
 		} else {
-			result.Err = err
+			result.Err = runErr
 		}
 	}
 	return result
