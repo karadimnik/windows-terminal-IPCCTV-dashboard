@@ -227,7 +227,7 @@ Segments are 15 minutes and aligned to the clock, give or take: a stream copy ca
 
 The pruner runs every `PruneIntervalSeconds` and watches free space rather than age. When free space falls below `ReserveGB` it deletes oldest-first until `ReserveGB + PruneHysteresisGB` is free, which stops it thrashing at the boundary. It never deletes the segment being written. Set `MaxRetentionDays` if you also want an age cap.
 
-**Do not plan from a number in this file.** The rate depends on how many cameras are up, which stream each one is on and how much the scenes move, so it drifts with the system rather than sitting still: observed here anywhere from the high forties to around 100 GB per day for six `stream1` cameras. `.\cam.ps1 -Status`, `.\cam.recorder.ps1 -Status` and the health strip all print the rate measured over the archive as it stands, with the days of headroom left - that figure is the one to plan from, because it is the only one that is current.
+**Do not plan from a number in this file.** The rate depends on how many cameras are up, which stream each one is on and how much the scenes move, so it drifts with the system rather than sitting still: observed here anywhere from the high forties to around 100 GB per day for six `stream1` cameras. `.\cam.recorder.ps1 -Status` and the health strip both print the rate measured over the archive as it stands, with the days of headroom left - that figure is the one to plan from, because it is the only one that is current. `cam.ps1 -Status` reports processes and services, not disk.
 
 ### Transport: the relay
 
