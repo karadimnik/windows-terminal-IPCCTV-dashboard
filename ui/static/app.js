@@ -647,6 +647,303 @@ function note(id, cls, text) {
 }
 
 // ---------------------------------------------------------------------------
+// Footage
+//
+// Three selections and a player: camera, date, segment. Each selection is
+// loaded from /api/footage, which parses the index out of the filenames the
+// recorder already wrote, so there is nothing to keep in sync here.
+//
+// The player is rendered on its own, never as part of a list re-render: a
+// <video> whose element is replaced starts again from the beginning, so a
+// refresh while watching must not touch it.
+// ---------------------------------------------------------------------------
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// GAPS_SHOWN caps the banner. A camera that flapped all day produces dozens of
+// gaps, and the point is that the Operator sees the day has holes, not that the
+// segment list is pushed off the screen.
+const GAPS_SHOWN = 4;
+
+const footage = {
+  cameras: null,   // null until the first load
+  camera: null,
+  dates: null,
+  date: null,
+  segments: null,
+  gaps: [],
+  seconds: 0,
+  bytes: 0,
+  playing: null,
+  error: null,
+};
+
+// clock renders a segment's own length: 15:00 for a full one, 1:11 for one the
+// camera cut short, 1:02:30 if the segment length is ever raised past an hour.
+function clock(seconds) {
+  if (seconds == null || !isFinite(seconds)) return "-";
+  const whole = Math.round(seconds);
+  const parts = [Math.floor(whole / 60) % 60, whole % 60];
+  const hours = Math.floor(whole / 3600);
+  const padded = parts.map((n) => String(n).padStart(2, "0"));
+  return hours ? hours + ":" + padded.join(":") : Number(padded[0]) + ":" + padded[1];
+}
+
+// spell is for durations read as prose rather than as a clock - a gap's length.
+function spell(seconds) {
+  if (seconds == null || !isFinite(seconds)) return "-";
+  const whole = Math.round(seconds);
+  if (whole < 60) return whole + " s";
+  if (whole < 3600) return Math.floor(whole / 60) + " min";
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.round((whole - hours * 3600) / 60);
+  return minutes ? hours + " h " + minutes + " min" : hours + " h";
+}
+
+function size(bytes) {
+  if (typeof bytes !== "number") return "-";
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + " GB";
+  return Math.round(bytes / 1048576) + " MB";
+}
+
+// dayLabel reads an ISO date without constructing a Date, which would reinterpret
+// it in the browser's zone. Today and yesterday are named, because "last night's
+// footage" is what the Operator is usually after.
+function dayLabel(iso) {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+  if (!parts) return String(iso || "");
+  const now = new Date();
+  const today = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
+  const before = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  const yesterday = [before.getFullYear(), String(before.getMonth() + 1).padStart(2, "0"), String(before.getDate()).padStart(2, "0")].join("-");
+  if (iso === today) return "Today";
+  if (iso === yesterday) return "Yesterday";
+  const label = Number(parts[3]) + " " + MONTHS[Number(parts[2]) - 1];
+  return parts[1] === String(now.getFullYear()) ? label : label + " " + parts[1];
+}
+
+function gapText(gap) {
+  if (gap.open) return "Nothing recorded since " + gap.from + " - " + spell(gap.seconds) + " and counting";
+  return "No footage " + gap.from + " to " + gap.to + " - " + spell(gap.seconds);
+}
+
+async function getJSON(path) {
+  const response = await fetch(path, { cache: "no-store" });
+  let payload = null;
+  try { payload = await response.json(); } catch (err) { /* a body is not guaranteed */ }
+  if (!response.ok) throw new Error((payload && payload.error) || "HTTP " + response.status);
+  return payload || {};
+}
+
+async function loadFootage() {
+  try {
+    const payload = await getJSON("api/footage");
+    footage.cameras = payload.cameras || [];
+    footage.error = null;
+  } catch (err) {
+    footage.cameras = [];
+    footage.error = err.message || String(err);
+    renderFootageCameras();
+    renderFootageDates();
+    renderFootageSegments();
+    return;
+  }
+
+  renderFootageCameras();
+  const held = footage.cameras.some((cam) => cam.name === footage.camera) ? footage.camera : null;
+  const first = footage.cameras.find((cam) => cam.segments > 0) || footage.cameras[0];
+  const pick = held || (first ? first.name : null);
+  if (pick) {
+    await selectFootageCamera(pick, pick !== footage.camera);
+    return;
+  }
+  footage.dates = [];
+  footage.segments = [];
+  footage.gaps = [];
+  renderFootageDates();
+  renderFootageSegments();
+  renderFootagePlayer();
+}
+
+async function selectFootageCamera(name, changed) {
+  footage.camera = name;
+  if (changed) {
+    footage.date = null;
+    footage.playing = null;
+    renderFootagePlayer();
+  }
+  renderFootageCameras();
+  try {
+    const payload = await getJSON("api/footage?camera=" + encodeURIComponent(name));
+    footage.dates = payload.dates || [];
+    footage.error = null;
+  } catch (err) {
+    footage.dates = [];
+    footage.error = err.message || String(err);
+  }
+  renderFootageDates();
+
+  const held = footage.dates.some((day) => day.date === footage.date) ? footage.date : null;
+  const pick = held || (footage.dates[0] ? footage.dates[0].date : null);
+  if (pick) {
+    await selectFootageDate(pick);
+    return;
+  }
+  footage.segments = [];
+  footage.gaps = [];
+  renderFootageSegments();
+}
+
+async function selectFootageDate(date) {
+  if (date !== footage.date) {
+    footage.playing = null;
+    renderFootagePlayer();
+  }
+  footage.date = date;
+  renderFootageDates();
+  try {
+    const payload = await getJSON(
+      "api/footage?camera=" + encodeURIComponent(footage.camera) + "&date=" + encodeURIComponent(date));
+    footage.segments = payload.segments || [];
+    footage.gaps = payload.gaps || [];
+    footage.seconds = payload.seconds || 0;
+    footage.bytes = payload.bytes || 0;
+    footage.error = null;
+  } catch (err) {
+    footage.segments = [];
+    footage.gaps = [];
+    footage.error = err.message || String(err);
+  }
+  renderFootageSegments();
+  // The segment being watched may have grown, or been pruned away.
+  if (footage.playing && !footage.segments.some((s) => s.segment === footage.playing)) {
+    footage.playing = null;
+    renderFootagePlayer();
+  }
+}
+
+function playSegment(name) {
+  footage.playing = name;
+  renderFootagePlayer();
+  renderFootageSegments();
+}
+
+function renderFootageCameras() {
+  const host = el("fCam");
+  const head = '<div class="phead">Camera</div>';
+  if (footage.cameras === null) {
+    host.innerHTML = head + '<div class="pnone">Loading...</div>';
+    return;
+  }
+  if (!footage.cameras.length) {
+    host.innerHTML = head + '<div class="pnone">No footage on this machine yet.</div>';
+    return;
+  }
+  host.innerHTML = head + footage.cameras.map((cam) =>
+    '<button data-camera="' + esc(cam.name) + '" aria-current="' + (cam.name === footage.camera) + '">' +
+    '<span class="cnt">' + cam.segments + "</span>" + esc(cam.name) +
+    (cam.known ? "" : '<span class="orphan">no longer in the camera list</span>') +
+    "</button>").join("");
+}
+
+function renderFootageDates() {
+  const host = el("fDay");
+  const head = '<div class="phead">Date</div>';
+  if (!footage.camera) {
+    host.innerHTML = head + '<div class="pnone">Pick a camera.</div>';
+    return;
+  }
+  if (footage.dates === null) {
+    host.innerHTML = head + '<div class="pnone">Loading...</div>';
+    return;
+  }
+  if (!footage.dates.length) {
+    host.innerHTML = head + '<div class="pnone">No footage for this camera.</div>';
+    return;
+  }
+  host.innerHTML = head + footage.dates.map((day) =>
+    '<button data-date="' + esc(day.date) + '" aria-current="' + (day.date === footage.date) + '">' +
+    '<span class="cnt">' + day.segments + "</span>" + esc(dayLabel(day.date)) +
+    "</button>").join("");
+}
+
+function renderFootageSegments() {
+  const count = el("fCount");
+  const gaps = el("fGaps");
+  const list = el("fSegs");
+
+  if (footage.error) {
+    count.textContent = "";
+    gaps.innerHTML = "";
+    list.innerHTML = '<li class="noseg">' + esc(footage.error) + "</li>";
+    return;
+  }
+  if (footage.segments === null) {
+    count.textContent = "";
+    gaps.innerHTML = "";
+    list.innerHTML = '<li class="noseg">Loading...</li>';
+    return;
+  }
+  if (!footage.segments.length) {
+    count.textContent = "";
+    gaps.innerHTML = "";
+    list.innerHTML = '<li class="noseg">' +
+      (footage.camera ? "No footage for " + esc(footage.camera) + " on this date." : "Pick a camera.") +
+      "</li>";
+    return;
+  }
+
+  count.textContent = footage.segments.length + (footage.segments.length === 1 ? " segment" : " segments") +
+    " · " + spell(footage.seconds) + " recorded · " + size(footage.bytes);
+
+  const shown = footage.gaps.slice(0, GAPS_SHOWN).map((gap) =>
+    '<div class="gap"><span class="chip warn"><i class="dot"></i></span>' + esc(gapText(gap)) + "</div>").join("");
+  const rest = footage.gaps.length - GAPS_SHOWN;
+  gaps.innerHTML = shown + (rest > 0
+    ? '<div class="gap more">' + rest + (rest === 1 ? " more gap" : " more gaps") + " earlier in the day</div>"
+    : "");
+
+  list.innerHTML = footage.segments.map((segment) =>
+    "<li><button data-segment=\"" + esc(segment.segment) + '" aria-current="' + (segment.segment === footage.playing) + '">' +
+    "<time>" + esc(segment.start) + "</time>" +
+    '<span class="t">' + clock(segment.seconds) + " · " + size(segment.bytes) +
+    (segment.inProgress ? " " + chip("warn", "recording now") : "") +
+    "</span></button></li>").join("");
+}
+
+function renderFootagePlayer() {
+  const host = el("fPlayer");
+  const segment = (footage.segments || []).find((s) => s.segment === footage.playing);
+
+  if (!segment) {
+    host.classList.remove("live");
+    host.innerHTML = '<div><div class="pbig">&#9205;</div>' +
+      '<div class="pnow">' + (footage.camera ? esc(footage.camera) : "Nothing selected") + "</div>" +
+      '<div class="psub">Pick a segment below to play it. Footage is remuxed to MP4 when you ask for ' +
+      "it - the video is copied and only the camera's own audio is re-encoded - so nothing is " +
+      "converted in advance and nothing is stored twice.</div></div>";
+    return;
+  }
+
+  const source = "api/clip?camera=" + encodeURIComponent(footage.camera) +
+    "&segment=" + encodeURIComponent(segment.segment);
+  host.classList.add("live");
+  host.innerHTML = '<video controls autoplay playsinline preload="auto" src="' + esc(source) + '"></video>';
+
+  // A failed remux arrives here as a media error, because the 502 body is not
+  // something a <video> can show. Say so in the page rather than leaving a
+  // black rectangle.
+  const video = host.querySelector("video");
+  video.addEventListener("error", () => {
+    host.classList.remove("live");
+    host.innerHTML = '<div><div class="pbig">&#9888;</div>' +
+      '<div class="pnow">' + esc(segment.start) + " could not be played</div>" +
+      '<div class="psub">The browser could not decode what ffmpeg produced for this segment. ' +
+      "The camui log records what ffmpeg reported.</div></div>";
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
@@ -702,6 +999,23 @@ el("saveConfig").onclick = saveConfig;
 el("discardConfig").onclick = loadConfig;
 for (const key of CONFIG_FIELDS) el(key).addEventListener("input", configChanged);
 
+el("fRefresh").onclick = () => loadFootage();
+
+el("fCam").onclick = (event) => {
+  const button = event.target.closest("button[data-camera]");
+  if (button) selectFootageCamera(button.dataset.camera, button.dataset.camera !== footage.camera);
+};
+
+el("fDay").onclick = (event) => {
+  const button = event.target.closest("button[data-date]");
+  if (button) selectFootageDate(button.dataset.date);
+};
+
+el("fSegs").onclick = (event) => {
+  const button = event.target.closest("button[data-segment]");
+  if (button) playSegment(button.dataset.segment);
+};
+
 el("tabs").onclick = (event) => {
   const button = event.target.closest("button");
   if (!button) return;
@@ -714,6 +1028,9 @@ el("tabs").onclick = (event) => {
     loadCameras();
     loadConfig();
   }
+  // Re-read on every visit: a recording camera has new segments by now, and
+  // the pruner may have taken the oldest away.
+  if (button.dataset.t === "foot") loadFootage();
 };
 
 // ---------------------------------------------------------------------------

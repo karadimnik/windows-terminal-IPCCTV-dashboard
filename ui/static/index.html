@@ -15,6 +15,7 @@
     <nav class="tabs" id="tabs">
       <button data-t="dash" aria-current="page">Dashboard</button>
       <button data-t="set">Settings</button>
+      <button data-t="foot">Footage</button>
     </nav>
     <div class="feed">
       <span id="feed"></span>
@@ -134,6 +135,42 @@
       Writes go through the same atomic save the CLI uses, preserving every field and the file's
       byte-order mark. A camera change is picked up by the running recorder within seconds;
       the settings above it reads when it starts.
+    </footer>
+  </section>
+
+  <!-- ============== FOOTAGE ============== -->
+  <section data-tab="foot" class="hide">
+    <div class="foot">
+
+      <div class="pick" id="fCam">
+        <div class="phead">Camera</div>
+      </div>
+
+      <div class="pick" id="fDay">
+        <div class="phead">Date</div>
+      </div>
+
+      <div>
+        <div class="player" id="fPlayer"></div>
+        <div class="panel" style="margin-top:12px">
+          <header>
+            <h2>Segments</h2>
+            <span class="muted" id="fCount"></span>
+            <button class="btn small" id="fRefresh">Refresh</button>
+          </header>
+          <div id="fGaps"></div>
+          <ul class="events seglist" id="fSegs"></ul>
+        </div>
+      </div>
+
+    </div>
+
+    <footer class="note">
+      The index is parsed from filenames &mdash; <code>Front_Entrance_20261013_190147+0300.mkv</code>
+      already carries the camera, the date, the time and the UTC offset, so there is no database and
+      nothing opens a segment to list it. A segment plays as MP4 remuxed on request: the video is
+      copied and only the 8&nbsp;kHz camera audio is re-encoded. The segment being recorded right now
+      plays up to the point it has reached.
     </footer>
   </section>
 </div>
