@@ -783,7 +783,10 @@ function Invoke-CamCheckUiLeak {
         fetched and scanned for the camera password, for the username in URL
         userinfo shape, and for any URL at all. That now includes the two
         settings endpoints, /api/cameras and /api/config, which read the
-        Operator's own cameras.json and recorder.config.json.
+        Operator's own cameras.json and recorder.config.json, and the three
+        shapes of /api/footage plus a real /api/clip - the clip read bounded,
+        because it is a remux produced on the fly and reading it whole would
+        hold an ffmpeg open for the length of a segment.
 
         Frigate's CVE-2026-33469 leaked camera RTSP credentials to any
         logged-in viewer, so a redacted status file is not the deliverable -
@@ -807,7 +810,35 @@ function Invoke-CamCheckUiLeak {
     }
 
     try {
-        $result = Invoke-CamUiCredentialLeakScan -BaseUrl $ui.BaseUrl
+        # The footage endpoints are addressed by camera and date, so the paths
+        # to scan are discovered from the index itself rather than hard-coded
+        # against an archive whose oldest day the pruner may have taken.
+        $extra = @()
+        $footageNote = 'no footage on this machine, so only the camera list could be scanned'
+        try {
+            $index = (New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + '/api/footage')) | ConvertFrom-Json
+            $camera = @($index.cameras | Where-Object { $_.segments -gt 0 })[0]
+            if ($camera) {
+                $cameraPath = '/api/footage?camera=' + [uri]::EscapeDataString($camera.name)
+                $extra += $cameraPath
+                $days = ((New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + $cameraPath)) | ConvertFrom-Json).dates
+                $day = @($days)[0]
+                if ($day) {
+                    $dayPath = $cameraPath + '&date=' + $day.date
+                    $extra += $dayPath
+                    $segments = ((New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + $dayPath)) | ConvertFrom-Json).segments
+                    $segment = @($segments)[0]
+                    if ($segment) {
+                        $extra += ('/api/clip?camera=' + [uri]::EscapeDataString($camera.name) +
+                                   '&segment=' + [uri]::EscapeDataString($segment.segment))
+                        $footageNote = ('footage endpoints scanned for {0} on {1}' -f $camera.name, $day.date)
+                    }
+                }
+            }
+        }
+        catch { $footageNote = 'the footage index could not be read: ' + $_.Exception.Message }
+
+        $result = Invoke-CamUiCredentialLeakScan -BaseUrl $ui.BaseUrl -ExtraPaths $extra
         $ok = $result.Ok
 
         $evidence = @(
@@ -874,6 +905,46 @@ function Invoke-CamCheckUiLeak {
         else {
             $evidence += ('  /api/cameras served {0} row(s) with only: {1}' -f $cameraRows.Count, ($rowKeys -join ', '))
         }
+
+        $evidence += ('  ' + $footageNote)
+
+        # The footage index is addressed by camera NAME, so a camera row there
+        # has no business carrying an address, a folder or a path. Assert the
+        # published fields by name, the same way /api/cameras is asserted.
+        $footageRaw = (New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + '/api/footage'))
+        $footageRows = @(($footageRaw | ConvertFrom-Json).cameras)
+        $footageKeys = @()
+        foreach ($row in $footageRows) { $footageKeys += @(($row | Get-Member -MemberType NoteProperty).Name) }
+        $footageKeys = @($footageKeys | Select-Object -Unique)
+        $allowedFootageKeys = @('name', 'known', 'segments', 'newestAt')
+        $extraFootageKeys = @($footageKeys | Where-Object { $allowedFootageKeys -notcontains $_ })
+        if ($extraFootageKeys.Count -gt 0) {
+            $ok = $false
+            $evidence += ('HIT /api/footage served fields beyond the camera name and its counts: ' + ($extraFootageKeys -join ', '))
+        }
+        else {
+            $evidence += ('  /api/footage served {0} camera(s) with only: {1}' -f $footageRows.Count, ($footageKeys -join ', '))
+        }
+
+        # And the refusals: a path that was rejected must not echo the path back.
+        foreach ($bad in @('/api/clip?camera=' + [uri]::EscapeDataString('..\cameras_old') + '&segment=x.mkv',
+                           '/api/clip?camera=_state&segment=status.json',
+                           '/api/footage?camera=' + [uri]::EscapeDataString('C:\Windows'))) {
+            $body = ''
+            try { [void](New-Object System.Net.WebClient).DownloadString(($ui.BaseUrl + $bad)) }
+            catch [System.Net.WebException] {
+                if ($_.Exception.Response) {
+                    $body = (New-Object System.IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd()
+                }
+            }
+            if ($body -match '[A-Za-z]:\\' -or $body -match '\.\.' -or $body -match '_state') {
+                $ok = $false
+                $evidence += ('HIT a refusal echoed the request back: ' + $body)
+            }
+            else {
+                $evidence += ('  refused and echoed nothing: ' + $bad)
+            }
+        }
     }
     finally {
         $logLines = @(Stop-CamTestUi -Ui $ui)
@@ -881,7 +952,7 @@ function Invoke-CamCheckUiLeak {
     $evidence += @($logLines | Where-Object { $_ -match 'msg="camui listening"' } | ForEach-Object { '  ' + $_ })
 
     Add-CamTestResult -Run $Run -Check 'uileak' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
-        -Message 'no camera password, no credential in URL userinfo shape and no URL of any scheme in any camui response, including the two settings endpoints' `
+        -Message 'no camera password, no credential in URL userinfo shape and no URL of any scheme in any camui response, including the settings endpoints, all three shapes of the footage index and a real clip' `
         -Evidence $evidence
 }
 

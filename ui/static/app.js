@@ -887,9 +887,11 @@ function renderFootageSegments() {
   if (!footage.segments.length) {
     count.textContent = "";
     gaps.innerHTML = "";
-    list.innerHTML = '<li class="noseg">' +
-      (footage.camera ? "No footage for " + esc(footage.camera) + " on this date." : "Pick a camera.") +
-      "</li>";
+    // "on this date" only when there IS one: a camera with nothing at all has
+    // no date selected, and saying "on this date" about no date reads as a bug.
+    list.innerHTML = '<li class="noseg">' + (!footage.camera ? "Pick a camera."
+      : footage.date ? "No footage for " + esc(footage.camera) + " on this date."
+      : "No footage for " + esc(footage.camera) + " yet.") + "</li>";
     return;
   }
 

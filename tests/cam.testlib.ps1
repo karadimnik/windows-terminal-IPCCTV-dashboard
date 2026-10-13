@@ -451,9 +451,13 @@ function Invoke-CamUiCredentialLeakScan {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [string[]]$Paths = @('/', '/index.html', '/style.css', '/app.js', '/api/status', '/api/cameras', '/api/config'),
+        [string[]]$Paths = @('/', '/index.html', '/style.css', '/app.js', '/api/status', '/api/cameras', '/api/config', '/api/footage'),
+        [string[]]$ExtraPaths = @(),
+        [int]$MaxBytes = 2097152,
         [string]$Token
     )
+
+    $Paths = @($Paths) + @($ExtraPaths)
 
     $credential = Get-CamCredential
     $password = $credential.GetNetworkCredential().Password
@@ -489,17 +493,52 @@ function Invoke-CamUiCredentialLeakScan {
         return @($found)
     }
 
+    # Read a bounded prefix rather than the whole body, and abort the request
+    # when the cap is reached. /api/clip is a 170 MB remux produced on the fly,
+    # so DownloadData would both exhaust memory and hold an ffmpeg open for the
+    # length of a segment. An error body is scanned too: a refusal that echoed a
+    # path or a URL back would be just as much of a leak as a success that did.
+    $readBounded = {
+        param([string]$url)
+
+        $request = [System.Net.HttpWebRequest]::Create($url)
+        $request.Method = 'GET'
+        if ($Token) { $request.Headers.Add('Authorization', "Bearer $Token") }
+        $response = $null
+        $failure = ''
+        try { $response = $request.GetResponse() }
+        catch [System.Net.WebException] {
+            $failure = $_.Exception.Message
+            $response = $_.Exception.Response
+        }
+        if ($null -eq $response) { return [pscustomobject]@{ Bytes = $null; Error = $failure } }
+
+        $buffer = New-Object System.IO.MemoryStream
+        $chunk = New-Object byte[] 65536
+        try {
+            $stream = $response.GetResponseStream()
+            while ($buffer.Length -lt $MaxBytes) {
+                $read = $stream.Read($chunk, 0, $chunk.Length)
+                if ($read -le 0) { break }
+                $buffer.Write($chunk, 0, $read)
+            }
+        }
+        catch { if (-not $failure) { $failure = $_.Exception.Message } }
+        finally {
+            $request.Abort()
+            $response.Close()
+        }
+        return [pscustomobject]@{ Bytes = $buffer.ToArray(); Error = $failure }
+    }
+
     $endpoints = @()
     $hits = @()
     foreach ($path in $Paths) {
         $url = ($BaseUrl.TrimEnd('/')) + $path
-        $client = New-Object System.Net.WebClient
-        if ($Token) { $client.Headers.Add('Authorization', "Bearer $Token") }
-        $bytes = $null
+        $fetched = & $readBounded $url
+        $bytes = $fetched.Bytes
         $fetchError = ''
-        try { $bytes = $client.DownloadData($url) }
-        catch { $fetchError = $_.Exception.Message }
-        finally { $client.Dispose() }
+        if ($null -eq $bytes -or $bytes.Length -eq 0) { $fetchError = $fetched.Error }
 
         if ($null -eq $bytes) {
             $endpoints += [pscustomobject]@{ Path = $path; Bytes = 0; Hits = 0; Error = $fetchError }
