@@ -46,9 +46,10 @@ const (
 	// actually stopped delivering.
 	gapThresholdSeconds = 5
 
-	// inProgressWindow is how recently a segment must have been written to
-	// count as the one being recorded now. The recorder writes continuously, so
-	// a file untouched for longer than this is finished.
+	// inProgressWindow is how recently the newest segment must have been
+	// written to count as the one being recorded now. The recorder writes
+	// continuously, so a newest file untouched for longer than this means the
+	// camera has stopped delivering.
 	inProgressWindow = 90 * time.Second
 
 	// clipTimeout bounds one remux. A 15-minute segment remuxes in about 10 s
@@ -144,6 +145,10 @@ type segmentFile struct {
 	Seconds    float64
 	Bytes      int64
 	InProgress bool
+
+	// writtenAt is the file's last-write time: the end of the recording, and
+	// the only thing that says whether the newest segment is still growing.
+	writtenAt time.Time
 }
 
 func (a *API) handleFootage(w http.ResponseWriter, r *http.Request) {
@@ -323,7 +328,6 @@ func (a *API) listSegments(cam archiveCamera) ([]segmentFile, error) {
 		return nil, fmt.Errorf("read the folder for camera %q: %w", cam.Name, scrubErr(err))
 	}
 
-	now := time.Now()
 	out := make([]segmentFile, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -344,15 +348,23 @@ func (a *API) listSegments(cam archiveCamera) ([]segmentFile, error) {
 			seconds = 0
 		}
 		out = append(out, segmentFile{
-			Name:       entry.Name(),
-			Start:      start,
-			Date:       start.Format("2006-01-02"),
-			Seconds:    seconds,
-			Bytes:      info.Size(),
-			InProgress: now.Sub(info.ModTime()) < inProgressWindow,
+			Name:      entry.Name(),
+			Start:     start,
+			Date:      start.Format("2006-01-02"),
+			Seconds:   seconds,
+			Bytes:     info.Size(),
+			writtenAt: info.ModTime(),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+
+	// ffmpeg writes exactly one segment per camera at a time and it is always
+	// the newest, so only that one can be in progress. Asking the question of
+	// every file instead flags the segment that rolled over a minute ago as
+	// still recording, which it is not.
+	if last := len(out) - 1; last >= 0 && time.Since(out[last].writtenAt) < inProgressWindow {
+		out[last].InProgress = true
+	}
 	return out, nil
 }
 

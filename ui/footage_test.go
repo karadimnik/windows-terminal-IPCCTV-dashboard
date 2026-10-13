@@ -158,6 +158,28 @@ func TestTheSegmentBeingRecordedNowIsFlagged(t *testing.T) {
 	}
 }
 
+// TestOnlyTheNewestSegmentCanBeInProgress is the defect a live run found: the
+// window alone flags the segment that rolled over seconds ago as still
+// recording. ffmpeg writes one file per camera at a time and it is always the
+// newest, so only that one can be growing.
+func TestOnlyTheNewestSegmentCanBeInProgress(t *testing.T) {
+	api, root := newFootageAPI(t)
+	start := time.Now().Add(-20 * time.Minute)
+	addSegment(t, root, "Workshop", start.Format("20060102_150405-0700"), 900, 1024)
+	addSegment(t, root, "Workshop", start.Add(15*time.Minute).Format("20060102_150405-0700"), 300, 1024)
+
+	body := getFootage(t, api, "?camera=Workshop&date="+start.Format("2006-01-02"))
+	if len(body.Segments) != 2 {
+		t.Fatalf("segments %+v", body.Segments)
+	}
+	if !body.Segments[0].InProgress {
+		t.Fatalf("the newest segment is the one being written: %+v", body.Segments[0])
+	}
+	if body.Segments[1].InProgress {
+		t.Fatalf("a segment that rolled over five minutes ago is finished: %+v", body.Segments[1])
+	}
+}
+
 func TestFilesThatAreNotSegmentsAreIgnored(t *testing.T) {
 	api, root := newFootageAPI(t)
 	addSegment(t, root, "Workshop", "20261013_120000+0300", 900, 1024)
