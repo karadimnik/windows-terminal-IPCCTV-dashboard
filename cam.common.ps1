@@ -1713,8 +1713,18 @@ function Get-CamAlertEventIdList {
         The event IDs this project writes. Needed to read the alerts back: the
         fallback source is shared, so the IDs are what separate our entries
         from everyone else's.
+
+          100  the supervisor stopped unexpectedly and is being restarted
+          101  it is recording again
+          102  it stopped and the restart budget is spent
+          103  the NVR window was closed, so nothing is recording
+          110  one camera has stopped recording
+
+        103 is its own ID rather than another 100 because the log is where the
+        Operator reads back what happened, and "somebody closed the window" and
+        "the supervisor died" need different answers from him.
     #>
-    return @(100, 101, 102, 110)
+    return @(100, 101, 102, 103, 110)
 }
 
 
@@ -1922,6 +1932,63 @@ function Set-CamStatusUnexpectedStop {
         $document | Add-Member -NotePropertyName 'State' -NotePropertyValue 'stopped' -Force
         $document | Add-Member -NotePropertyName 'StopKind' -NotePropertyValue 'unexpected' -Force
         $document | Add-Member -NotePropertyName 'LastUnexpectedStop' -NotePropertyValue $record -Force
+        $document | Add-Member -NotePropertyName 'UpdatedAt' -NotePropertyValue $record.At -Force
+
+        $json = Get-CamRedacted -Text (ConvertTo-Json -InputObject $document -Depth 6)
+        $dir = Split-Path -Path $path -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $temp = "$path.tmp"
+        [System.IO.File]::WriteAllText($temp, $json + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+        Move-CamFileAtomic -TempPath $temp -Path $path
+        return $true
+    }
+    catch { return $false }
+}
+
+
+function Set-CamStatusWindowClosed {
+    <#
+        Marks the status file as stopped because the NVR window was closed.
+
+        Written by the warden, which is the only thing that sees the window
+        go: the supervisor took CTRL_CLOSE_EVENT with the window and the
+        kernel has already taken it, so it never got to write anything and the
+        file is left claiming it is running.
+
+        A SEPARATE record from LastUnexpectedStop, not a reuse of it. The two
+        say different things - one is a malfunction, one is a deliberate close
+        the system cannot tell from an accidental one - and a reader that
+        cannot distinguish them cannot tell the Operator whether to worry.
+
+        Patches rather than rewrites, through the same temp-then-rename path as
+        every other writer, exactly as Set-CamStatusUnexpectedStop does.
+
+        Never throws. Returns $true when the file was patched.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Reason,
+        [AllowEmptyString()][string]$WindowTitle = '',
+        [string]$DetectedBy = 'nvr warden'
+    )
+
+    $path = Get-CamStatusFilePath -Config $Config
+    $record = [pscustomobject]@{
+        At          = Format-CamTimestamp -Value ([DateTime]::Now)
+        Reason      = Get-CamRedacted -Text $Reason
+        WindowTitle = $WindowTitle
+        DetectedBy  = $DetectedBy
+    }
+
+    try {
+        $document = Get-CamStatusSnapshot -Config $Config
+        if (-not $document) {
+            $document = [pscustomobject]@{ Schema = 1; SupervisorPid = 0; UpdatedAt = $record.At }
+        }
+
+        $document | Add-Member -NotePropertyName 'State' -NotePropertyValue 'stopped' -Force
+        $document | Add-Member -NotePropertyName 'StopKind' -NotePropertyValue 'window-closed' -Force
+        $document | Add-Member -NotePropertyName 'LastWindowClose' -NotePropertyValue $record -Force
         $document | Add-Member -NotePropertyName 'UpdatedAt' -NotePropertyValue $record.At -Force
 
         $json = Get-CamRedacted -Text (ConvertTo-Json -InputObject $document -Depth 6)
@@ -3148,7 +3215,14 @@ function Start-CamJobWarden {
         # the audited path; by terminating their job directly when it does
         # not, because the repo can live on a share that is not reachable.
         [switch]$StopViewers,
-        [AllowEmptyString()][string]$ControlSurface = ''
+        [AllowEmptyString()][string]$ControlSurface = '',
+
+        # Raise an alert when the watched window goes. Opt-in, because only the
+        # NVR window closing means nothing is being recorded - the viewer grid
+        # closing costs the Operator nothing he cannot see for himself, and
+        # alerting on it would be the noise that teaches him to ignore the
+        # alerts that matter. Item [67].
+        [switch]$AlertOnWindowClose
     )
 
     Import-CamJobApi
@@ -3195,6 +3269,42 @@ function Start-CamJobWarden {
         [void][CamJob]::CloseHandle($job)
         $job = [IntPtr]::Zero
         & $say 'closed the last handle to the job - the kernel has taken its members'
+
+        # The alert comes next, before the viewers are stopped: that call goes
+        # through cam.ps1 and takes the better part of twenty seconds, and the
+        # Operator finding out is worth more than the grid closing a second
+        # sooner. It cannot come BEFORE the handle close - anything that runs
+        # there leaves the job's members orphaned for as long as it takes.
+        #
+        # Nothing here is allowed to throw. The warden's remaining duty is
+        # stopping the viewers, and an alert that failed must not cost them.
+        if ($AlertOnWindowClose) {
+            try {
+                $reason = "the NVR window '{0}' was closed at {1}, so the supervisor, MediaMTX, every ffmpeg and the viewers were stopped" -f `
+                    $WindowTitle, (Get-Date -Format 'HH:mm:ss')
+
+                # A window close is not a crash, and the wording has to say so
+                # or the Operator cannot tell at a glance whether something is
+                # broken. Nothing is: the system did exactly what closing that
+                # window means. What he needs to know is that it is down and
+                # that nothing will bring it back - deliberately, so one alert
+                # with the command in it rather than a restart he did not ask
+                # for.
+                $alert = Send-CamAlert -Title 'the NVR window was closed - nothing is recording' `
+                    -Message ("{0}. Nothing will restart it: run cam.ps1 -Start to bring it back." -f $reason) `
+                    -EventId 103 -EntryType 'Warning'
+                & $say ('alerted: the window was closed and nothing is recording [' + $alert.Channels + ']')
+
+                $config = Get-CamConfig
+                if (Set-CamStatusWindowClosed -Config $config -Reason $reason -WindowTitle $WindowTitle) {
+                    & $say ("recorded the close in {0} as StopKind 'window-closed'" -f (Get-CamStatusFilePath -Config $config))
+                }
+                else {
+                    & $say 'could not record the close in status.json'
+                }
+            }
+            catch { & $say ('alerting on the window close failed: ' + $_.Exception.Message) }
+        }
 
         if ($StopViewers) {
             $stopped = $false
@@ -3263,6 +3373,11 @@ function Start-CamNvrWarden {
         is what makes "no orphans" structural rather than a matter of the
         supervisor getting a chance to clean up - a console close does not let
         it run its finally block at all.
+
+        It also ALERTS when the window goes, because the system cannot tell an
+        accidental click from a deliberate close and nothing brings the NVR
+        back. The close stays absolute - no restart - the Operator just finds
+        out it happened. Item [67].
     #>
     param(
         [string]$JobName = (Get-CamNvrJobName),
@@ -3275,7 +3390,7 @@ function Start-CamNvrWarden {
 
     Start-CamJobWarden -JobName $JobName -WindowTitle $WindowTitle `
         -AppearTimeoutSeconds $AppearTimeoutSeconds -PollMs $PollMs -LogPath $LogPath `
-        -StopViewers -ControlSurface $ControlSurface
+        -StopViewers -ControlSurface $ControlSurface -AlertOnWindowClose
 }
 
 
