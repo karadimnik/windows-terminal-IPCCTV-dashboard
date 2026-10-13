@@ -29,9 +29,17 @@ Nothing is recorded until you ask for it, per camera. The viewer and the recorde
 
 All three tool paths are configurable: `$MpvPath` at the top of `mpv.cam.autolayout.autorestart.ps1`, and `FfmpegPath` / `FfprobePath` / `RestreamerExePath` in `recorder.config.json`.
 
+**One thing to settle before step 1: the execution policy.** With nothing set in any scope, the effective policy on Windows **client** editions is `Restricted`, which runs no `.ps1` at all - so step 1 below fails with `cannot be loaded because running scripts is disabled on this system` and nothing in this repository works. Check it with `Get-ExecutionPolicy -List`, and if it is `Restricted` or `Undefined` everywhere, this is enough and needs no elevation:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+```
+
+If the repository arrived as a downloaded `.zip`, Windows marks every file in it as coming from the internet and `RemoteSigned` will still refuse them; `Get-ChildItem *.ps1 | Unblock-File` in the repository folder clears the mark. Cloning with git does not set it. This matters only for the commands **you** type: everything the project launches for itself - the panes, the health strip, the NVR window, all three logon-task launchers - already passes `-NoProfile -ExecutionPolicy Bypass`, so once it is installed the policy cannot stop it starting.
+
 ## Installation
 
-Clone or download the repository to a dedicated folder, then work through this order. Steps 1 to 3 give you the dashboard, steps 4 to 8 add recording, and steps 9 and 10 add the browser UI.
+Clone or download the repository to a dedicated folder, then work through this order. Steps 1 to 3 give you the dashboard, steps 4 to 8 add recording, and steps 9 to 11 add the browser UI.
 
 ```powershell
 # 1. Launch the dashboard once. It prompts for the camera credentials, writes
@@ -46,11 +54,17 @@ Clone or download the repository to a dedicated folder, then work through this o
 copy recorder.config.example.json recorder.config.json
 
 # 4. Pre-flight the recorder. Close the dashboard first: this probes the
-#    cameras, and they allow only two sessions each.
+#    cameras, and they allow only two sessions each. Leave it closed until
+#    step 7, which brings it back up in the right order; or reopen it by
+#    hand with the step 2 command if you want it now.
 .\cam.recorder.ps1 -SelfTest
 
-# 5. Generate the relay config from cameras.json (skip if you are not using
-#    MediaMTX). No credential is written to it.
+# 5. Generate the relay config from cameras.json. No credential is written
+#    to it. Not using MediaMTX? Then skip this AND set RestreamerEnabled to
+#    false in recorder.config.json - left true with no relay to start, the
+#    supervisor retries it on a backoff and logs the failure every time,
+#    and each camera spends RelayReadyWaitSeconds (15 s) on its first start
+#    waiting for a relay path that will never serve.
 .\cam.recorder.ps1 -InstallRestreamer
 
 # 6. Opt cameras in. Nothing records until you do this.
@@ -59,20 +73,30 @@ copy recorder.config.example.json recorder.config.json
 # 7. Start recording. The supervisor also starts and owns MediaMTX.
 .\cam.recorder.ps1 -Nvr
 
-# 8. Optional: have it start itself at every logon instead.
+# 8. Optional: have them start themselves at every logon instead. Two
+#    separate tasks on purpose - the recorder is headless, the grid needs an
+#    interactive desktop - and each switch touches only its own.
 .\cam.recorder.ps1 -InstallAutostart
+.\cam.ps1 -InstallDashboardAutostart
 
-# 9. Build the control UI. This one is a bash command, run in WSL or on any
-#    machine with Go - camui.exe is gitignored, so it does not arrive with the
-#    repository. It lands beside the scripts as .\camui.exe.
+# 9. Build the control UI. A bash command, so run it from WSL or any machine
+#    with bash and Go 1.27 or newer - the Go in Debian/Ubuntu's apt is far
+#    older and will not build it; docs/go-toolchain.md installs a current one.
+#    camui.exe is gitignored, so it does not arrive with the repository. The
+#    script can be run from any directory and puts the binary beside the
+#    scripts as .\camui.exe, which is where it has to be: with no -script-dir
+#    it looks for cam.ps1, cameras.json and recorder.config.json in its own
+#    folder. Built anywhere else, copy it here.
 #      ui/build.sh
 
 # 10. Install the UI's logon task, then start it without waiting for a logon.
 .\cam.ps1 -InstallUi
 Start-ScheduledTask -TaskName IPCCTV-Ui
 
-# 11. Open the UI. Then check everything in one view.
-#      http://127.0.0.1:8787/
+# 11. Open the UI in a browser ON WINDOWS - http://127.0.0.1:8787/. A curl
+#     from inside WSL cannot reach it: WSL's loopback is its own, not the
+#     Windows one, so it fails to connect and the UI looks down when it is
+#     serving perfectly. Then check everything in one view.
 .\cam.ps1 -Status
 ```
 
@@ -167,7 +191,7 @@ Install it with `.\cam.ps1 -InstallUi` and let the logon task run it - that is t
 
 | Command | What it does |
 | --- | --- |
-| `ui/build.sh` | Cross-compiles `camui.exe` into the repository root. A bash command, run in WSL or on any machine with Go. It runs `gofmt`, `go vet` and `go test` first and stops on any of them, so a build that completes is a build that passed. |
+| `ui/build.sh [output]` | Cross-compiles `camui.exe` into the repository root, or to `output` if you name one. A bash command, so it needs WSL or another machine with bash, and **Go 1.27 or newer** - `go.mod` asks for it and an apt-packaged Go will refuse the build; `docs/go-toolchain.md` is the one-time install, and the script also finds a toolchain at `~/.local/go/bin`. It finds its own directory, so the directory you run it from does not matter. It runs `gofmt`, `go vet` and `go test` first and stops on any of them, so a build that completes is a build that passed. |
 | `.\camui.exe` | Runs it in the foreground on `http://127.0.0.1:8787/`, with its log on screen. Useful when you want to watch what it is doing; Ctrl+C stops it. |
 | `-listen <host:port>` | Where to bind. Default `127.0.0.1:8787`. It **refuses to start** on any non-loopback address unless a token of at least 16 characters is configured. |
 | `-config <path>` | A JSON config file: `listen`, `archiveRoot`, `statusFile`, `scriptDir`, `token`. The installed launcher passes `camui.config.json` from beside the binary if that file exists, and nothing else needs to change to use it. |
@@ -349,6 +373,7 @@ The `Properties[0].Value` fallback is needed because a source with no message re
 | `FfmpegPath` / `FfprobePath` | `C:\ffmpeg\bin\...` | The recording tools. |
 | `SegmentSeconds` | `900` | Segment length, aligned to the clock. |
 | `Container` | `mkv` | Which entry of `ContainerProfiles` to use. `fmp4` re-encodes audio to AAC. |
+| `ContainerProfiles` | `mkv` and `fmp4` | The profiles themselves: per profile an `Extension`, a `SegmentFormat`, `SegmentFormatOptions`, and `AudioArgs` / `ExtraArgs` added to the ffmpeg command line. Add a profile here to add a container; there is no other place that knows about one. |
 | `RtspTransport` * | `tcp` | Transport for the recorder's inputs. |
 | `TimeoutMicroseconds` * | `10000000` | ffmpeg's socket timeout. |
 
@@ -387,7 +412,11 @@ The `Properties[0].Value` fallback is needed because a source with no message re
 | `RelayBase` | `rtsp://127.0.0.1:8554` | Where consumers read. Loopback only; the generated config allows anonymous access precisely because nothing off the machine can reach it. |
 | `RelayApiBase` | `http://127.0.0.1:9997` | The control API the readiness probe uses. |
 | `RelayProbeTimeoutMs` | `1500` | Budget for one probe. |
-| `RelayStartupWaitSeconds` * | `20` | How long the supervisor waits for the relay's paths before starting recorders. |
+| `RelayStartupWaitSeconds` * | `20` | How long the supervisor waits for the relay's control API to answer before starting any recorder. The API only, not every path: one offline camera's path can never become ready and would otherwise hold up the healthy ones. |
+| `RelayReadyWaitSeconds` * | `15` | How long **one** consumer waits for **its own** relay path before giving up and taking a direct camera slot. Spent only on a first attempt at batch startup; a later attempt decides on the spot, so a relay that died is left behind immediately. |
+| `RelayReadyPollMs` * | `500` | How often that wait re-asks. Floored at 50. |
+| `ViewerPromoteCheckSeconds` * | `10` | How often an `mpv` pane that is on a direct connection asks whether its camera is back on the relay, so it can hand the second session back. One control-API call per direct pane per interval. `0` switches the watch off and leaves such a pane direct until the dashboard is relaunched. |
+| `StartStaggerMs` * | `300` | Delay between consecutive consumer starts, recorder children and `mpv` panes alike, so six of them do not burst onto the relay, the control API and the cameras in the same instant. |
 
 ### Dashboard layout and health strip
 
@@ -430,7 +459,7 @@ These are measured, not theoretical. None of them is hidden in the code.
 * **One camera has gone quiet.** A camera that writes nothing for `CameraDownAlertMinutes`, 15 by default, alerts under id 110 and gets a `DownSince` in `status.json`. It is judged on file progress alone: a camera that cannot be reached has its `ffmpeg` restarted every backoff period, so the process being alive says nothing.
 * **`cam.ps1 -Stop` is quiet on purpose.** An orderly stop is not a fault, so it raises no toast and writes no event. It still prints the component counts before and after and exits non-zero if anything survived.
 * **Alerts land in the Application log prefixed `IPCCTV: `**, because registering a custom event source writes to `HKLM` and needs elevation. Run `.\cam.recorder.ps1 -InstallEventSource` once from an elevated session to get the `IPCCTV` source and readable `.Message` text instead. Everything works without it; that is what the prefix is for.
-* **The UI will not open.** `.\cam.ps1 -Status` prints whether anything is serving `127.0.0.1:8787` and which pid owns the port. If the task has run and nothing is serving, `%LOCALAPPDATA%\IPCCTV\autostart-ui.log` says how far the launcher got and `camui.log` beside it holds camui's own output. The common cause is `camui.exe` not being built: `-InstallUi` refuses to install a task that cannot work and tells you to run `ui/build.sh`.
+* **The UI will not open.** First, check you are asking from Windows: a `curl http://127.0.0.1:8787/` **from inside WSL** cannot reach it, because WSL's loopback is not the Windows loopback, and the connection is simply refused - which reads exactly like a UI that is down. Open it in a Windows browser, or ask from Windows PowerShell. Then `.\cam.ps1 -Status` prints whether anything is serving `127.0.0.1:8787` and which pid owns the port. If the task has run and nothing is serving, `%LOCALAPPDATA%\IPCCTV\autostart-ui.log` says how far the launcher got and `camui.log` beside it holds camui's own output. The common cause is `camui.exe` not being built: `-InstallUi` refuses to install a task that cannot work and tells you to run `ui/build.sh`.
 
 ### Other symptoms
 
