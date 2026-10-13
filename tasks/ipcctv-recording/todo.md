@@ -957,3 +957,88 @@ were spent on the camera-down alert and the event source above, so they are reco
       The UI is identified by the socket it OWNS, never by image name, so `-Status` stays honest when
       something else has the port: it names that pid instead. It reads whether a token is configured,
       never the token.
+
+---
+
+## The README audited against the code, 2026-10-13 - items [70]-[73]
+
+An independent read-only audit walked the README against the code and found 36 issues. These four
+items cover the ones that were wrong or dangerous, plus the one functional gap the audit exposed.
+Everything here is documentation except [72], which is a code change. Nothing in the running system
+was touched: the Operator was using it throughout.
+
+- [x] **[70]** The false security claim and the dangerous `-Run` advice. The features list said the
+      password "is never written to a command line, a log or the generated relay config". The first
+      third was false: `Get-CamFfmpegArgs` puts `-i rtsp://user:pass@IP/stream1` on ffmpeg's command
+      line, `Invoke-CamViewer` does the same for mpv, and `-SelfTest`'s ffprobe probes the cameras
+      directly the same way. Only the RELAY path is credential-free on the command line, because
+      consumers read `rtsp://127.0.0.1:8554/<path>`. The claim now says which paths are clean and
+      which is not, limitation 4 was broadened from "one copy in MediaMTX's environment block" to
+      cover the command line as well, and the grid section says a direct pane still has it on mpv's
+      own line. **The behaviour is unchanged** - it is the accepted floor, because nothing here has
+      an out-of-band credential source.
+
+      The troubleshooting entry for a stale supervisor said to start it with `-Run`. `-Run` is the
+      FOREGROUND supervisor, so from an ordinary terminal its console is adopted as a tab in the
+      window that already exists and closing that window kills it with no cleanup and orphaned
+      children - the failure this same README records happening four times on 2026-10-12. It now
+      says `.\cam.ps1 -Start`, or `.\cam.recorder.ps1 -Nvr` for the recorder alone, and the `-Run`
+      row in the command reference carries the warning.
+
+- [x] **[71]** Four factual errors corrected. The harness runs **fourteen** camera-free checks, not
+      the nine listed - `inputs`, `viewer`, `crashsafe`, `windowclose` and `uileak` were missing -
+      and a skip is not a failure, with how many skip depending on the machine. `camui.log` is
+      rolled by the LAUNCHER at start and not by the running UI, so a long-lived UI appends past
+      10 MB unbounded; `camui.log.prev` is named and `autostart-ui.log` is called out as having no
+      rotation at all. "The token itself is never read by the scripts" was wrong in its first half,
+      since `Get-CamUiRuntimeState` reads `camui.config.json` and `CAMUI_TOKEN` to answer whether
+      one is configured; it never prints it, which is the half that was right. And the event-log
+      readback hard-coded `ProviderName = 'Application'`, which returns NOTHING once
+      `-InstallEventSource` registers the `IPCCTV` source - it now filters on the `IPCCTV: ` prefix
+      every message carries either way, verified live against this machine's Application log.
+
+      The measured rate was quoted as "92 to 100 GB per day" against a `status.json` measuring 47.9
+      that evening. A fixed number is how a document starts lying, so it is now an observed range
+      with the reason it moves, pointing at `-Status` for the live figure. One self-inflicted error
+      caught in the same pass: the replacement sentence named `cam.ps1 -Status` as a place to read
+      the rate, and `cam.ps1` prints no disk figures at all.
+
+- [x] **[72]** `camui` resolves its archive root from the recorder's own config. `ui/config.go` had
+      `const defaultArchiveRoot = E:\cameras` under a comment claiming it matched `RootPath` in
+      `recorder.config.json`, but nothing ever read `RootPath`: the two agreed by coincidence, and
+      moving the archive would have left the UI showing an empty archive with no error and no clue
+      why. Precedence is now the `-archive-root` flag or `archiveRoot` in `camui.config.json`, then
+      `RootPath`, then the constant as a last resort, with every failure to read `RootPath` falling
+      through rather than refusing to start. Reading reuses `stripBOM` and `jsonString`, the pair
+      the footage code already uses on the same file. The script directory is resolved first,
+      because the recorder's config is found relative to it, and the startup log line gained
+      `archiveRoot`.
+
+      `TestArchiveRootPrecedence` covers all three sources, a UTF-8 BOM, a missing file, a missing
+      key, a blank value and a malformed file; a second test keeps an explicit `-status-file`
+      independent of the root. `gofmt`, `go vet` and `go test` clean, and the package cross-compiles
+      for windows/amd64. **`camui.exe` was deliberately NOT rebuilt** - the Operator was using the
+      running UI - so the fix reaches him at the next UI start, with no reinstall.
+
+- [x] **[73]** Seven gaps filled. Execution policy was never mentioned: it works here only because
+      CurrentUser and LocalMachine are both `Bypass`, and with nothing set the effective policy on a
+      Windows client is `Restricted`, which runs no `.ps1` at all and fails step 1. `ui/build.sh`
+      needs bash and Go 1.27+, which apt's Go is not. A `curl` from inside WSL cannot reach the
+      Windows UI - measured, connection refused - and that looks exactly like a UI that is down. The
+      `IPCCTV-Dashboard` logon task was promised in the features list with no install step, and now
+      shares step 8. Step 4 said to close the dashboard and never said to reopen it. Skipping
+      MediaMTX now also says to set `RestreamerEnabled` false, with what it costs if you do not. And
+      five real keys were missing from the configuration tables: `RelayReadyWaitSeconds`,
+      `RelayReadyPollMs`, `ViewerPromoteCheckSeconds`, `StartStaggerMs` and `ContainerProfiles`.
+
+      One audit claim was **wrong and not acted on as written**: that `ui/build.sh` only runs from
+      the repository root. It resolves its own directory from `BASH_SOURCE`, and running it from
+      `/tmp` with an explicit output path built cleanly. The real constraint is where the BINARY
+      ends up, since `camui.exe` defaults its script directory to its own folder, and that is what
+      the README now says.
+
+      Not fixed, deliberately: the remaining audit findings are wording, ordering and completeness
+      preferences rather than statements the code contradicts, and item **[29]** stays deferred.
+      One code comment is still inaccurate - `Get-CamUiRuntimeState` is prefaced "the token itself
+      is not read" - and was left alone because this commission's boundary was documentation plus
+      the archive root. It is worth one line in a later pass.
