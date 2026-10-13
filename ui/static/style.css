@@ -200,8 +200,9 @@ dialog p{margin:0;color:var(--ink-2)}
   .field{max-width:none}
 
   /* Tap targets. A 40x22 switch is comfortably clickable with a mouse and
-     misses on a thumb; 52x32 with a 24 px knob clears the 34 px guideline. */
-  .tgl{width:52px;height:32px;border-radius:16px}
-  .tgl i{top:4px;left:4px;width:24px;height:24px}
-  .tgl[aria-checked="true"] i{left:24px}
+     misses on a thumb. 56x34 with a 26 px knob meets the 34 px guideline
+     exactly - measured at a genuine 390 px, where 52x32 came back 2 px short. */
+  .tgl{width:56px;height:34px;border-radius:17px}
+  .tgl i{top:4px;left:4px;width:26px;height:26px}
+  .tgl[aria-checked="true"] i{left:26px}
 }
