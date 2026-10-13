@@ -15,7 +15,8 @@ Nothing is recorded until you ask for it, per camera. The viewer and the recorde
 * **One Camera Session for Everything:** An optional local MediaMTX relay pulls each camera once and serves the dashboard and the recorder from it, which matters because these cameras allow very few simultaneous connections.
 * **Secure Credentials (DPAPI):** No hardcoded passwords. The first run prompts for the camera credentials and encrypts them to a local XML file that only your Windows account can decrypt. The password is never written to a command line, a log or the generated relay config.
 * **Portable JSON Configuration:** Add, remove or modify cameras by editing `cameras.json`. Everything else is tunable in `recorder.config.json`.
-* **Runs at Logon:** One command registers an unelevated Scheduled Task that starts the recorder when you log in and restarts it if it dies.
+* **Runs at Logon:** One command registers an unelevated Scheduled Task that starts the recorder when you log in and restarts it if it dies. The viewer grid and the control UI each have one of their own.
+* **A Browser Control UI:** `camui.exe`, one self-contained binary, serves a local web UI that starts and stops everything, toggles recording per camera, edits the camera list and the recording settings, and finds and plays back footage with sound. It owns no state: every number comes from the same `status.json` the health strip reads, and every action is performed by the scripts below, so the UI and the command line can never disagree. It binds `127.0.0.1` and refuses to bind anything else without an auth token.
 
 ## Prerequisites
 
@@ -24,12 +25,13 @@ Nothing is recorded until you ask for it, per camera. The viewer and the recorde
 3. **[ffmpeg](https://www.gyan.dev/ffmpeg/builds/)**, for recording only: extract so that `ffmpeg.exe` and `ffprobe.exe` are in `C:\ffmpeg\bin`.
 4. **[MediaMTX](https://github.com/bluenviron/mediamtx/releases)**, optional but recommended: download `mediamtx_<version>_windows_amd64.zip` and extract `mediamtx.exe` to `C:\mediamtx\mediamtx.exe`. Verified on v1.21.2. Do not put it in `Program Files`, which would need administrator rights. The 55 MB binary is deliberately not in this repository.
 5. **RTSP compatible cameras** (TP-Link Tapo, Amcrest, Reolink, Unifi and anything else that serves `rtsp://user:pass@IP/stream1`).
+6. **Nothing extra for the control UI.** `camui.exe` has the web UI embedded in it, needs no runtime, no web server and no internet access, and is **not** in this repository - it is gitignored like the MediaMTX binary. Build it once with `ui/build.sh`, which needs a Go toolchain on the **build** machine only; `docs/go-toolchain.md` is the one-time install. The NVR machine itself never needs Go.
 
 All three tool paths are configurable: `$MpvPath` at the top of `mpv.cam.autolayout.autorestart.ps1`, and `FfmpegPath` / `FfprobePath` / `RestreamerExePath` in `recorder.config.json`.
 
 ## Installation
 
-Clone or download the repository to a dedicated folder, then work through this order. Steps 1 to 3 give you the dashboard; the rest add recording.
+Clone or download the repository to a dedicated folder, then work through this order. Steps 1 to 3 give you the dashboard, steps 4 to 8 add recording, and steps 9 and 10 add the browser UI.
 
 ```powershell
 # 1. Launch the dashboard once. It prompts for the camera credentials, writes
@@ -59,6 +61,19 @@ copy recorder.config.example.json recorder.config.json
 
 # 8. Optional: have it start itself at every logon instead.
 .\cam.recorder.ps1 -InstallAutostart
+
+# 9. Build the control UI. This one is a bash command, run in WSL or on any
+#    machine with Go - camui.exe is gitignored, so it does not arrive with the
+#    repository. It lands beside the scripts as .\camui.exe.
+#      ui/build.sh
+
+# 10. Install the UI's logon task, then start it without waiting for a logon.
+.\cam.ps1 -InstallUi
+Start-ScheduledTask -TaskName IPCCTV-Ui
+
+# 11. Open the UI. Then check everything in one view.
+#      http://127.0.0.1:8787/
+.\cam.ps1 -Status
 ```
 
 `cameras.json`, `recorder.config.json` and `camera_creds.xml` are local to your machine and are not tracked by git.
@@ -88,6 +103,24 @@ copy recorder.config.example.json recorder.config.json
 The first dashboard run prompts for the camera username and password and encrypts them to `camera_creds.xml` with Windows DPAPI, so only your Windows account on that machine can read them back. The recorder uses the same file and tells you to run the dashboard once if it is missing. To change them, delete `camera_creds.xml` and run the dashboard again.
 
 ## Command reference
+
+### Everything at once: `cam.ps1`
+
+The control surface. It starts, stops and reports every part of the system, including processes it did not start itself.
+
+| Command | What it does |
+| --- | --- |
+| `.\cam.ps1` or `-Status` | What is running, in one view: the supervisor and its `ffmpeg` children, the NVR window and its job, the relay and the paths it serves, the dashboard panes and their `mpv`, the control UI and its address, all three logon tasks, and every process this project owns with its role and parent. Orphans are named as orphans. |
+| `-Start` | Brings the recorder up, waits for the relay to serve, then opens the dashboard. That order matters: a pane that decides before the relay is serving takes a direct camera connection and burns the spare session. |
+| `-Stop` | Stops everything and verifies that it did, orphans from a previous crash included. A no-op when nothing is running, safe to run twice, and silent on the alerting channels by design. It does not stop the control UI. |
+| `-Start -Recorder` / `-Stop -Recorder` | The recorder, its NVR window and MediaMTX only. |
+| `-Start -Dashboard` / `-Stop -Dashboard` | The viewer panes, their `mpv` and the health strip only. |
+| `-InstallDashboardAutostart` | Registers the `IPCCTV-Dashboard` logon task that opens the viewer grid. Unelevated, idempotent, and it never touches the other two tasks. |
+| `-RemoveDashboardAutostart` | Removes that task and its launcher, keeping the log. A clean no-op when they are not there, and a dashboard that is open stays open. |
+| `-InstallUi` | Registers the `IPCCTV-Ui` logon task that starts `camui.exe`. Unelevated, idempotent, and it never touches the other two tasks. It refuses to install when `camui.exe` has not been built, and it does not start the UI - it prints the one command that does. |
+| `-RemoveUi` | Removes that task and its launcher, keeping the logs. A clean no-op when they are not there. A `camui` that is running stays running, and the removal prints the pid that is serving so you can stop it if you want to. |
+
+Nothing here is identified by image name or window title. Every process is classified by the work it owns, and the recording supervisor and its children sit on a keep list that every stop honours.
 
 ### The dashboard: `mpv.cam.autolayout.autorestart.ps1`
 
@@ -127,6 +160,21 @@ Right-click the script and choose "Run with PowerShell", or run it from a termin
 | `-Once` | Render one frame as plain text and exit. |
 
 It reads one file, `_state\status.json`, and nothing else. It never opens an RTSP session, so it can never be the thing that costs you a camera slot.
+
+### The control UI: `camui.exe`
+
+Install it with `.\cam.ps1 -InstallUi` and let the logon task run it - that is the normal way. These are for building it and for the rare direct run.
+
+| Command | What it does |
+| --- | --- |
+| `ui/build.sh` | Cross-compiles `camui.exe` into the repository root. A bash command, run in WSL or on any machine with Go. It runs `gofmt`, `go vet` and `go test` first and stops on any of them, so a build that completes is a build that passed. |
+| `.\camui.exe` | Runs it in the foreground on `http://127.0.0.1:8787/`, with its log on screen. Useful when you want to watch what it is doing; Ctrl+C stops it. |
+| `-listen <host:port>` | Where to bind. Default `127.0.0.1:8787`. It **refuses to start** on any non-loopback address unless a token of at least 16 characters is configured. |
+| `-config <path>` | A JSON config file: `listen`, `archiveRoot`, `statusFile`, `scriptDir`, `token`. The installed launcher passes `camui.config.json` from beside the binary if that file exists, and nothing else needs to change to use it. |
+| `-archive-root <path>` `-status-file <path>` `-script-dir <path>` | Override what it reads. The defaults are `E:\cameras`, `<archive root>\_state\status.json`, and the directory holding the binary. |
+| `-version` | Prints the build stamp and exits. |
+
+The token is never taken from a flag, because a command line is readable by every process on the machine: it comes from the config file or from `CAMUI_TOKEN` in the environment.
 
 ### The test harness: `tests\cam.tests.ps1`
 
@@ -200,6 +248,35 @@ The strip at the bottom of the screen is a Windows Terminal window that the dash
 
 Set `HealthStripHeightPx` to 0 to switch the strip off entirely and get the original full-height grid back.
 
+### The control UI
+
+`camui.exe` is one Go binary with the whole UI embedded in it, serving three screens on `http://127.0.0.1:8787/`:
+
+* **Dashboard** - start and stop everything, the recorder alone or the viewers alone; a record toggle per camera with what that camera is actually doing; free space and the days of headroom left; the supervisor's recent events; and the state of each service. The actions that stop footage being written ask for confirmation first.
+* **Settings** - the camera list (add, remove, rename, change the IP, the stream and the record flag) and the recording keys it is allowed to change: segment length, reserve, hysteresis and retention days. Both files are validated, written atomically and keep their UTF-8 BOM, through the same code the CLI uses.
+* **Footage** - camera, then date, then segment, with the player inline. The index is parsed from the filenames the recorder already writes, so there is no database and nothing opens a segment to list it, and a day's gaps are visible as gaps. A clip is remuxed to fragmented MP4 on demand, video copied and only the 8 kHz audio transcoded, so playback keeps its sound.
+
+It owns no state. Every number comes from `_state\status.json`, the same file the health strip reads, and every change goes through `cam.ps1` and `cam.recorder.ps1`. That is why the command line keeps working unchanged and why the two can never disagree about anything.
+
+**No camera credential ever reaches the browser.** Cameras are addressed by name, and no endpoint returns a relay or RTSP URL of any shape. The harness proves it rather than trusting it: the `uileak` check fetches every endpoint, a real clip included, and scans every byte for the password, for its URL-escaped form and for anything shaped like a credential in a URL, with a positive control proving the scanner can see one.
+
+**Loopback only, deliberately.** `127.0.0.1` needs no `urlacl` and no elevation, and the binary **refuses to start** on any address that is not exclusively loopback unless an auth token of at least 16 characters is configured. Exposing it beyond this machine is therefore a deliberate act rather than something that can happen by accident. To do it, put a config file beside the binary:
+
+```json
+{
+  "listen": "0.0.0.0:8787",
+  "token": "a-long-random-string-of-at-least-16-characters"
+}
+```
+
+Save that as `camui.config.json` next to `camui.exe`, restart the UI, and nothing else has to change: the launcher passes that file if it exists, and `-Status` reports the address it found and where it read it from. Every request then needs the token, which can arrive once as `?token=...` and is moved into an HttpOnly cookie so it stops appearing in the address bar, in history and in any `Referer`. The token itself is never read by the scripts and never printed; `-Status` says only whether one is configured.
+
+**How it runs.** `-InstallUi` registers `IPCCTV-Ui`, a logon task that runs a generated launcher at `%LOCALAPPDATA%\IPCCTV\start-ui.ps1`. The launcher waits for `camui.exe` to be reachable, exactly as the recorder's launcher waits for the scripts, then starts it in a console of its **own** with no window. That last part is not cosmetic: a console created with a window is handed to Windows Terminal as a tab in the window that already exists, and closing that window would take the UI with it. It starts nothing at all if the address is already being served, so a second start cannot fight the first one for the port, and it exits non-zero if nothing is serving afterwards, which hands the retry to the task's restart policy. camui logs to stdout only, so a thin `powershell.exe` holds the pipe and appends it to `%LOCALAPPDATA%\IPCCTV\camui.log`, rolled once past 10 MB because a line per request is otherwise unbounded. The launcher's own log is `autostart-ui.log` beside it.
+
+The binary is never copied anywhere, so a rebuild takes effect the next time the UI starts, with no reinstall. Stop it before rebuilding and start it again afterwards: a running process keeps the code it started with, and with the repository on the WSL share the write is not refused the way Windows refuses to overwrite a running binary on a local drive.
+
+`cam.ps1 -Stop` does not stop the UI, which is the point - the thing you start everything from should still be there after you have stopped everything. When you do want it gone, `-Status` prints the pid that owns the port.
+
 ### Autostart
 
 `-InstallAutostart` registers a Scheduled Task that runs at logon as you, with an interactive, limited token. It needs no elevation and it never prompts. Reinstalling replaces the registration rather than adding a second one. The task has no execution time limit, because the default three day limit would otherwise kill a 24/7 supervisor on day three, it ignores a second instance, and it restarts the task up to three times at one minute intervals if it fails.
@@ -207,6 +284,8 @@ Set `HealthStripHeightPx` to 0 to switch the strip off entirely and get the orig
 The task opens the NVR window rather than running the supervisor directly, and that is not cosmetic. Windows 11 hands every console created with a window to the default terminal application, which here is Windows Terminal, and with `windowingBehavior` set to `useExisting` the console arrives as a **tab in whichever terminal window already exists** - the Operator's. `-WindowStyle Hidden` does not prevent it, because the window belongs to Windows Terminal rather than to `powershell.exe`. Closing that window sent `CTRL_CLOSE_EVENT` to the supervisor, which PowerShell answers by terminating without running any `finally` block: no shutdown line in the log, and every ffmpeg plus MediaMTX left orphaned and still writing. It happened four times on 2026-10-12. Launching the supervisor as a pane in a window of its own removes the adoption, and the job object `cam.nvr` makes closing that window stop everything in it.
 
 The task does not point at `cam.recorder.ps1` directly. It points at a small generated launcher at `%LOCALAPPDATA%\IPCCTV\start-recorder.ps1`, which waits for the recorder's path to become reachable, logs what it saw to `%LOCALAPPDATA%\IPCCTV\autostart.log`, and then forwards to `cam.recorder.ps1 -Nvr`. That indirection exists because a repository kept inside WSL is reached over `\\wsl.localhost`, which does not resolve until WSL's file server is running, and a Scheduled Task has no way to wait for a path. The launcher holds no copy of the scripts, so it cannot drift from the repository. `-RemoveAutostart` deletes the launcher along with the task, keeping only the log.
+
+There are **three** tasks, one per part, and each install switch touches only its own: `IPCCTV-Recorder` from `.\cam.recorder.ps1 -InstallAutostart`, `IPCCTV-Dashboard` from `.\cam.ps1 -InstallDashboardAutostart`, and `IPCCTV-Ui` from `.\cam.ps1 -InstallUi`. They are separate because their lifetimes are: the recorder is a headless service, the grid is a desktop artifact that needs an interactive session, and the UI is a local server that should outlive both. `cam.ps1 -Status` lists all three with their state and the launcher each one points at.
 
 ### When something stops unexpectedly
 
@@ -231,10 +310,22 @@ Expected or not is read from what the supervisor recorded, never from an exit co
 
 A camera that has written nothing for `CameraDownAlertMinutes` alerts the same three ways and publishes `DownSince` in its `status.json` row. It is judged on file progress alone: a camera that cannot be reached has its `ffmpeg` restarted every backoff period, so process liveness says nothing.
 
+**Closing the NVR window is the one stop that nothing recovers from.** It raises its own alert - event id 103, and a Warning rather than an Error, because nothing malfunctioned: somebody closed the window, and the supervisor, MediaMTX, every `ffmpeg` and the viewers went with it, which is exactly what that window is for. **Nothing restarts them.** The logon task ran to completion when it opened the window, so its restart policy has nothing to restart, and the next automatic start is the next logon. Start it again with `.\cam.ps1 -Start`. `status.json` records `StopKind` `window-closed` and a `LastWindowClose` timestamp, so the UI and the log agree about what happened.
+
+The five event ids, which are what separate these entries from everyone else's in a shared log:
+
+| id | Level | What it means |
+| --- | --- | --- |
+| `100` | Error | the supervisor stopped unexpectedly and is being restarted |
+| `101` | Warning | it is recording again |
+| `102` | Error | it stopped and the restart budget is spent, so it is staying down |
+| `103` | Warning | the NVR window was closed, so nothing is recording and nothing will restart it |
+| `110` | Warning | one camera has written nothing for `CameraDownAlertMinutes` |
+
 Reading the alerts back:
 
 ```powershell
-Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application'; Id = 100,101,102,110 } |
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application'; Id = 100,101,102,103,110 } |
   Select-Object TimeCreated, Id, LevelDisplayName, @{ n = 'Text'; e = { if ($_.Message) { $_.Message } else { $_.Properties[0].Value } } }
 ```
 
@@ -315,14 +406,27 @@ These are measured, not theoretical. None of them is hidden in the code.
 4. **One copy of the camera password lives in MediaMTX's environment block.** That is the floor: neither ffmpeg nor MediaMTX has an out-of-band credential source, so the URL has to reach it somehow. Nothing is written to disk, and every log line and console message is redacted to `rtsp://***:***@host/stream1`.
 5. **Segment boundaries overshoot the clock mark by up to one GOP**, because a stream copy can only cut on a keyframe.
 6. **Tapo cameras keep a separate account for RTSP**, distinct from the TP-Link cloud login. Changing the cloud password does not affect RTSP. To change the RTSP credential, delete `camera_creds.xml` and run the dashboard again.
-7. **Some paths have never been exercised over a long run:** log rotation at `LogMaxBytes`, the full 900 s production segment, the backoff reset at `HealthyResetSeconds`, the 2250 s stall watchdog and `MaxRetentionDays`. They are implemented and unit-checked, not soak-tested.
+7. **Some paths have never actually fired here:** log rotation at `LogMaxBytes`, the pruner's first deletion (free space has never fallen to `ReserveGB` on this machine), the age cap `MaxRetentionDays`, the backoff reset at `HealthyResetSeconds` and the 2250 s stall watchdog. They are implemented and unit-checked, not soak-tested. The 900 s production segment is no longer on that list: real 15-minute segments have been measured at 900.02 to 900.05 s under `ffprobe`.
 8. **Several tuning keys are absent from `recorder.config.example.json`.** They are marked * in the tables above; add them by hand if you want to change one.
 9. **The test harness leaves its sandbox behind on purpose**, under `%TEMP%\cam-tests\<check>`, so you can inspect what a check did. The credential copy it makes is always deleted; footage a live check recorded is not. Delete the folder when you are done with it.
 10. **Autostart depends on the recorder's path being reachable at logon.** If the repository lives inside WSL, the launcher polls `\\wsl.localhost` for up to 300 s and the task then retries up to three times, but nothing records while WSL is down. Keeping the repository on a local drive avoids the wait entirely. The launcher log at `%LOCALAPPDATA%\IPCCTV\autostart.log` is the first thing to read if autostart did not work.
 11. **The health strip does not quite reach the screen edges.** It paints x 6 to 1906 of 1920, so about 6 px of desktop shows at its left edge and 13 px at its right. Top and bottom are exact and no video is affected. It cannot be fixed while the strip is a Windows Terminal window: covering the full width needs a window rect wider than the screen, and that is exactly what makes Windows Terminal mis-size itself.
-12. **`status.json` reports configured relay paths, not ready ones.** The strip says `N path(s)` and tells relay from direct per camera in its `MODE` column, which is the honest signal; do not read the count as readiness.
+12. **The footage player cannot seek ahead of what has arrived.** A clip is remuxed on demand and streamed, so the response carries `Accept-Ranges: none` and no length, and the browser can only seek inside what it has already buffered. Nothing is lost, it is just a wait: a 15-minute segment is about 170 MB and arrives in under ten seconds here, after which the whole clip is seekable.
+13. **Two harness checks always skip on a live NVR.** `autostart` refuses to run while a task named `IPCCTV-Recorder` is registered, because it would rewrite and then delete the real autostart, and `procs` refuses while the recorder is running, because the processes it hunts for already have a legitimate owner. On this machine both skip permanently, so a green run reads twelve passes and two skips.
+14. **`status.json` reports configured relay paths, not ready ones.** The strip says `N path(s)` and tells relay from direct per camera in its `MODE` column, which is the honest signal; do not read the count as readiness.
 
 ## Troubleshooting
+
+### If something is wrong, read this first
+
+* **Nothing is recording and nothing is coming back.** The NVR window was closed. The window titled `cam.nvr` **is** the NVR: closing it stops the supervisor, MediaMTX, every `ffmpeg` and the viewers, and nothing restarts them. You get one alert, event id 103. Start it again with `.\cam.ps1 -Start`.
+* **A supervisor that crashed comes back by itself.** The NVR pane is a host that restarts it, alerting as it goes (id 100) and again once it is recording (id 101), up to five times in thirty minutes. Out of budget it alerts once more (id 102) and stays down rather than looping all night.
+* **One camera has gone quiet.** A camera that writes nothing for `CameraDownAlertMinutes`, 15 by default, alerts under id 110 and gets a `DownSince` in `status.json`. It is judged on file progress alone: a camera that cannot be reached has its `ffmpeg` restarted every backoff period, so the process being alive says nothing.
+* **`cam.ps1 -Stop` is quiet on purpose.** An orderly stop is not a fault, so it raises no toast and writes no event. It still prints the component counts before and after and exits non-zero if anything survived.
+* **Alerts land in the Application log prefixed `IPCCTV: `**, because registering a custom event source writes to `HKLM` and needs elevation. Run `.\cam.recorder.ps1 -InstallEventSource` once from an elevated session to get the `IPCCTV` source and readable `.Message` text instead. Everything works without it; that is what the prefix is for.
+* **The UI will not open.** `.\cam.ps1 -Status` prints whether anything is serving `127.0.0.1:8787` and which pid owns the port. If the task has run and nothing is serving, `%LOCALAPPDATA%\IPCCTV\autostart-ui.log` says how far the launcher got and `camui.log` beside it holds camui's own output. The common cause is `camui.exe` not being built: `-InstallUi` refuses to install a task that cannot work and tells you to run `ui/build.sh`.
+
+### Other symptoms
 
 * **Terminal flashes and closes immediately.** `$MpvPath` must point at `mpv.com`, the command-line executable, not `mpv.exe`.
 * **Streams will not connect.** Check the IPs in `cameras.json`, and check your camera's URL shape: this project builds `rtsp://user:pass@IP/<Quality>`. If your manufacturer uses a different path structure, `Get-CamRtspUrl` in `cam.common.ps1` is the one place that builds it, for the dashboard and the recorder alike.
