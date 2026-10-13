@@ -140,6 +140,12 @@ function Invoke-CamCheckInputs {
     $cameras = Get-CamList -Path (Join-Path -Path $repo -ChildPath 'cameras.json')
     $paths = @(foreach ($camera in $cameras) { Get-CamRelayPathName -SafeName (Get-CamSafeName -Name $camera.Name) })
     $serving = @($paths | Select-Object -Skip 1)
+    # One call outside the stopwatch, because the FIRST call through this path
+    # pays for PowerShell compiling it. Measured on 2026-10-13: the cold batch
+    # took 220 ms against a 200 ms limit and failed a check that was asserting
+    # nothing about compilation. A probe costs 400 ms, so the limit still
+    # cannot be met if even one of the six probed.
+    [void](Get-CamInputUrl -Config $config -RelayPathName $paths[0] -DirectUrl $direct -ReadyPaths $serving)
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $modes = @(foreach ($path in $paths) {
         (Get-CamInputUrl -Config $config -RelayPathName $path -DirectUrl $direct -ReadyPaths $serving).Mode

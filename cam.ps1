@@ -465,15 +465,31 @@ function Invoke-CamStartAll {
             else {
                 Write-Host ("  starting the '{0}' task" -f $RecorderTaskName)
                 & schtasks.exe /run /tn $RecorderTaskName | Out-Null
-                for ($wait = 0; $wait -lt 40; $wait++) {
+
+                # 60s, because the chain from the task to the first heartbeat
+                # is long and measured at 20-30s: the task starts a launcher
+                # stub which polls for the repo path, which runs -Nvr, which
+                # starts a warden, waits for its job, calls wt.exe, and only
+                # then does the pane start the supervisor. The old limit was
+                # 20s and sat right on that figure - four launches on
+                # 2026-10-13 were reported as failures while recording in fact
+                # began seconds later. Now that this exit code is acted on, a
+                # false alarm costs as much as the silence it replaced.
+                $waitSeconds = 60
+                $started = Get-Date
+                $deadline = $started.AddSeconds($waitSeconds)
+                while ((Get-Date) -lt $deadline) {
                     Start-Sleep -Milliseconds 500
                     $state = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
                     if ($state.Running) { break }
                 }
-                if ($state.Running) { Write-Host ("  up - {0}" -f $state.Reason) -ForegroundColor Green }
+                $took = [int]((Get-Date) - $started).TotalSeconds
+                if ($state.Running) {
+                    Write-Host ("  up after {0}s - {1}" -f $took, $state.Reason) -ForegroundColor Green
+                }
                 else {
-                    Write-Host ("  did not report running within 20s - {0}" -f $state.Reason) -ForegroundColor Red
-                    $recorderProblem = "the supervisor did not report running within 20s - {0}" -f $state.Reason
+                    Write-Host ("  did not report running within {0}s - {1}" -f $waitSeconds, $state.Reason) -ForegroundColor Red
+                    $recorderProblem = "the supervisor did not report running within {0}s - {1}" -f $waitSeconds, $state.Reason
                 }
             }
         }
