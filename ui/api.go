@@ -36,6 +36,10 @@ type StatusResponse struct {
 	Supervisor SupervisorState     `json:"supervisor"`
 	Status     map[string]any      `json:"status"`
 	Tasks      map[string]TaskInfo `json:"tasks"`
+
+	// Acknowledged maps a persistent notice's key to the timestamp of the
+	// event the Operator has said he has seen. See notice.go.
+	Acknowledged map[string]string `json:"acknowledged"`
 }
 
 // StatusFileInfo describes the status.json read, so the page can tell live data
@@ -80,6 +84,9 @@ type API struct {
 	// actionMu serialises every state change: one action at a time.
 	actionMu sync.Mutex
 
+	// ackMu serialises read-modify-write on the acknowledgement sidecar.
+	ackMu sync.Mutex
+
 	mu        sync.Mutex
 	tasks     map[string]TaskInfo
 	tasksRead time.Time
@@ -97,6 +104,7 @@ func NewAPI(cfg Config, log *slog.Logger) *API {
 // Routes registers the API handlers on mux.
 func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/status", a.handleStatus)
+	mux.HandleFunc("POST /api/acknowledge", a.handleAcknowledge)
 	mux.HandleFunc("POST /api/control", a.handleControl)
 	mux.HandleFunc("POST /api/cameras/{name}/record", a.handleRecordToggle)
 	mux.HandleFunc("GET /api/cameras", a.handleGetCameras)
@@ -132,6 +140,17 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// browser: State alone is not liveness, and the rule belongs beside the
 	// one in cam.common.ps1 that it mirrors.
 	body.Supervisor = SupervisorStateOf(body.Status, a.statusIntervalSeconds(), time.Now(), a.alive)
+
+	// Which persistent notices have been seen. Read here so the page knows
+	// what to hide without holding any of that state in the browser, where it
+	// would not survive a reload or reach a second browser. An unreadable
+	// sidecar reports nothing acknowledged, so the banner shows - the safe
+	// direction for a notice about an outage.
+	if acknowledged, err := a.acknowledgedNotices(); err != nil {
+		a.log.Warn("acknowledgement sidecar unreadable", "path", a.cfg.AcknowledgedFile(), "error", err)
+	} else {
+		body.Acknowledged = acknowledged
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

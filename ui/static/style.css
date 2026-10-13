@@ -165,8 +165,8 @@ footer.note{margin-top:22px;color:var(--ink-3);font-size:12px;border-top:1px sol
 .formnote.bad{color:#f09a9a}
 .formnote.good{color:#9ad39a}
 
-/* ---- pending: an action takes seconds, so it must never look frozen ---- */
-.btn[aria-busy="true"]{position:relative;color:var(--ink-3)}
+/* ---- pending: an action takes up to a minute, so it must never look frozen ---- */
+.btn[aria-busy="true"]{position:relative;color:var(--ink-3);font-variant-numeric:tabular-nums}
 .btn[aria-busy="true"]::after{content:"";position:absolute;inset:auto 8px 6px 8px;height:2px;
   background:linear-gradient(90deg,transparent,var(--accent),transparent);
   animation:sweep 1.1s linear infinite}
@@ -184,6 +184,11 @@ footer.note{margin-top:22px;color:var(--ink-3);font-size:12px;border-top:1px sol
 .toast pre{margin:8px 0 0;font:12px/1.5 var(--mono);color:var(--ink-2);white-space:pre-wrap;
   max-height:170px;overflow:auto}
 .toast .x{background:none;border:0;color:inherit;opacity:.7;padding:0 4px}
+
+/* ---- progress: the elapsed seconds, so a 52 s action is visibly alive ---- */
+#progress:not(:empty){margin-bottom:16px}
+#progress .elapsed{font-variant-numeric:tabular-nums}
+#progress .detail{margin-top:3px;font-size:12px;opacity:.85}
 
 /* ---- footage ----
    The three-column picker, the player and the gap banner are the mockup's. The

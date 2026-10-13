@@ -61,6 +61,14 @@ func (c Config) RecorderConfigFile() string {
 	return filepath.Join(c.ScriptDir, "recorder.config.json")
 }
 
+// AcknowledgedFile is camui's own sidecar, beside status.json in _state. It is
+// the one file camui writes itself, and it is separate from status.json
+// because the supervisor rewrites that document every few seconds - see
+// notice.go.
+func (c Config) AcknowledgedFile() string {
+	return filepath.Join(filepath.Dir(c.StatusFile), acknowledgedFileName)
+}
+
 // LoadConfig merges the config file (if any), the flag values, and CAMUI_TOKEN,
 // then fills in defaults. A flag wins over the file; an empty flag means unset.
 //

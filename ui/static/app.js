@@ -65,23 +65,101 @@ function chip(cls, text) {
 // poll and would otherwise wipe the state of an action still running.
 // ---------------------------------------------------------------------------
 
-let busyControl = null;        // {scope, action} while cam.ps1 is running
+let busyControl = null;        // {scope, action, startedAt} while cam.ps1 is running
+let busyTicker = null;         // the 1 s interval that keeps the elapsed count moving
 const busyCameras = new Set(); // camera names whose record toggle is in flight
 
 const anyBusy = () => busyControl !== null || busyCameras.size > 0;
+
+const SCOPE_LABEL = { all: "everything", recorder: "the recorder", dashboard: "the viewers" };
+
+// ACTION_EXPECTATION is what each action actually took when it was measured on
+// this system: stop viewers 15.2s, start viewers 12.5s, stop recorder 19.7s,
+// start recorder 27.3s, stop everything 17.3s, start everything 52.1s.
+//
+// Up to about a minute, which is long enough that an indicator which does not
+// visibly change reads as a hung page - the Operator reported exactly that. So
+// the elapsed seconds tick, on the pressed button and beside it, and the page
+// says how long this particular action usually takes.
+//
+// There is deliberately no progress bar. Nothing here can know what fraction
+// of a start is done, and a bar stalled at 80% is a worse lie than an honest
+// counter.
+const ACTION_EXPECTATION = {
+  "start:all": { seconds: 52.1, usual: "usually takes up to a minute" },
+  "stop:all": { seconds: 17.3, usual: "usually takes about 20 seconds" },
+  "start:recorder": { seconds: 27.3, usual: "usually takes about half a minute" },
+  "stop:recorder": { seconds: 19.7, usual: "usually takes about 20 seconds" },
+  "start:dashboard": { seconds: 12.5, usual: "usually takes about 15 seconds" },
+  "stop:dashboard": { seconds: 15.2, usual: "usually takes about 15 seconds" },
+};
+
+// ACTION_CEILING_SECONDS mirrors controlTimeout in ui/control.go. Past it the
+// server has given up on the script, so the page says so plainly rather than
+// counting upwards for ever.
+const ACTION_CEILING_SECONDS = 180;
+
+const busySeconds = () => (busyControl ? Math.floor((Date.now() - busyControl.startedAt) / 1000) : 0);
 
 function renderControls() {
   for (const button of el("controls").querySelectorAll("button")) {
     const mine = busyControl && button.dataset.scope === busyControl.scope && button.dataset.action === busyControl.action;
     if (mine) {
       button.setAttribute("aria-busy", "true");
-      button.textContent = busyControl.action === "start" ? "Starting…" : "Stopping…";
+      button.textContent = (busyControl.action === "start" ? "Starting… " : "Stopping… ") + busySeconds() + "s";
       button.disabled = true;
     } else {
       button.removeAttribute("aria-busy");
       button.textContent = button.dataset.label;
       button.disabled = anyBusy();
     }
+  }
+}
+
+// renderProgress says what is running, for how long it has been running, and
+// how long that normally takes. Called every second while an action is in
+// flight, which is what makes it visible movement rather than a still frame.
+function renderProgress() {
+  const region = el("progress");
+  if (!busyControl) {
+    region.innerHTML = "";
+    return;
+  }
+
+  const seconds = busySeconds();
+  const expected = ACTION_EXPECTATION[busyControl.action + ":" + busyControl.scope];
+  const ceilingMinutes = ACTION_CEILING_SECONDS / 60;
+
+  let detail;
+  if (seconds > ACTION_CEILING_SECONDS) {
+    detail = "This has passed the " + ceilingMinutes + " minutes camui allows an action. " +
+      "It is being given up on, and the result will say what happened.";
+  } else if (!expected) {
+    detail = "camui gives up at " + ceilingMinutes + " minutes.";
+  } else if (seconds > expected.seconds) {
+    detail = "Longer than usual - it " + expected.usual + ". " +
+      "Still waiting; camui gives up at " + ceilingMinutes + " minutes.";
+  } else {
+    detail = "This " + expected.usual + ".";
+  }
+
+  region.innerHTML = '<div class="toast warn"><div class="body"><b>' +
+    esc((busyControl.action === "start" ? "Starting " : "Stopping ") + SCOPE_LABEL[busyControl.scope] + "… ") +
+    '<span class="elapsed">' + seconds + 's</span></b><div class="detail">' + esc(detail) + "</div></div></div>";
+}
+
+function startBusyTicker() {
+  stopBusyTicker();
+  busyTicker = setInterval(() => {
+    renderControls();
+    renderProgress();
+  }, 1000);
+}
+
+function stopBusyTicker() {
+  if (busyTicker !== null) {
+    clearInterval(busyTicker);
+    busyTicker = null;
   }
 }
 
@@ -180,23 +258,31 @@ function render(payload, fetchError) {
   }
   el("banner").innerHTML = banner;
 
-  // ---- the last unexpected stop, shown whether or not it is current ----
-  // A crash the UI does not mention is a crash nobody finds out about.
-  const unexpected = status && status.LastUnexpectedStop;
+  // ---- persistent notices, shown whether or not they are current ----
+  // A crash the UI does not mention is a crash nobody finds out about, so these
+  // records outlive the recovery that followed them. Each can be dismissed, and
+  // the dismissal is keyed to the event's own timestamp - see NOTICES.
   const kind = (status && status.StopKind) || "";
-  let notice = "";
-  if (unexpected && unexpected.At) {
-    const current = !live && (kind === "unexpected" || kind === "interrupted");
-    notice = bannerHTML(current ? "crit" : "warn",
-      current ? "The recorder stopped on its own." : "The recorder stopped on its own earlier.",
-      "At " + since(unexpected.At) + ": " + esc(unexpected.Reason || "no reason recorded") +
-      (unexpected.DetectedBy ? " Detected by the " + esc(unexpected.DetectedBy) + "." : "") +
-      (current ? "" : " It is running again now."));
-  } else if (!live && kind && kind !== "requested") {
-    notice = bannerHTML("crit", "The recorder stopped on its own.",
-      "Its last status was " + esc(kind) + ". " + esc(supervisor.reason || ""));
+  const acknowledged = (payload && payload.acknowledged) || {};
+  const notices = [];
+  for (const notice of NOTICES) {
+    const record = status && status[notice.key];
+    if (!record || !record.At) continue;
+    if (acknowledged[notice.key] === record.At) continue;
+    notices.push(noticeHTML(notice, record, !live && notice.currentKinds.includes(kind)));
   }
-  el("stopNotice").innerHTML = notice;
+
+  // The fallback: a stop kind the file carries no record for. It cannot be
+  // dismissed, because there is no event timestamp to key a dismissal to, and
+  // it does not need to be - unlike the records above it describes the CURRENT
+  // state and goes of its own accord when the recorder is back.
+  const described = NOTICES.some((notice) =>
+    notice.currentKinds.includes(kind) && status && status[notice.key] && status[notice.key].At);
+  if (!described && !live && kind && kind !== "requested") {
+    notices.push(bannerHTML("crit", "The recorder stopped on its own.",
+      "Its last status was " + esc(kind) + ". " + esc(supervisor.reason || "")));
+  }
+  el("stopNotice").innerHTML = notices.join("");
 
   // ---- stat tiles: exactly ONE hero figure ----
   const days = disk.ProjectedDaysRemaining;
@@ -287,8 +373,68 @@ function render(payload, fetchError) {
   renderControls();
 }
 
-function bannerHTML(cls, title, body) {
-  return '<div class="banner ' + cls + '">' + chip(cls, "") + "<div><b>" + esc(title) + "</b> " + body + "</div></div>";
+function bannerHTML(cls, title, body, trailing) {
+  return '<div class="banner ' + cls + '">' + chip(cls, "") + "<div><b>" + esc(title) + "</b> " + body + "</div>" +
+    (trailing || "") + "</div>";
+}
+
+// ---------------------------------------------------------------------------
+// Persistent notices
+//
+// status.json keeps the last unexpected stop and the last window close after
+// the recorder is running again, deliberately: an outage must not be erased by
+// the recovery that followed it. These are therefore the banners that stay, and
+// the only way to clear one is to say it has been seen.
+//
+// That acknowledgement is keyed by the event's OWN timestamp and stored by the
+// server in a sidecar beside status.json, not in this browser. So it holds
+// after a reload and from a second browser, and a LATER stop - a different
+// timestamp - appears again rather than being swallowed by an older dismissal.
+// ---------------------------------------------------------------------------
+
+const NOTICES = [
+  {
+    key: "LastUnexpectedStop",
+    current: "The recorder stopped on its own.",
+    earlier: "The recorder stopped on its own earlier.",
+    currentKinds: ["unexpected", "interrupted"],
+  },
+  {
+    key: "LastWindowClose",
+    current: "The NVR window was closed, so recording stopped.",
+    earlier: "The NVR window was closed earlier, and recording stopped with it.",
+    currentKinds: ["window-closed"],
+  },
+];
+
+function noticeHTML(notice, record, current) {
+  return bannerHTML(current ? "crit" : "warn", current ? notice.current : notice.earlier,
+    "At " + since(record.At) + ": " + esc(record.Reason || "no reason recorded") +
+    (record.DetectedBy ? " Detected by the " + esc(record.DetectedBy) + "." : "") +
+    (current ? "" : " It is running again now."),
+    '<button class="btn small" data-ack="' + esc(notice.key) + '" data-at="' + esc(record.At) +
+    '" title="Stop showing this one. A later stop appears again.">Dismiss</button>');
+}
+
+// acknowledgeNotice records that this event has been seen, keyed by its own
+// timestamp. Rendered from the response rather than from the next poll, which
+// is up to five seconds away.
+async function acknowledgeNotice(button) {
+  button.disabled = true;
+  try {
+    const { ok, payload } = await sendJSON("POST", "api/acknowledge",
+      { notice: button.dataset.ack, at: button.dataset.at });
+    if (!ok || !payload.ok) {
+      button.disabled = false;
+      toast("crit", "Could not dismiss that notice: " + (payload.error || "unknown error"));
+      return;
+    }
+    if (last) last.acknowledged = payload.notices;
+    render(last, null);
+  } catch (err) {
+    button.disabled = false;
+    toast("crit", "The server could not be reached: " + (err.message || err));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -339,8 +485,6 @@ async function sendJSON(method, path, body) {
   return { ok: response.ok, status: response.status, payload };
 }
 
-const SCOPE_LABEL = { all: "everything", recorder: "the recorder", dashboard: "the viewers" };
-
 async function runControl(scope, action) {
   if (anyBusy()) return;
 
@@ -357,9 +501,14 @@ async function runControl(scope, action) {
     if (!ok) return;
   }
 
-  busyControl = { scope, action };
+  // The progress region replaces the previous toast: the toast said "this
+  // takes a few seconds" for an action measured at 52, and never changed once
+  // it was on screen.
+  busyControl = { scope, action, startedAt: Date.now() };
+  el("toast").innerHTML = "";
   renderControls();
-  toast("warn", (action === "start" ? "Starting " : "Stopping ") + SCOPE_LABEL[scope] + "… this takes a few seconds.");
+  renderProgress();
+  startBusyTicker();
 
   try {
     const { ok, payload } = await sendJSON("POST", "api/control", { scope, action });
@@ -393,6 +542,8 @@ async function runControl(scope, action) {
     toast("crit", "The server could not be reached: " + (err.message || err));
   } finally {
     busyControl = null;
+    stopBusyTicker();
+    renderProgress();
     renderControls();
     await poll();
   }
@@ -957,6 +1108,12 @@ for (const button of el("controls").querySelectorAll("button")) {
 // Both camera layouts and both screens are rendered from innerHTML, so the
 // handlers are delegated rather than attached per element.
 document.addEventListener("click", (event) => {
+  const dismiss = event.target.closest("#stopNotice [data-ack]");
+  if (dismiss && !dismiss.disabled) {
+    acknowledgeNotice(dismiss);
+    return;
+  }
+
   const dashToggle = event.target.closest("#camsA .tgl, #camsC .tgl");
   if (dashToggle && !dashToggle.disabled) {
     const name = dashToggle.dataset.camera;
