@@ -33,6 +33,7 @@ type StatusResponse struct {
 	Schema     int                 `json:"schema"`
 	ServerTime string              `json:"serverTime"`
 	StatusFile StatusFileInfo      `json:"statusFile"`
+	Supervisor SupervisorState     `json:"supervisor"`
 	Status     map[string]any      `json:"status"`
 	Tasks      map[string]TaskInfo `json:"tasks"`
 }
@@ -62,31 +63,53 @@ type TaskInfo struct {
 	Error      string `json:"error"`
 }
 
-// API serves the read-only status endpoint.
+// API serves the whole HTTP API: status from a file read, actions and settings
+// writes through the repository's own scripts.
 type API struct {
-	statusPath string
-	log        *slog.Logger
+	cfg Config
+	log *slog.Logger
+
+	// runScript is the PowerShell invoker, injected so the handlers can be
+	// tested without a PowerShell on the machine.
+	runScript func(timeout time.Duration, script string, args ...string) psResult
+
+	// alive reports whether a PID is a live process, injected for the same
+	// reason. It is what makes a stale "running" status detectable.
+	alive func(int) bool
+
+	// actionMu serialises every state change: one action at a time.
+	actionMu sync.Mutex
 
 	mu        sync.Mutex
 	tasks     map[string]TaskInfo
 	tasksRead time.Time
 }
 
-// NewAPI returns an API reading the given status.json.
-func NewAPI(statusPath string, log *slog.Logger) *API {
-	return &API{statusPath: statusPath, log: log}
+// NewAPI returns an API serving from cfg.
+func NewAPI(cfg Config, log *slog.Logger) *API {
+	api := &API{cfg: cfg, log: log, alive: processAlive}
+	api.runScript = func(timeout time.Duration, script string, args ...string) psResult {
+		return runPowerShell(cfg.ScriptDir, timeout, script, args...)
+	}
+	return api
 }
 
 // Routes registers the API handlers on mux.
 func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/status", a.handleStatus)
+	mux.HandleFunc("POST /api/control", a.handleControl)
+	mux.HandleFunc("POST /api/cameras/{name}/record", a.handleRecordToggle)
+	mux.HandleFunc("GET /api/cameras", a.handleGetCameras)
+	mux.HandleFunc("PUT /api/cameras", a.handlePutCameras)
+	mux.HandleFunc("GET /api/config", a.handleGetConfig)
+	mux.HandleFunc("PUT /api/config", a.handlePutConfig)
 }
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	body := StatusResponse{
 		Schema:     1,
 		ServerTime: time.Now().Format(time.RFC3339),
-		StatusFile: StatusFileInfo{Path: a.statusPath},
+		StatusFile: StatusFileInfo{Path: a.cfg.StatusFile},
 		Tasks:      a.taskStates(),
 	}
 
@@ -98,10 +121,15 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// A missing or malformed status file is a state the page must
 		// render, not a reason to fail the request.
 		body.StatusFile.Error = err.Error()
-		a.log.Warn("status file unreadable", "path", a.statusPath, "error", err)
+		a.log.Warn("status file unreadable", "path", a.cfg.StatusFile, "error", err)
 	} else {
 		body.Status = status
 	}
+
+	// The verdict the page branches on, decided here rather than in the
+	// browser: State alone is not liveness, and the rule belongs beside the
+	// one in cam.common.ps1 that it mirrors.
+	body.Supervisor = SupervisorStateOf(body.Status, a.statusIntervalSeconds(), time.Now(), a.alive)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -114,9 +142,9 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // readStatus reads status.json and returns it redacted.
 func (a *API) readStatus() (map[string]any, StatusFileInfo, error) {
-	info := StatusFileInfo{Path: a.statusPath}
+	info := StatusFileInfo{Path: a.cfg.StatusFile}
 
-	stat, err := os.Stat(a.statusPath)
+	stat, err := os.Stat(a.cfg.StatusFile)
 	if err != nil {
 		return nil, info, fmt.Errorf("status file not readable: %w", err)
 	}
@@ -124,7 +152,7 @@ func (a *API) readStatus() (map[string]any, StatusFileInfo, error) {
 	info.ModifiedAt = stat.ModTime().Format(time.RFC3339)
 	info.AgeSeconds = roundTo(time.Since(stat.ModTime()).Seconds(), 1)
 
-	raw, err := os.ReadFile(a.statusPath)
+	raw, err := os.ReadFile(a.cfg.StatusFile)
 	if err != nil {
 		return nil, info, fmt.Errorf("read status file: %w", err)
 	}

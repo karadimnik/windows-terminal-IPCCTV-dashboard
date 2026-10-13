@@ -36,10 +36,25 @@ type Config struct {
 	// StatusFile overrides the derived status file path.
 	StatusFile string `json:"statusFile"`
 
+	// ScriptDir is the directory holding cam.ps1, cam.recorder.ps1 and
+	// cam.common.ps1, and - beside them - cameras.json and
+	// recorder.config.json. Control actions and settings writes are performed
+	// by those scripts, never by camui itself, so that the CLI stays the one
+	// implementation of every state change.
+	ScriptDir string `json:"scriptDir"`
+
 	// Token, when set, is required on every request. It is read from the
 	// config file or from CAMUI_TOKEN, never from a flag: a command line is
 	// readable by every process on the machine.
 	Token string `json:"token"`
+}
+
+// CamerasFile is the camera list the scripts read, beside them.
+func (c Config) CamerasFile() string { return filepath.Join(c.ScriptDir, "cameras.json") }
+
+// RecorderConfigFile is the recorder's own config, beside the scripts.
+func (c Config) RecorderConfigFile() string {
+	return filepath.Join(c.ScriptDir, "recorder.config.json")
 }
 
 // LoadConfig merges the config file (if any), the flag values, and CAMUI_TOKEN,
@@ -66,6 +81,9 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 	if flags.StatusFile != "" {
 		cfg.StatusFile = flags.StatusFile
 	}
+	if flags.ScriptDir != "" {
+		cfg.ScriptDir = flags.ScriptDir
+	}
 	if env := strings.TrimSpace(os.Getenv("CAMUI_TOKEN")); env != "" {
 		cfg.Token = env
 	}
@@ -78,6 +96,16 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 	}
 	if cfg.StatusFile == "" {
 		cfg.StatusFile = filepath.Join(cfg.ArchiveRoot, "_state", "status.json")
+	}
+	if cfg.ScriptDir == "" {
+		// The binary is built into the repository root beside the scripts, so
+		// its own directory is the right default and needs no configuration on
+		// the Operator's machine.
+		exe, err := os.Executable()
+		if err != nil {
+			return cfg, fmt.Errorf("locate own executable to default the script directory: %w", err)
+		}
+		cfg.ScriptDir = filepath.Dir(exe)
 	}
 	cfg.Token = strings.TrimSpace(cfg.Token)
 

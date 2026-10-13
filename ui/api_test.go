@@ -111,7 +111,7 @@ func TestStatusEndpointLeaksNothing(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	NewAPI(path, slog.New(slog.NewTextHandler(io.Discard, nil))).Routes(mux)
+	NewAPI(Config{StatusFile: path}, slog.New(slog.NewTextHandler(io.Discard, nil))).Routes(mux)
 	server := httptest.NewServer(mux)
 	defer server.Close()
 
@@ -143,7 +143,7 @@ func TestStatusEndpointLeaksNothing(t *testing.T) {
 
 func TestStatusEndpointSurvivesMissingFile(t *testing.T) {
 	mux := http.NewServeMux()
-	NewAPI(filepath.Join(t.TempDir(), "absent.json"), slog.New(slog.NewTextHandler(io.Discard, nil))).Routes(mux)
+	NewAPI(Config{StatusFile: filepath.Join(t.TempDir(), "absent.json")}, slog.New(slog.NewTextHandler(io.Discard, nil))).Routes(mux)
 	server := httptest.NewServer(mux)
 	defer server.Close()
 

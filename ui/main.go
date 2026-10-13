@@ -19,12 +19,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 )
 
 //go:embed static
 var staticFiles embed.FS
+
+// applyScript is the settings writer, embedded so camui.exe stays a single
+// self-contained binary. It is written to a temporary file for the duration of
+// one call - see applySettings in settings.go.
+//
+//go:embed scripts/camui-apply.ps1
+var applyScript string
 
 // version is stamped at build time with -ldflags "-X main.version=...".
 var version = "dev"
@@ -42,6 +50,7 @@ func main() {
 	flag.StringVar(&flags.Listen, "listen", "", "host:port to bind (default "+defaultListen+"; a non-loopback address requires a token)")
 	flag.StringVar(&flags.ArchiveRoot, "archive-root", "", "recorder archive root (default "+defaultArchiveRoot+")")
 	flag.StringVar(&flags.StatusFile, "status-file", "", "status.json path (default <archive-root>\\_state\\status.json)")
+	flag.StringVar(&flags.ScriptDir, "script-dir", "", "directory holding cam.ps1, cameras.json and recorder.config.json (default: the directory holding camui.exe)")
 	flag.StringVar(&configPath, "config", "", "path to a JSON config file")
 	flag.BoolVar(&showVer, "version", false, "print the version and exit")
 	flag.Parse()
@@ -79,7 +88,7 @@ func run(cfg Config, log *slog.Logger) error {
 	}
 
 	mux := http.NewServeMux()
-	NewAPI(cfg.StatusFile, log).Routes(mux)
+	NewAPI(cfg, log).Routes(mux)
 	mux.Handle("GET /", versioned(http.FileServerFS(static)))
 
 	handler := requireToken(cfg.Token, logRequests(log, mux))
@@ -97,10 +106,19 @@ func run(cfg Config, log *slog.Logger) error {
 		IdleTimeout:       120 * time.Second,
 	}
 
+	// A missing script directory is not a reason to refuse to start - status
+	// is still worth serving - but it has to be said, because every action and
+	// every settings write will fail until it is right.
+	if _, err := os.Stat(filepath.Join(cfg.ScriptDir, "cam.ps1")); err != nil {
+		log.Warn("no cam.ps1 in the script directory: control actions and settings will fail",
+			"scriptDir", cfg.ScriptDir)
+	}
+
 	log.Info("camui listening",
 		"version", version,
 		"address", listener.Addr().String(),
 		"statusFile", cfg.StatusFile,
+		"scriptDir", cfg.ScriptDir,
 		"auth", map[bool]string{true: "token required", false: "none (loopback only)"}[cfg.RequiresToken()],
 	)
 
