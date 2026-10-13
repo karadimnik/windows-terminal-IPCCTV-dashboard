@@ -787,3 +787,98 @@ function Get-CamTestStatusJson {
         Snapshot = (ConvertFrom-Json -InputObject $text)
     }
 }
+
+
+# ---------------------------------------------------------------------------
+# A warden and the window it watches
+# ---------------------------------------------------------------------------
+
+function Start-CamTestWardenWindow {
+    <#
+        A sandbox stand-in for the NVR: one terminal window of its own, one
+        pane inside a job of its own, and a warden watching that window.
+
+        The pane does nothing but join the job and sleep. What is under test is
+        the WARDEN - what it does when the window goes - and a sleeping pane
+        proves the kernel sweep just as well as a supervisor would while
+        costing no camera session and no ffmpeg.
+
+        Everything runs from the SANDBOX copy of cam.common.ps1, so the
+        warden's Get-CamConfig resolves to the sandbox's own config and it
+        writes the sandbox's status.json, never the Operator's.
+
+        No -StopViewers: a test must not stop the Operator's dashboard.
+
+        Returns the warden pid, the pane pid, and the warden's log path. The
+        caller is responsible for Stop-CamTestWardenWindow.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Sandbox,
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$JobName,
+        [int]$TimeoutSeconds = 60
+    )
+
+    Import-CamJobApi
+    $lib = (Join-Path -Path $Sandbox.Dir -ChildPath 'cam.common.ps1').Replace("'", "''")
+    $log = Join-Path -Path $Sandbox.Dir -ChildPath ('warden-' + $Title + '.log')
+    $panePidFile = Join-Path -Path $Sandbox.Dir -ChildPath ('pane-' + $Title + '.pid')
+    Remove-Item -LiteralPath $log, $panePidFile -Force -ErrorAction SilentlyContinue
+
+    $wardenScript = ". '{0}'`nStart-CamJobWarden -JobName '{1}' -WindowTitle '{2}' -LogPath '{3}' -AppearTimeoutSeconds {4} -AlertOnWindowClose" -f `
+        $lib, $JobName.Replace("'", "''"), $Title.Replace("'", "''"), $log.Replace("'", "''"), $TimeoutSeconds
+    $warden = Start-CamDetachedProcess -Script $wardenScript
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline -and -not [CamJob]::Exists($JobName)) { Start-Sleep -Milliseconds 250 }
+
+    $paneScript = ". '{0}'`nAdd-CamJobMember -JobName '{1}'`n`"`$PID`" | Out-File -FilePath '{2}' -Encoding ascii`nwhile (`$true) {{ Start-Sleep -Seconds 5 }}" -f `
+        $lib, $JobName.Replace("'", "''"), $panePidFile.Replace("'", "''")
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($paneScript))
+    & wt.exe @('-w', ('ipcctv-test-' + $Title), 'new-tab', '--title', $Title, '--suppressApplicationTitle',
+        'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+
+    $panePid = 0
+    $windowFound = $false
+    $watching = $false
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (-not $windowFound) { $windowFound = (@(Get-CamTerminalWindow -Title $Title).Count -ge 1) }
+        if ($panePid -le 0 -and (Test-Path -LiteralPath $panePidFile)) {
+            try { $panePid = [int](Get-Content -LiteralPath $panePidFile -Raw).Trim() } catch { }
+        }
+        if (Test-Path -LiteralPath $log) {
+            $watching = [bool]@(Get-Content -LiteralPath $log | Select-String -SimpleMatch 'watching window').Count
+        }
+        if ($windowFound -and $panePid -gt 0 -and $watching) { break }
+        Start-Sleep -Milliseconds 500
+    }
+
+    return [pscustomobject]@{
+        Title       = $Title
+        JobName     = $JobName
+        WardenPid   = $warden.Id
+        PanePid     = $panePid
+        WindowFound = $windowFound
+        Watching    = $watching
+        LogPath     = $log
+    }
+}
+
+
+function Stop-CamTestWardenWindow {
+    <#
+        Takes down whatever Start-CamTestWardenWindow left: the window by
+        WM_CLOSE, then the warden and the pane by pid if either outlived it.
+
+        Never Stop-Process the terminal: one Windows Terminal process owns
+        every terminal window on the desktop, including the Operator's.
+    #>
+    param([Parameter(Mandatory = $true)]$Window)
+
+    [void](Stop-CamTerminalWindow -Title $Window.Title)
+    foreach ($id in @($Window.WardenPid, $Window.PanePid)) {
+        if ([int]$id -le 0) { continue }
+        try { if (Get-Process -Id $id -ErrorAction SilentlyContinue) { Stop-Process -Id $id -Force } } catch { }
+    }
+}

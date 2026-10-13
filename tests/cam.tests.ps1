@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'leak', 'uileak', 'procs', 'relay', 'viewer')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'leak', 'uileak', 'procs', 'relay', 'viewer')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'leak', 'uileak', 'procs')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'leak', 'uileak', 'procs')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -1078,6 +1078,142 @@ function Invoke-CamCheckCrashSafe {
 }
 
 
+function Invoke-CamCheckWindowClose {
+    <#
+        The window-close alert, item [67], in a sandbox with no camera touched:
+
+          1. closing the watched window raises an event-log entry under id 103,
+             worded as a window close and NOT as an unexpected stop
+          2. it records StopKind 'window-closed' with a timestamped
+             LastWindowClose in status.json
+          3. the job's members are gone - alerting did not cost the sweep
+          4. TERMINATING the warden while its window is still open raises
+             NOTHING
+
+        Point 4 is the one that decides whether the feature is worth having.
+        That is the shape of cam.ps1 -Stop: Stop-CamNvr kills the warden first,
+        precisely so it never reaches its window-gone branch. If the alert ever
+        moves into the warden's finally block, an orderly stop starts alerting,
+        and alerting on a stop the Operator typed himself teaches him to ignore
+        the alerts that matter.
+
+        It runs in the order terminate-then-close so the status file goes from
+        having no LastWindowClose at all to having one, which is a stronger
+        reading than "unchanged".
+
+        Two things are real and not sandboxed, because they are machine-wide:
+        the Application-log entry and the toast. The toast will name the TEST
+        window, 'cam.test.close', not cam.nvr.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $kept = $null
+    $closed = $null
+    $ids = Get-CamAlertEventIdList
+
+    $readEvents = {
+        param([DateTime]$Since)
+        @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Application'; Id = $ids } `
+                -MaxEvents 200 -ErrorAction SilentlyContinue |
+            Where-Object { $_.Id -eq 103 -and $_.TimeCreated -ge $Since })
+    }
+
+    $sandbox = New-CamTestSandbox -Name 'windowclose' -Cameras @(
+        [pscustomobject]@{ Name = 'windowclose-a'; IP = '10.255.255.11'; Quality = 'main'; Record = $true }
+    )
+
+    try {
+        # --- 4. a terminated warden alerts about nothing -------------------
+        $t0 = (Get-Date).AddSeconds(-1)
+        $kept = Start-CamTestWardenWindow -Sandbox $sandbox -Title 'cam.test.keep' -JobName 'cam.test.keep.job'
+        $evidence += ("terminate case: warden {0}, pane {1}, window found {2}, watching {3}" -f `
+                $kept.WardenPid, $kept.PanePid, $kept.WindowFound, $kept.Watching)
+        if (-not ($kept.WindowFound -and $kept.Watching -and $kept.PanePid -gt 0)) {
+            Add-CamTestResult -Run $Run -Check 'windowclose' -Status 'FAIL' `
+                -Message 'the test window or its warden did not come up' -Evidence $evidence
+            return
+        }
+
+        # Exactly what Stop-CamNvr does, and for exactly this reason.
+        [void](Stop-CamProcessList -ProcessId @([int]$kept.WardenPid))
+        Start-Sleep -Seconds 8
+        $afterTerminate = @(& $readEvents $t0)
+        $status = Get-CamTestStatusJson -Sandbox $sandbox
+        $evidence += ("after terminating the warden with its window still open: id-103 entries {0}, status.json {1}" -f `
+                $afterTerminate.Count, $(if ($status) { "StopKind '" + $status.Snapshot.StopKind + "'" } else { 'not written' }))
+        if ($afterTerminate.Count -ne 0) { $ok = $false; $evidence += 'FAIL: terminating the warden raised an alert - an orderly stop would now alert' }
+        if ($status -and $status.Snapshot.LastWindowClose) { $ok = $false; $evidence += 'FAIL: terminating the warden recorded a window close' }
+
+        # --- 1-3. closing the window alerts --------------------------------
+        $t1 = (Get-Date).AddSeconds(-1)
+        $closed = Start-CamTestWardenWindow -Sandbox $sandbox -Title 'cam.test.close' -JobName 'cam.test.close.job'
+        $evidence += ("close case: warden {0}, pane {1}, window found {2}, watching {3}" -f `
+                $closed.WardenPid, $closed.PanePid, $closed.WindowFound, $closed.Watching)
+        if (-not ($closed.WindowFound -and $closed.Watching -and $closed.PanePid -gt 0)) {
+            Add-CamTestResult -Run $Run -Check 'windowclose' -Status 'FAIL' `
+                -Message 'the second test window or its warden did not come up' -Evidence $evidence
+            return
+        }
+
+        # WM_CLOSE, which is what clicking the X sends. A second post answers
+        # the close-all-tabs overlay a foreign adopted tab would raise.
+        $left = Stop-CamTerminalWindow -Title $closed.Title
+        if ($left -ge 1) { $left = Stop-CamTerminalWindow -Title $closed.Title }
+        $evidence += ("posted WM_CLOSE to '{0}'; windows remaining {1}" -f $closed.Title, $left)
+        if ($left -ge 1) { $ok = $false; $evidence += 'FAIL: the test window would not close' }
+
+        $entry = $null
+        $deadline = (Get-Date).AddSeconds(60)
+        while ((Get-Date) -lt $deadline) {
+            $entry = @(& $readEvents $t1) | Select-Object -First 1
+            if ($entry) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        if (-not $entry) {
+            $ok = $false
+            $evidence += 'FAIL: closing the window raised no id-103 entry within 60s'
+        }
+        else {
+            $text = [string]$entry.Properties[0].Value
+            $evidence += ("id-103 entry {0:n1}s after the close, {1}: {2}" -f `
+                ($entry.TimeCreated - $t1).TotalSeconds, $entry.LevelDisplayName, ($text -replace '\r?\n', ' '))
+            if ($text -notmatch 'window was closed') { $ok = $false; $evidence += 'FAIL: the entry does not say the window was closed' }
+            if ($text -match 'stopped unexpectedly') { $ok = $false; $evidence += 'FAIL: the entry is worded as the crash alert' }
+            if ($text -notlike ((Get-CamAlertMessagePrefix) + '*')) { $ok = $false; $evidence += 'FAIL: the entry carries no IPCCTV prefix' }
+
+            # Told apart in the log by the id, not only by the wording.
+            $evidence += ("the entry carries id {0}; the crash alert carries 100, and both are in Get-CamAlertEventIdList ({1})" -f `
+                    $entry.Id, ($ids -join ', '))
+            if ($entry.Id -eq 100) { $ok = $false; $evidence += 'FAIL: a window close is indistinguishable from a crash in the log' }
+            if ($ids -notcontains $entry.Id) { $ok = $false; $evidence += 'FAIL: the id is not in the list the alerts are read back by' }
+        }
+
+        $status = Get-CamTestStatusJson -Sandbox $sandbox
+        $record = $null
+        if ($status) { $record = $status.Snapshot.LastWindowClose }
+        $evidence += ("status.json: State={0} StopKind='{1}' LastWindowClose={2}" -f `
+                $status.Snapshot.State, $status.Snapshot.StopKind, ($record | ConvertTo-Json -Compress))
+        if ($status.Snapshot.StopKind -ne 'window-closed') { $ok = $false; $evidence += "FAIL: the close was not recorded as StopKind 'window-closed'" }
+        if (-not $record -or -not $record.At -or -not (Get-CamDateTimeOrNull -Value $record.At)) {
+            $ok = $false; $evidence += 'FAIL: the close was not recorded with a usable timestamp'
+        }
+
+        $member = Get-Process -Id $closed.PanePid -ErrorAction SilentlyContinue
+        $evidence += ("the job member (pane {0}) is gone: {1}" -f $closed.PanePid, (-not $member))
+        if ($member) { $ok = $false; $evidence += 'FAIL: alerting cost the kernel sweep - the pane outlived the close' }
+    }
+    finally {
+        foreach ($window in @($kept, $closed)) { if ($window) { Stop-CamTestWardenWindow -Window $window } }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'windowclose' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'closing the watched window alerts under its own event id and records the close in status.json; terminating the warden, which is what an orderly stop does, alerts about nothing' `
+        -Evidence $evidence
+}
+
+
 function Invoke-CamCheckProcs {
     <#
         Asserts that no ffmpeg or MediaMTX is left over from a test run.
@@ -1417,6 +1553,7 @@ foreach ($check in $Checks) {
         'sections'   { Invoke-CamCheckSections   -Run $run }
         'autostart'  { Invoke-CamCheckAutostart  -Run $run }
         'crashsafe'  { Invoke-CamCheckCrashSafe  -Run $run }
+        'windowclose' { Invoke-CamCheckWindowClose -Run $run }
         'leak'       { Invoke-CamCheckLeak       -Run $run }
         'uileak'     { Invoke-CamCheckUiLeak     -Run $run }
         'procs'      { Invoke-CamCheckProcs      -Run $run }
