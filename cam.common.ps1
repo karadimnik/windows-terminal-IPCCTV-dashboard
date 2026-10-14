@@ -1719,12 +1719,14 @@ function Get-CamAlertEventIdList {
           102  it stopped and the restart budget is spent
           103  the NVR window was closed, so nothing is recording
           110  one camera has stopped recording
+          120  pruning is disabled: RootPath is unsafe or not the recorder's
+               own archive, so the disk will fill
 
         103 is its own ID rather than another 100 because the log is where the
         Operator reads back what happened, and "somebody closed the window" and
         "the supervisor died" need different answers from him.
     #>
-    return @(100, 101, 102, 103, 110)
+    return @(100, 101, 102, 103, 110, 120)
 }
 
 
@@ -1863,6 +1865,326 @@ function Test-CamPathInside {
 
     $full = [System.IO.Path]::GetFullPath($Path)
     return $full.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+
+function Test-CamSegmentName {
+    <#
+        True only when $Name is a segment the recorder writes for the camera
+        whose safe name is $SafeName: exactly the leaf Get-CamSegmentPattern
+        builds for that camera under the CONFIGURED container, every strftime
+        field matched as the digits ffmpeg writes. Any other extension - another
+        container's, a .tmp, a second extension - is not a segment.
+
+        Matched case-insensitively, like the filesystem it describes.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Name,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$SafeName,
+        [Parameter(Mandatory = $true)]$Config
+    )
+
+    if ([string]::IsNullOrEmpty($Name) -or [string]::IsNullOrEmpty($SafeName)) { return $false }
+
+    $containerProfile = Get-CamContainerProfile -Config $Config
+    $leaf = [System.IO.Path]::GetFileName((Get-CamSegmentPattern -CameraDir '.' -SafeName $SafeName -ContainerProfile $containerProfile))
+    $regex = [regex]::Escape($leaf).Replace('%Y', '\d{4}').Replace('%m', '\d{2}').Replace('%d', '\d{2}').
+        Replace('%H', '\d{2}').Replace('%M', '\d{2}').Replace('%S', '\d{2}').Replace('%z', '[+-]\d{4}')
+    return ($Name -match ('^' + $regex + '$'))
+}
+
+
+function Get-CamPruneRefusal {
+    <#
+        Why $File must never be deleted, or '' when it may be. The ONE predicate
+        both deletion paths - the pruner and the empty-segment cleanup - call,
+        so neither can delete under looser rules than the other.
+
+        A file may be deleted only when all of these hold:
+          - neither it nor its folder is a reparse point
+          - it resolves inside RootPath (Test-CamPathInside)
+          - its folder is an immediate child of RootPath and not
+            underscore-named - a camera folder
+          - its name is a segment of that camera (Test-CamSegmentName)
+
+        Returns a fixed reason so the caller can count foreign files instead of
+        logging every one of them every cycle:
+          'reparse point'             the file, or its folder, is one
+          'outside the archive root'  Test-CamPathInside refused it
+          'foreign'                   anything else the recorder did not write
+    #>
+    param(
+        [Parameter(Mandatory = $true)][System.IO.FileInfo]$File,
+        [Parameter(Mandatory = $true)]$Config
+    )
+
+    $reparse = [System.IO.FileAttributes]::ReparsePoint
+    $root = [string]$Config.RootPath
+
+    if (($File.Attributes -band $reparse) -ne 0) { return 'reparse point' }
+    if (-not (Test-CamPathInside -Root $root -Path $File.FullName)) { return 'outside the archive root' }
+
+    $folder = $File.Directory
+    if (($folder.Attributes -band $reparse) -ne 0) { return 'reparse point' }
+    $rootFull = [System.IO.Path]::GetFullPath($root).TrimEnd('\')
+    $parent = [System.IO.Path]::GetDirectoryName($folder.FullName.TrimEnd('\')).TrimEnd('\')
+    if (-not [string]::Equals($parent, $rootFull, [System.StringComparison]::OrdinalIgnoreCase)) { return 'foreign' }
+    if ($folder.Name.StartsWith('_')) { return 'foreign' }
+    if (-not (Test-CamSegmentName -Name $File.Name -SafeName $folder.Name -Config $Config)) { return 'foreign' }
+    return ''
+}
+
+
+function Get-CamWallClock {
+    <#
+        The time the pruner judges ages against. Its own function so a test can
+        move the clock, which is the failure the pruner's clock check exists
+        for.
+    #>
+    return [DateTime]::Now
+}
+
+
+function Get-CamPruneClockProblem {
+    <#
+        Why the timestamps of this run cannot be trusted to delete by, or ''
+        when they can. Checked before the first deletion of every run that
+        could delete anything; a problem refuses the whole run.
+
+        $Candidates are every segment except the newest of each folder -
+        before the per-folder strictly-older filter, so a disagreement between
+        the two is caught here rather than filtered away - $Newest the newest
+        segment of each folder (protected, never deleted), $Segments every
+        segment the run looked at. All times are LastWriteTime, the one the age
+        rule and the oldest-first order use.
+
+          1. The oldest candidate is not later than the newest segment. If it
+             is, the order the pruner deletes in disagrees with which file it
+             protects.
+          2. No segment is written in the future of the wall clock, beyond one
+             minute of timestamp skew.
+          3. The wall clock is no further ahead of the newest segment than one
+             stall threshold, SegmentSeconds x StallFactor - the age at which
+             the watchdog already calls a camera stalled. A recorder writes its
+             newest segment continuously, so a larger gap means the clock jumped
+             forward or nothing is recording, and either would make the age
+             rule delete footage that is not old.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Newest,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Segments,
+        [Parameter(Mandatory = $true)][DateTime]$Now,
+        [Parameter(Mandatory = $true)]$Config
+    )
+
+    if ($Candidates.Count -eq 0 -or $Newest.Count -eq 0) { return '' }
+    $stamp = { param($time) $time.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) }
+
+    $oldest = $Candidates[0]
+    foreach ($file in $Candidates) { if ($file.LastWriteTime -lt $oldest.LastWriteTime) { $oldest = $file } }
+    $newestFile = $Newest[0]
+    foreach ($file in $Newest) { if ($file.LastWriteTime -gt $newestFile.LastWriteTime) { $newestFile = $file } }
+
+    if ($oldest.LastWriteTime -gt $newestFile.LastWriteTime) {
+        return ("the oldest candidate {0} (written {1}) is later than the newest segment {2} (written {3})" -f `
+            $oldest.FullName, (& $stamp $oldest.LastWriteTime), $newestFile.FullName, (& $stamp $newestFile.LastWriteTime))
+    }
+
+    $limit = $Now.AddSeconds(60)
+    foreach ($file in $Segments) {
+        if ($file.LastWriteTime -gt $limit) {
+            return ("{0} is written {1}, in the future of the wall clock {2}" -f $file.FullName, (& $stamp $file.LastWriteTime), (& $stamp $Now))
+        }
+    }
+
+    $bound = [double]$Config.SegmentSeconds * [double]$Config.StallFactor
+    $lag = ($Now - $newestFile.LastWriteTime).TotalSeconds
+    if ($lag -gt $bound) {
+        return ("the wall clock {0} is {1} s ahead of the newest segment {2} (written {3}), more than the {4} s stall threshold - the clock jumped or nothing is recording" -f `
+            (& $stamp $Now), [int64]$lag, $newestFile.FullName, (& $stamp $newestFile.LastWriteTime), [int64]$bound)
+    }
+    return ''
+}
+
+
+function Get-CamArchiveRootProblem {
+    <#
+        Why $Root is unsafe to prune, or '' when it is not.
+
+        The pruner treats every non-underscore folder of the root as a camera
+        folder, so a root set too high by mistake would turn unrelated folders
+        into camera folders. Refused:
+          - a drive root (E:\) or a UNC share root (\\server\share)
+          - the Windows directory, either Program Files, the user profile, the
+            folder holding the profiles, or the repository directory - or ANY
+            ancestor of one of them
+        A folder inside one of those, such as the profile's Videos folder, is
+        not refused here; the ownership marker decides that case.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Root)
+
+    if ([string]::IsNullOrWhiteSpace($Root)) { return 'RootPath is empty' }
+
+    try { $full = [System.IO.Path]::GetFullPath($Root) }
+    catch { return ("RootPath '{0}' is not a usable path ({1})" -f $Root, $_.Exception.Message) }
+
+    $ignoreCase = [System.StringComparison]::OrdinalIgnoreCase
+    $trimmed = $full.TrimEnd('\')
+    $volume = [System.IO.Path]::GetPathRoot($full)
+    if ([string]::Equals($trimmed, $volume.TrimEnd('\'), $ignoreCase)) {
+        return ("RootPath '{0}' is the root of the volume {1}" -f $Root, $volume)
+    }
+
+    $userProfile = [Environment]::GetFolderPath('UserProfile')
+    $protected = @(
+        @{ Label = 'the Windows directory'; Path = [Environment]::GetFolderPath('Windows') },
+        @{ Label = 'Program Files'; Path = $env:ProgramW6432 },
+        @{ Label = 'Program Files'; Path = [Environment]::GetFolderPath('ProgramFiles') },
+        @{ Label = 'Program Files (x86)'; Path = [Environment]::GetFolderPath('ProgramFilesX86') },
+        @{ Label = 'the user profile'; Path = $userProfile },
+        @{ Label = 'the folder holding the user profiles'; Path = $(if ($userProfile) { Split-Path -Path $userProfile -Parent } else { '' }) },
+        @{ Label = 'the recorder''s own directory'; Path = (Get-CamLibRoot) }
+    )
+
+    foreach ($entry in $protected) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry.Path)) { continue }
+        $path = [System.IO.Path]::GetFullPath([string]$entry.Path).TrimEnd('\')
+        if ([string]::Equals($path, $trimmed, $ignoreCase)) {
+            return ("RootPath '{0}' is {1}" -f $Root, $entry.Label)
+        }
+        if ($path.StartsWith($trimmed + '\', $ignoreCase)) {
+            return ("RootPath '{0}' contains {1} ({2})" -f $Root, $entry.Label, $path)
+        }
+    }
+    return ''
+}
+
+
+function Get-CamArchiveMarkerPath {
+    <# The file that marks RootPath as an archive this recorder created. #>
+    param([Parameter(Mandatory = $true)]$Config)
+    return (Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath 'archive-owner.json')
+}
+
+
+function Test-CamArchiveMarker {
+    <# True when the ownership marker exists and is one this recorder wrote. #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $path = Get-CamArchiveMarkerPath -Config $Config
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    try { $marker = ConvertFrom-Json -InputObject (Get-CamFileText -Path $path) }
+    catch { return $false }
+    return ($null -ne $marker -and [string]$marker.Owner -eq 'IPCCTV recorder')
+}
+
+
+function Get-CamArchiveClaimProblem {
+    <#
+        Why the recorder may not claim RootPath as its own archive, or '' when
+        it may. Claimable means the root passes Get-CamArchiveRootProblem and
+        holds nothing the recorder did not write: every top-level entry is
+        underscore-named (the recorder's own folders) or a real folder holding
+        only files Get-CamPruneRefusal accepts. An empty root qualifies.
+
+        Read-only. Lists the blocking entries so the Operator can see what to
+        move.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $root = [string]$Config.RootPath
+    $problem = Get-CamArchiveRootProblem -Root $root
+    if ($problem) { return $problem }
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return ("RootPath '{0}' does not exist" -f $root) }
+
+    $blockers = New-Object System.Collections.ArrayList
+    foreach ($entry in @(Get-ChildItem -LiteralPath $root -Force -ErrorAction Stop)) {
+        if ($entry.Name.StartsWith('_')) { continue }
+        if (-not $entry.PSIsContainer) { [void]$blockers.Add(("{0} (a file at the top level)" -f $entry.Name)); continue }
+        if (($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            [void]$blockers.Add(("{0} (a reparse point)" -f $entry.Name)); continue
+        }
+        foreach ($child in @(Get-ChildItem -LiteralPath $entry.FullName -Force -ErrorAction Stop)) {
+            if ($child.PSIsContainer) {
+                [void]$blockers.Add(("{0}\{1} (a folder inside a camera folder)" -f $entry.Name, $child.Name)); break
+            }
+            if (Get-CamPruneRefusal -File $child -Config $Config) {
+                [void]$blockers.Add(("{0}\{1} (not a recorder segment)" -f $entry.Name, $child.Name)); break
+            }
+        }
+    }
+
+    if ($blockers.Count -eq 0) { return '' }
+    $shown = @($blockers | Select-Object -First 5) -join ', '
+    return ("RootPath '{0}' holds {1} top-level entr{2} the recorder did not write: {3}" -f `
+        $root, $blockers.Count, $(if ($blockers.Count -eq 1) { 'y' } else { 'ies' }), $shown)
+}
+
+
+function Initialize-CamArchiveOwner {
+    <#
+        Claims RootPath as this recorder's archive by writing the ownership
+        marker - only when the root is claimable (Get-CamArchiveClaimProblem)
+        and only when no marker exists yet. The pruner deletes nothing under a
+        root without one.
+
+        Returns Owned (a marker is in place), Created (this call wrote it) and
+        Problem (why it is not owned).
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $result = @{ Owned = $false; Created = $false; Problem = ''; Path = (Get-CamArchiveMarkerPath -Config $Config) }
+    if (Test-CamArchiveMarker -Config $Config) { $result.Owned = $true; return $result }
+
+    $result.Problem = Get-CamArchiveClaimProblem -Config $Config
+    if ($result.Problem) { return $result }
+
+    $marker = [ordered]@{
+        Owner     = 'IPCCTV recorder'
+        Schema    = 1
+        RootPath  = [string]$Config.RootPath
+        CreatedAt = Format-CamTimestamp -Value ([DateTime]::Now)
+        Note      = 'The recorder prunes footage only under a root holding this file. It wrote it because the root held nothing but its own files. Do not copy it into another folder.'
+    }
+    $dir = Split-Path -Path $result.Path -Parent
+    if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+    $temp = "$($result.Path).tmp"
+    [System.IO.File]::WriteAllText($temp, (ConvertTo-Json -InputObject $marker) + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+    Move-CamFileAtomic -TempPath $temp -Path $result.Path
+
+    $result.Owned = $true
+    $result.Created = $true
+    return $result
+}
+
+
+function Get-CamPruneRootRefusal {
+    <#
+        Why nothing at all may be deleted under RootPath, or '' when the
+        per-file rules may run. Called by both deletion paths before they look
+        at a single file:
+          - the root must pass Get-CamArchiveRootProblem
+          - it must hold the ownership marker
+        -DryRun previews the next start: a root with no marker that the next
+        start WOULD claim is not refused, and nothing is written.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [switch]$DryRun
+    )
+
+    $problem = Get-CamArchiveRootProblem -Root ([string]$Config.RootPath)
+    if ($problem) { return ("{0}. Point RootPath at a folder of its own" -f $problem) }
+    if (Test-CamArchiveMarker -Config $Config) { return '' }
+
+    $marker = Get-CamArchiveMarkerPath -Config $Config
+    $claim = Get-CamArchiveClaimProblem -Config $Config
+    if ($claim) {
+        return ("there is no ownership marker at {0} and the recorder cannot claim the root: {1}. Move those entries out of RootPath, or point RootPath at a folder of its own, then restart the recorder" -f $marker, $claim)
+    }
+    if ($DryRun) { return '' }
+    return ("there is no ownership marker at {0}. The root qualifies - restart the recorder and it claims it" -f $marker)
 }
 
 
