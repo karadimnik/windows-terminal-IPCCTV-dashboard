@@ -1275,7 +1275,7 @@ The Operator approved all four. Documentation only; no code touched.
       say. How the NVR came to be a tab in window `nk` (0x1190726), and whether the other tabs there are the
       Operator's own, is unverified.
 
-- [ ] **[85]** README is still a manual, not a front door: 7,128 words after [75] (it was 7,000). The install
+- [x] **[85]** DONE d2348bf (merged locally, not pushed): README 7,128 -> 1,516 words, reference moved verbatim to docs/, 439-sentence nothing-lost check, doclinks check added. README is still a manual, not a front door: 7,128 words after [75] (it was 7,000). The install
       section is good (309 words) but the Operator's complaint was that the whole README is "super complex stuff
       and commands". Heaviest sections: Known limitations 738, The control UI 736 plus a second camui.exe section
       332, Something is wrong 628, The alerts 454, When something stops unexpectedly 418, Autostart 361.
