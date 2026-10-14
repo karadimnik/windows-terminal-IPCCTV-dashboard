@@ -2,6 +2,15 @@
 
 A PowerShell toolkit that turns a Windows desktop into a camera wall and a 24/7 recorder: a self-healing grid of RTSP streams tiled with Windows Terminal and `mpv`, a health strip reporting what the recorder is doing, an independent supervisor recording every camera you opt in with audio to local disk, and a browser UI that drives the lot. Nothing is recorded until you ask for it, per camera. The viewer and the recorder are separate programs that share nothing but a configuration file, so closing the dashboard does not stop recording and a recorder that is not installed does not stop you watching.
 
+## Quick reference
+
+- **Just the monitor** - `.\cam.ps1 -Start -Dashboard`.
+- **Just the recorder** - `.\cam.ps1 -Start -Recorder`. Never `-Run` from an ordinary terminal: that console is adopted as a tab in the window you already have, and closing that window killed the supervisor four times on 2026-10-12.
+- **Everything** - `.\cam.ps1 -Start`. `-Stop` and `-Status` take the same `-Recorder` / `-Dashboard` scoping, and unscoped means all of it.
+- **Best way to start everything** - the three logon tasks `IPCCTV-Recorder`, `IPCCTV-Dashboard` and `IPCCTV-Ui`, which is what logging on already does. Not the UI, which cannot start itself; `cam.ps1 -Start` is the manual equivalent.
+- **The UI** - two processes serving <http://127.0.0.1:8787/>, started on demand or by its logon task, and deliberately left running by `cam.ps1 -Stop` so there is always something to start things from.
+- **Closing a terminal window** - each tier is a Win32 job with `KILL_ON_JOB_CLOSE` whose only handle is held by a warden outside the window, so closing the window sweeps every member and grandchild. The UI's two processes survive by design, and a hand-started `-Run` supervisor is outside all of it.
+
 ![The dashboard: six live feeds in a 3x2 grid with the health strip below them](docs/dashboard.png)
 
 ## It is running - where do I look?
@@ -285,7 +294,7 @@ The binary has to sit beside the scripts: with no `-script-dir` it looks for `ca
 
 | Command | What it does |
 | --- | --- |
-| `.\tests\cam.tests.ps1` | Runs all **fourteen** checks that touch no camera: `parse`, `cameralist`, `inputs`, `viewer`, `selftest`, `layout`, `strip`, `sections`, `autostart`, `crashsafe`, `windowclose`, `leak`, `uileak`, `procs`. Safe with the dashboard open. Exit code 0 means nothing failed. |
+| `.\tests\cam.tests.ps1` | Runs all **fifteen** checks that touch no camera: `parse`, `cameralist`, `inputs`, `viewer`, `selftest`, `layout`, `strip`, `sections`, `autostart`, `crashsafe`, `windowclose`, `windowid`, `leak`, `uileak`, `procs`. Safe with the dashboard open. Exit code 0 means nothing failed. |
 | `-Checks <names>` | Run only these. |
 | `-Live -Checks relay` | Adds the relay lifecycle proof, which starts MediaMTX and `ffmpeg` against the real cameras in a sandbox. It is the only check `-Live` unlocks. |
 

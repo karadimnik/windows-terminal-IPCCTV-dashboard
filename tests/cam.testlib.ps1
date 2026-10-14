@@ -841,9 +841,16 @@ function Start-CamTestWardenWindow {
     $panePid = 0
     $windowFound = $false
     $watching = $false
+    $hwnd = [IntPtr]::Zero
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        if (-not $windowFound) { $windowFound = (@(Get-CamTerminalWindow -Title $Title).Count -ge 1) }
+        if (-not $windowFound) {
+            # Kept as a handle, not just a count: once a foreign tab is added
+            # the title no longer finds this window, and the handle is then the
+            # only way the test can check on it or close it.
+            $found = @(Get-CamTerminalWindow -Title $Title)
+            if ($found.Count -ge 1) { $windowFound = $true; $hwnd = $found[0] }
+        }
         if ($panePid -le 0 -and (Test-Path -LiteralPath $panePidFile)) {
             try { $panePid = [int](Get-Content -LiteralPath $panePidFile -Raw).Trim() } catch { }
         }
@@ -862,22 +869,120 @@ function Start-CamTestWardenWindow {
         WindowFound = $windowFound
         Watching    = $watching
         LogPath     = $log
+        Hwnd        = $hwnd.ToInt64()
+        WtName      = 'ipcctv-test-' + $Title
+        ForeignPid  = 0
     }
+}
+
+
+function Add-CamTestForeignTab {
+    <#
+        Adds a second tab to a test window, which is how a Windows Terminal
+        window stops answering to our title: the title follows the ACTIVE tab,
+        and this machine's windowingBehavior is useExisting, so a console
+        started elsewhere lands in an existing window exactly like this. The
+        live NVR window had acquired one named 'nk' on 2026-10-14 and
+        Get-CamTerminalWindow -Title cam.nvr found nothing.
+
+        The tab sets its own title so the divergence is assertable rather than
+        whatever the shell happens to display, and writes its pid down so the
+        cleanup can reach it if it outlives the window.
+
+        Returns the title the window now shows, or '' if it never changed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Window,
+        [string]$ForeignTitle = 'cam.test.foreign',
+        [int]$TimeoutSeconds = 30
+    )
+
+    Import-CamWindowApi
+    $hwnd = [IntPtr]::new([int64]$Window.Hwnd)
+    $pidFile = Join-Path -Path $env:TEMP -ChildPath ('cam-tests\foreign-' + $Window.Title + '.pid')
+    Remove-Item -LiteralPath $pidFile -Force -ErrorAction SilentlyContinue
+
+    $script = "`$host.ui.RawUI.WindowTitle = '{0}'`n`"`$PID`" | Out-File -FilePath '{1}' -Encoding ascii`nwhile (`$true) {{ Start-Sleep -Seconds 5 }}" -f `
+        $ForeignTitle.Replace("'", "''"), $pidFile.Replace("'", "''")
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($script))
+
+    # No --suppressApplicationTitle: this tab is standing in for a foreign
+    # console, and a foreign console titles itself.
+    & wt.exe @('-w', $Window.WtName, 'new-tab', 'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded)
+
+    # Waits for the tab's OWN title, not merely for the title to change. The
+    # window reads 'powershell.exe' the instant the tab appears and before the
+    # script in it has run, so a wait on "anything but ours" returns that and
+    # races the pid file - which then never gets read, leaving the foreign
+    # console with nothing to clean it up by if it outlives the window.
+    $now = ''
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $now = [CamWin]::TitleOf($hwnd)
+        if ($now -ceq $ForeignTitle -and (Test-Path -LiteralPath $pidFile)) { break }
+        Start-Sleep -Milliseconds 500
+    }
+    if (Test-Path -LiteralPath $pidFile) {
+        try { $Window.ForeignPid = [int](Get-Content -LiteralPath $pidFile -Raw).Trim() } catch { }
+    }
+    if ($now -ceq $Window.Title) { return '' }
+    return $now
+}
+
+
+function Close-CamTestWindow {
+    <#
+        Closes the window and touches no process, which is what clicking the X
+        does - so the warden gets to see it go and run its own shutdown. A
+        test that needs to observe what the warden DOES on a close has to use
+        this and not Stop-CamTestWardenWindow, which force-kills the warden
+        and would leave it no chance to run anything.
+
+        The close goes by TITLE first and then by the recorded HANDLE, because
+        a test that added a foreign tab has left the window unfindable by
+        title - and a window with two tabs raises the close-all-tabs overlay,
+        which only a second WM_CLOSE answers. Both are deliberate conditions
+        here, so the close has to survive them or a test leaves a window on
+        the Operator's desktop.
+
+        Never Stop-Process the terminal: one Windows Terminal process owns
+        every terminal window on the desktop, including the Operator's.
+
+        Returns $true when the window is gone.
+    #>
+    param([Parameter(Mandatory = $true)]$Window)
+
+    Import-CamWindowApi
+    [void](Stop-CamTerminalWindow -Title $Window.Title)
+
+    if (-not $Window.Hwnd -or [int64]$Window.Hwnd -eq 0) { return $true }
+
+    $hwnd = [IntPtr]::new([int64]$Window.Hwnd)
+    $attempt = 0
+    while ($attempt -lt 4 -and [CamWin]::IsTerminalWindow($hwnd)) {
+        $attempt++
+        [void][CamWin]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 750
+    }
+    return (-not [CamWin]::IsTerminalWindow($hwnd))
 }
 
 
 function Stop-CamTestWardenWindow {
     <#
         Takes down whatever Start-CamTestWardenWindow left: the window by
-        WM_CLOSE, then the warden and the pane by pid if either outlived it.
+        WM_CLOSE, then the warden, the pane and any foreign tab by pid if they
+        outlived it.
 
-        Never Stop-Process the terminal: one Windows Terminal process owns
-        every terminal window on the desktop, including the Operator's.
+        The pid sweep is a backstop, not the method, and it is why a test that
+        wants to watch the warden react must close the window with
+        Close-CamTestWindow first and wait for the warden to exit on its own.
     #>
     param([Parameter(Mandatory = $true)]$Window)
 
-    [void](Stop-CamTerminalWindow -Title $Window.Title)
-    foreach ($id in @($Window.WardenPid, $Window.PanePid)) {
+    [void](Close-CamTestWindow -Window $Window)
+
+    foreach ($id in @($Window.WardenPid, $Window.PanePid, $Window.ForeignPid)) {
         if ([int]$id -le 0) { continue }
         try { if (Get-Process -Id $id -ErrorAction SilentlyContinue) { Stop-Process -Id $id -Force } } catch { }
     }

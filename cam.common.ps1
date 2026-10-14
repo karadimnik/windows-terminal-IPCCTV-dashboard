@@ -2313,6 +2313,19 @@ public static class CamWin
 
     public static string TitleOf(IntPtr h) { return TextOf(h); }
 
+    // Everything FindTerminalByTitle requires of a candidate, asked of ONE
+    // handle instead of searched for: the window still exists, it is visible,
+    // and it is Windows Terminal's. A handle latched minutes ago is only still
+    // a terminal window if all three hold - IsWindow alone would believe a
+    // handle value the desktop has since recycled onto something else.
+    public static bool IsTerminalWindow(IntPtr h)
+    {
+        if (h == IntPtr.Zero) { return false; }
+        if (!IsWindow(h)) { return false; }
+        if (!IsWindowVisible(h)) { return false; }
+        return ClassOf(h).IndexOf(TerminalClass, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
     public static int ProcessIdOf(IntPtr h)
     {
         uint pid;
@@ -2330,6 +2343,209 @@ function Get-CamTerminalWindow {
 
     Import-CamWindowApi
     return @([CamWin]::FindTerminalByTitle($Title))
+}
+
+
+# ---------------------------------------------------------------------------
+# The window record: which HWND a warden is actually watching
+#
+# A Windows Terminal window's title follows its ACTIVE TAB, and this machine's
+# windowingBehavior is useExisting, so a foreign console can be adopted into
+# one of our windows as a second tab and the window then answers to that tab's
+# title instead of ours. Measured on 2026-10-14: the NVR warden was healthily
+# watching hwnd 0x1190726 while that window was titled 'nk', and
+# Get-CamTerminalWindow -Title cam.nvr found nothing - so -Status reported the
+# NVR window as gone with the host, the warden, the job and six ffmpeg all
+# alive, and the Operator had no way to tell which window he must not close.
+#
+# The warden already resolves the HWND once and polls IsWindow on it, which is
+# why safety was never affected. It just never said which handle that was.
+# These functions are that missing channel, and nothing more: the warden
+# publishes the handle it latched, readers prefer it over the title search.
+# Item [81].
+# ---------------------------------------------------------------------------
+
+function Get-CamWindowRecordPath {
+    <#
+        Where the warden for this window title publishes its HWND. One file
+        per title, in the same _state directory as status.json, so a reader
+        needs nothing but the config to find it.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Title
+    )
+
+    $safe = ($Title -replace '[^A-Za-z0-9._-]', '_')
+    return (Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath ("window-{0}.json" -f $safe))
+}
+
+
+function Set-CamWindowRecord {
+    <#
+        Publishes the handle a warden has latched onto, with the title the
+        window carried at the time and the pids on both ends of the watch.
+
+        Through the same temp-then-rename path as status.json, so no reader
+        ever sees a half-written record.
+
+        Never throws. Returns $true when the record was written. The caller is
+        a warden whose real duty is holding a job handle, and an observation
+        channel must never be able to cost it that.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][IntPtr]$Hwnd,
+        [AllowEmptyString()][string]$JobName = ''
+    )
+
+    try {
+        Import-CamWindowApi
+        $path = Get-CamWindowRecordPath -Config $Config -Title $Title
+        $record = [pscustomobject]@{
+            Schema = 1
+            # The title as it was when the handle was latched. The whole point
+            # of the record is that the CURRENT title may differ from it.
+            Title       = $Title
+            Hwnd        = $Hwnd.ToInt64()
+            HwndHex     = ("0x{0:X}" -f $Hwnd.ToInt64())
+            TerminalPid = [CamWin]::ProcessIdOf($Hwnd)
+            WardenPid   = $PID
+            JobName     = $JobName
+            At          = Format-CamTimestamp -Value ([DateTime]::Now)
+        }
+
+        $json = ConvertTo-Json -InputObject $record -Depth 4
+        $dir = Split-Path -Path $path -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+        $temp = "$path.tmp"
+        [System.IO.File]::WriteAllText($temp, $json + [Environment]::NewLine, (New-Object System.Text.UTF8Encoding($false)))
+        Move-CamFileAtomic -TempPath $temp -Path $path
+        return $true
+    }
+    catch { return $false }
+}
+
+
+function Get-CamWindowRecord {
+    <#
+        The published record for this window title, or $null when there is
+        nothing readable there. Never throws: absence is the normal state for
+        a window no warden is watching.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Title
+    )
+
+    $path = Get-CamWindowRecordPath -Config $Config -Title $Title
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+
+    try { $text = Get-CamFileText -Path $path }
+    catch { return $null }
+
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    try { return (ConvertFrom-Json -InputObject $text) }
+    catch { return $null }
+}
+
+
+function Remove-CamWindowRecord {
+    <#
+        Drops the record. Called by the warden on its way out, so a file left
+        behind cannot be mistaken for a live window.
+
+        It is only half the defence, and deliberately so: a warden that was
+        TERMINATED - which is exactly what an orderly stop does to it - never
+        runs this at all. That is why Get-CamWindowPresence re-checks the
+        handle with IsWindow rather than believing the file.
+
+        Never throws. Returns $true when nothing is left at the path.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Title
+    )
+
+    try {
+        $path = Get-CamWindowRecordPath -Config $Config -Title $Title
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+        return $true
+    }
+    catch { return $false }
+}
+
+
+function Get-CamWindowPresence {
+    <#
+        Is that window there, and which window is it? By published HWND when a
+        warden has published one that is still a terminal window, and by the
+        title search otherwise.
+
+        Returned rather than printed, because -Status, the launcher's
+        already-open test and the launcher's post-clear wait all need the same
+        answer and used to each ask the title search for it.
+
+        THE FALLBACK IS ON LIVENESS, not merely on the record existing. A
+        record whose handle is dead is treated as no record at all, and the
+        title search runs. That matters during a restart: the old warden's
+        record can still be on disk for the seconds between the window going
+        and the new warden publishing, and reporting "absent" there - with a
+        new window plainly open and correctly titled - would be a fresh way of
+        being wrong rather than a fix.
+
+        CurrentTitle is read from the window every time. When it differs from
+        the title asked for, the window is ours and something else is showing
+        in it, which is the one fact the Operator cannot get any other way.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Title
+    )
+
+    Import-CamWindowApi
+
+    $record = $null
+    try { $record = Get-CamWindowRecord -Config $Config -Title $Title } catch { $record = $null }
+
+    if ($record -and $record.Hwnd) {
+        $hwnd = [IntPtr]::new([int64]$record.Hwnd)
+        if ([CamWin]::IsTerminalWindow($hwnd)) {
+            $current = [CamWin]::TitleOf($hwnd)
+            return [pscustomobject]@{
+                Title        = $Title
+                Found        = $true
+                Count        = 1
+                Hwnd         = $hwnd
+                HwndHex      = ("0x{0:X}" -f $hwnd.ToInt64())
+                CurrentTitle = $current
+                TitleChanged = ($current -cne $Title)
+                Source       = 'hwnd'
+                TerminalPid  = [CamWin]::ProcessIdOf($hwnd)
+                WardenPid    = [int]$record.WardenPid
+                RecordAt     = [string]$record.At
+            }
+        }
+    }
+
+    $found = @([CamWin]::FindTerminalByTitle($Title))
+    $hwnd = [IntPtr]::Zero
+    if ($found.Count -ge 1) { $hwnd = $found[0] }
+
+    return [pscustomobject]@{
+        Title        = $Title
+        Found        = ($found.Count -ge 1)
+        Count        = $found.Count
+        Hwnd         = $hwnd
+        HwndHex      = $(if ($hwnd -ne [IntPtr]::Zero) { "0x{0:X}" -f $hwnd.ToInt64() } else { '' })
+        CurrentTitle = $(if ($hwnd -ne [IntPtr]::Zero) { $Title } else { '' })
+        TitleChanged = $false
+        Source       = $(if ($found.Count -ge 1) { 'title' } else { 'none' })
+        TerminalPid  = $(if ($hwnd -ne [IntPtr]::Zero) { [CamWin]::ProcessIdOf($hwnd) } else { 0 })
+        WardenPid    = 0
+        RecordAt     = ''
+    }
 }
 
 
@@ -3242,6 +3458,12 @@ function Start-CamJobWarden {
 
     try {
         $hwnd = [IntPtr]::Zero
+        # Set only once a record has actually been published, because the
+        # finally block removes the record ONLY when this warden wrote it: the
+        # record is keyed by window title, and a warden that disarmed because
+        # its window never appeared must not delete the record of a warden
+        # that is watching one.
+        $recordConfig = $null
         $deadline = (Get-Date).AddSeconds($AppearTimeoutSeconds)
         while ((Get-Date) -lt $deadline) {
             $found = @([CamWin]::FindTerminalByTitle($WindowTitle))
@@ -3257,6 +3479,34 @@ function Start-CamJobWarden {
         }
 
         & $say ("watching window 0x{0:X} (terminal pid {1})" -f $hwnd.ToInt64(), [CamWin]::ProcessIdOf($hwnd))
+
+        # PUBLISH THE HANDLE. This warden is the only thing that knows which
+        # window the job belongs to, and a title search cannot recover it: the
+        # window answers to its active tab's title, so an adopted foreign tab
+        # hides it completely while this loop goes on watching it perfectly
+        # well. Writing it down is what lets -Status name the window instead
+        # of counting titles. Item [81].
+        #
+        # It is written AFTER the handle is latched and BEFORE the watch loop,
+        # so the record never claims a window this process is not yet watching,
+        # and it cannot throw - Set-CamWindowRecord swallows its own failures
+        # and the try here covers resolving the config - because everything
+        # below this line is the warden's actual duty.
+        try {
+            $recordConfig = Get-CamConfig
+            if (Set-CamWindowRecord -Config $recordConfig -Title $WindowTitle -Hwnd $hwnd -JobName $JobName) {
+                & $say ("published the window record to {0}" -f (Get-CamWindowRecordPath -Config $recordConfig -Title $WindowTitle))
+            }
+            else {
+                $recordConfig = $null
+                & $say 'could not publish the window record - -Status will fall back to searching for the title'
+            }
+        }
+        catch {
+            $recordConfig = $null
+            & $say ('could not publish the window record: ' + $_.Exception.Message)
+        }
+
         while ([CamWin]::IsWindow($hwnd)) { Start-Sleep -Milliseconds $PollMs }
         & $say ("window 0x{0:X} is gone - stopping everything it owned" -f $hwnd.ToInt64())
 
@@ -3335,6 +3585,14 @@ function Start-CamJobWarden {
         # appeared and it was disarmed, or something threw on the way. Closing
         # it is what kills the members, so it is never left to process exit.
         if ($job -ne [IntPtr]::Zero) { [void][CamJob]::CloseHandle($job) }
+
+        # The record is this warden's claim to be watching that window, so it
+        # goes when the warden does. It is removed HERE, last of everything,
+        # and never anywhere near the handle close above: nothing is allowed
+        # between the window going and the kernel sweep, and the record being
+        # a few seconds stale costs nothing because every reader re-checks the
+        # handle itself.
+        if ($recordConfig) { [void](Remove-CamWindowRecord -Config $recordConfig -Title $WindowTitle) }
     }
 }
 
@@ -3583,8 +3841,12 @@ function Start-CamNvrWindow {
         JobReady    = $false
         WindowFound = $false
         Title       = $title
-        JobName     = $jobName
-        Cleaned     = @()
+        # The handle the window was found by and the title it is actually
+        # showing, which is not always $title - see Get-CamWindowPresence.
+        Hwnd         = ''
+        CurrentTitle = ''
+        JobName      = $jobName
+        Cleaned      = @()
     }
 
     # WHAT IS ALREADY THERE, and what that means. Three facts are read before
@@ -3601,23 +3863,39 @@ function Start-CamNvrWindow {
     $live = @($inventory | Where-Object { $_.Role -eq 'Supervisor' })
     $heartbeat = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
     $recording = ($live.Count -gt 0 -or $heartbeat.Running)
-    $windows = @(Get-CamTerminalWindow -Title $title).Count
+
+    # By the warden's published HWND first, by the title only when there is no
+    # live handle to go on. The title is not a reliable name for this window -
+    # it follows the active tab - and this is the call site where that cost
+    # the most: a title search that came back zero while the NVR was running
+    # used to produce the refusal below, and a title search that came back
+    # zero while it was NOT running used to skip the clearing path and leave a
+    # dead window for the next launch to collide with. Item [81].
+    $presence = Get-CamWindowPresence -Config $Config -Title $title
+    $windows = $presence.Count
 
     if ($recording) {
-        if ($windows -ge 1) {
+        if ($presence.Found) {
             $report.AlreadyOpen = $true
             $report.WindowFound = $true
+            $report.Hwnd = $presence.HwndHex
+            $report.CurrentTitle = $presence.CurrentTitle
             return $report
         }
 
-        # Recording, but no window answers to the title. Windows Terminal
-        # adopts a foreign console as a tab, and while that tab is active the
-        # window's title is the foreign tab's - so the search finds nothing
-        # even though the NVR is perfectly alive. Clearing the job here would
-        # kill a working supervisor, MediaMTX and six ffmpeg. Refuse, and name
-        # the pids doing the work.
-        throw ("The NVR IS running (supervisor {0}) but no window titled '{1}' could be found, so a second one cannot be started - most likely a foreign console has been adopted as a tab in its window, which hides the title. Nothing has been changed and recording is unaffected. Stop the whole NVR with cam.ps1 -Stop -Recorder first if you really want to restart it." -f `
-                $(if ($live.Count -gt 0) { ($live | ForEach-Object { $_.ProcessId }) -join ', ' } else { "pid $($heartbeat.Pid) by heartbeat" }), $title)
+        # Recording, and the window cannot be identified at all: no warden has
+        # published a live handle and nothing carries the title. Clearing the
+        # job here would kill a working supervisor, MediaMTX and six ffmpeg.
+        # Refuse, and name the pids doing the work.
+        #
+        # Until item [81] this was also the adopted-foreign-tab case, which is
+        # common on a machine whose windowingBehavior is useExisting and is
+        # now handled above by the published handle. What is left is a window
+        # whose warden never published and whose title has moved, or no window
+        # at all with a supervisor somehow still running outside one.
+        throw ("The NVR IS running (supervisor {0}) but its window could not be identified - no warden has published a live window handle to '{1}' and no window carries the title '{2}', so a second one cannot be started. Nothing has been changed and recording is unaffected. Stop the whole NVR with cam.ps1 -Stop -Recorder first if you really want to restart it." -f `
+                $(if ($live.Count -gt 0) { ($live | ForEach-Object { $_.ProcessId }) -join ', ' } else { "pid $($heartbeat.Pid) by heartbeat" }), `
+                (Get-CamWindowRecordPath -Config $Config -Title $title), $title)
     }
 
     # Nothing is recording, so any window or job still here is a corpse, not an
@@ -3628,20 +3906,30 @@ function Start-CamNvrWindow {
     # so do it here rather than leave a system its own start command cannot
     # start. Item [63].
     if ($windows -ge 1 -or [CamJob]::Exists($jobName)) {
+        # The handle found above, remembered before the clear. The warden
+        # removes its record as it dies, so after this a fresh presence read
+        # has only the title search to go on - and a dead window that outlived
+        # the clear with a foreign tab active answers to neither. Launching a
+        # second NVR over it is exactly what the wait below exists to prevent,
+        # so the known handle is re-checked alongside.
+        $known = $presence.Hwnd
         $stale = Stop-CamNvr -Config $Config
         $report.Cleaned = $stale.Stopped
-        Write-Host ("cleared a dead NVR: {0} window(s) titled '{1}' and job '{2}' held with nothing recording; stopped pid(s) {3}" -f `
-                $windows, $title, $jobName, `
+        Write-Host ("cleared a dead NVR: {0} window(s) ({1}) and job '{2}' held with nothing recording; stopped pid(s) {3}" -f `
+                $windows, `
+                $(if ($presence.Found) { "{0}, titled '{1}'" -f $presence.HwndHex, $presence.CurrentTitle } else { "none titled '$title'" }), `
+                $jobName, `
                 $(if ($stale.Stopped.Count -gt 0) { ($stale.Stopped | Sort-Object) -join ', ' } else { 'none' })) -ForegroundColor Yellow
 
         $deadline = (Get-Date).AddSeconds(10)
         while ((Get-Date) -lt $deadline) {
-            $windows = @(Get-CamTerminalWindow -Title $title).Count
+            $windows = (Get-CamWindowPresence -Config $Config -Title $title).Count
+            if ([CamWin]::IsTerminalWindow($known)) { $windows = 1 }
             if ($windows -eq 0 -and -not [CamJob]::Exists($jobName)) { break }
             Start-Sleep -Milliseconds 250
         }
         if ($windows -ge 1 -or [CamJob]::Exists($jobName)) {
-            throw ("Nothing is recording, but {0} window(s) titled '{1}' and job '{2}' held: {3} are still there after stopping the NVR host and warden (stopped: {4}; survived: {5}). Something outside this project holds them. Run cam.ps1 -Status, close that window, and try again." -f `
+            throw ("Nothing is recording, but {0} window(s) for '{1}' and job '{2}' held: {3} are still there after stopping the NVR host and warden (stopped: {4}; survived: {5}). Something outside this project holds them. Run cam.ps1 -Status, which names the window by handle and by the title it is actually showing, close that window, and try again." -f `
                     $windows, $title, $jobName, [CamJob]::Exists($jobName), `
                     (($stale.Stopped | Sort-Object) -join ', '), (($stale.Survived | Sort-Object) -join ', '))
         }
@@ -3678,7 +3966,19 @@ function Start-CamNvrWindow {
 
     $deadline = (Get-Date).AddSeconds($WindowWaitSeconds)
     while ((Get-Date) -lt $deadline) {
-        if (@(Get-CamTerminalWindow -Title $title).Count -ge 1) { $report.WindowFound = $true; break }
+        # The window we just launched carries the title - its tab is the active
+        # one and nothing has been adopted into it yet - so the title search
+        # answers here. Asking through the presence reader anyway means this
+        # wait also succeeds on the warden's record, which is the stronger
+        # signal of the two: it proves a warden latched onto the window rather
+        # than only that a window appeared.
+        $launched = Get-CamWindowPresence -Config $Config -Title $title
+        if ($launched.Found) {
+            $report.WindowFound = $true
+            $report.Hwnd = $launched.HwndHex
+            $report.CurrentTitle = $launched.CurrentTitle
+            break
+        }
         Start-Sleep -Milliseconds 500
     }
 

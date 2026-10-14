@@ -207,6 +207,17 @@ function Get-CamComponentState {
         try { $readyPaths = @(Get-CamRelayReadyPaths -Config $Config) } catch { $readyPaths = @() }
     }
 
+    # By the handle its warden published, not by the title it is showing. A
+    # Windows Terminal window's title follows its active tab, so counting
+    # titles reported the NVR window as gone every time a foreign console was
+    # adopted into it - with the host, the warden, the job and six ffmpeg all
+    # alive. Item [81]. The health strip has no warden and therefore no
+    # published handle, so it is still counted by title; its own window title
+    # is known to be unreliable too, which is why Stop-CamHealthStrip stops it
+    # by process identity and treats the window as cosmetic cleanup.
+    $nvrWindow = Get-CamWindowPresence -Config $Config -Title (Get-CamNvrWindowTitle)
+    $gridWindow = Get-CamWindowPresence -Config $Config -Title (Get-CamDashboardWindowTitle)
+
     return [pscustomobject]@{
         Inventory       = $inventory
         Supervisor      = @($inventory | Where-Object { $_.Role -eq 'Supervisor' })
@@ -223,11 +234,54 @@ function Get-CamComponentState {
         SupervisorState = (Get-CamSupervisorState -Config $Config -Snapshot $snapshot)
         JobExists       = [CamJob]::Exists((Get-CamDashboardJobName))
         NvrJobExists    = [CamJob]::Exists((Get-CamNvrJobName))
-        NvrWindows      = @(Get-CamTerminalWindow -Title (Get-CamNvrWindowTitle)).Count
-        GridWindows     = @(Get-CamTerminalWindow -Title (Get-CamDashboardWindowTitle)).Count
+        NvrWindow       = $nvrWindow
+        GridWindow      = $gridWindow
+        NvrWindows      = $nvrWindow.Count
+        GridWindows     = $gridWindow.Count
         HealthWindows   = @(Get-CamTerminalWindow -Title 'cam.health').Count
         ReadyPaths      = $readyPaths
     }
+}
+
+
+function Write-CamWindowLine {
+    <#
+        One line naming the window, so "which window must I not close" is
+        answerable from -Status alone.
+
+        The handle is printed because it is the only name this window reliably
+        has. The title is printed as it is NOW, and when that differs from the
+        title we gave it the line says so outright: the window is ours, with
+        something else showing in it, and that is the state in which closing
+        what looks like a stray console takes the NVR down with it.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)]$Presence
+    )
+
+    if (-not $Presence.Found) {
+        Write-Host ("  {0} ABSENT - no window handle published and none titled '{1}'" -f `
+            $Label.PadRight(12), $Presence.Title) -ForegroundColor Yellow
+        return
+    }
+
+    if ($Presence.Source -eq 'title') {
+        Write-Host ("  {0} PRESENT - {1} titled '{2}', found by title; no warden has published a handle" -f `
+            $Label.PadRight(12), $Presence.HwndHex, $Presence.Title)
+        return
+    }
+
+    if ($Presence.TitleChanged) {
+        Write-Host ("  {0} PRESENT - {1}, NOW TITLED '{2}' not '{3}': another tab is active in it. THAT is the window not to close (terminal pid {4}, warden {5})" -f `
+            $Label.PadRight(12), $Presence.HwndHex, $Presence.CurrentTitle, $Presence.Title, `
+            $Presence.TerminalPid, $Presence.WardenPid) -ForegroundColor Cyan
+        return
+    }
+
+    Write-Host ("  {0} PRESENT - {1} titled '{2}' (terminal pid {3}, warden {4})" -f `
+        $Label.PadRight(12), $Presence.HwndHex, $Presence.CurrentTitle, `
+        $Presence.TerminalPid, $Presence.WardenPid)
 }
 
 
@@ -253,9 +307,9 @@ function Show-CamStatus {
     }
     # The NVR window and the job it owns. A job with no window is the state
     # that used to make the recorder unstartable - item [63].
-    Write-Host ("  nvr          {0} host, {1} warden, {2} window(s) titled '{3}', job '{4}' exists: {5}" -f `
-        $State.NvrHost.Count, $State.NvrWarden.Count, $State.NvrWindows, (Get-CamNvrWindowTitle), `
-        (Get-CamNvrJobName), $State.NvrJobExists)
+    Write-Host ("  nvr          {0} host, {1} warden, job '{2}' exists: {3}" -f `
+        $State.NvrHost.Count, $State.NvrWarden.Count, (Get-CamNvrJobName), $State.NvrJobExists)
+    Write-CamWindowLine -Label 'nvr window' -Presence $State.NvrWindow
     if ($State.NvrJobExists -and $State.NvrWindows -eq 0 -and $State.Supervisor.Count -eq 0) {
         Write-Host ("  STALE        the '{0}' job is held with no window and nothing recording. -Start -Recorder clears it." -f `
             (Get-CamNvrJobName)) -ForegroundColor Yellow
@@ -271,7 +325,7 @@ function Show-CamStatus {
     }
 
     Write-CamSection 'dashboard'
-    Write-Host ("  grid window  {0} titled '{1}'" -f $State.GridWindows, (Get-CamDashboardWindowTitle))
+    Write-CamWindowLine -Label 'grid window' -Presence $State.GridWindow
     Write-Host ("  warden       {0} process(es), job '{1}' exists: {2}" -f `
         $State.Warden.Count, (Get-CamDashboardJobName), $State.JobExists)
     Write-Host ("  panes        {0}" -f $State.Pane.Count)

@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'leak', 'uileak', 'procs', 'relay', 'viewer')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'leak', 'uileak', 'procs', 'relay', 'viewer')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'leak', 'uileak', 'procs')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'leak', 'uileak', 'procs')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -1214,6 +1214,214 @@ function Invoke-CamCheckWindowClose {
 }
 
 
+function Invoke-CamCheckWindowId {
+    <#
+        Item [81]. A window is identified by the HANDLE its warden latched
+        onto, not by the title it is currently showing.
+
+        THE CONDITION UNDER TEST is the one measured on the live NVR on
+        2026-10-14: a foreign console adopted into our window as a second tab,
+        after which the window answers to that tab's title and
+        Get-CamTerminalWindow finds nothing - while the warden, the job, the
+        pane and six ffmpeg are all perfectly alive. It is driven here rather
+        than on the Operator's own window, so nothing stops recording to prove
+        it.
+
+        Both tiers get the same two windows and the same assertions, because
+        both wardens are Start-CamJobWarden with different arguments and
+        -Status asks Get-CamWindowPresence for both titles identically. Each
+        tier is checked twice over, which is what the commission asked for:
+
+          present  the title has moved away and the window is still FOUND, by
+                   handle, reporting the title it is actually showing
+          absent   the window is gone and it is reported GONE - including with
+                   a stale record left on disk pointing at the dead handle,
+                   which is the false positive a published handle could
+                   otherwise introduce
+
+        Like the windowclose check this raises real toasts and real
+        Application-log entries, two of each, because the test warden runs
+        with -AlertOnWindowClose exactly as the NVR's does. They name the TEST
+        windows, not cam.nvr.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $opened = @()
+
+    $sandbox = New-CamTestSandbox -Name 'windowid' -Cameras @(
+        [pscustomobject]@{ Name = 'windowid-a'; IP = '10.255.255.12'; Quality = 'main'; Record = $true }
+    )
+
+    $tiers = @(
+        [pscustomobject]@{ Label = 'nvr tier'; Title = 'cam.test.nvrid'; JobName = 'cam.test.nvrid.job' }
+        [pscustomobject]@{ Label = 'dashboard tier'; Title = 'cam.test.gridid'; JobName = 'cam.test.gridid.job' }
+    )
+
+    try {
+        foreach ($tier in $tiers) {
+            $window = Start-CamTestWardenWindow -Sandbox $sandbox -Title $tier.Title -JobName $tier.JobName
+            $opened += $window
+            $evidence += ("{0}: window '{1}' hwnd 0x{2:X}, warden {3}, pane {4}, found {5}, watching {6}" -f `
+                    $tier.Label, $tier.Title, $window.Hwnd, $window.WardenPid, $window.PanePid, `
+                    $window.WindowFound, $window.Watching)
+            if (-not ($window.WindowFound -and $window.Watching -and $window.PanePid -gt 0 -and $window.Hwnd -ne 0)) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the test window or its warden did not come up" -f $tier.Label)
+                continue
+            }
+
+            # --- the warden published the handle it latched -----------------
+            $recordPath = Get-CamWindowRecordPath -Config $sandbox.Config -Title $tier.Title
+            $record = $null
+            $deadline = (Get-Date).AddSeconds(20)
+            while ((Get-Date) -lt $deadline) {
+                $record = Get-CamWindowRecord -Config $sandbox.Config -Title $tier.Title
+                if ($record) { break }
+                Start-Sleep -Milliseconds 250
+            }
+            if (-not $record) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the warden published no window record at {1}" -f $tier.Label, $recordPath)
+                continue
+            }
+            $evidence += ("{0}: record {1} -> hwnd {2}, terminal pid {3}, warden pid {4}, latched title '{5}'" -f `
+                    $tier.Label, (Split-Path -Path $recordPath -Leaf), $record.HwndHex, `
+                    $record.TerminalPid, $record.WardenPid, $record.Title)
+            if ([int64]$record.Hwnd -ne [int64]$window.Hwnd) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the published handle {1} is not the window the title search found (0x{2:X})" -f `
+                        $tier.Label, $record.HwndHex, $window.Hwnd)
+            }
+            if ([int]$record.WardenPid -ne [int]$window.WardenPid) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the record names warden {1}, not the warden that was started ({2})" -f `
+                        $tier.Label, $record.WardenPid, $window.WardenPid)
+            }
+            if ([int]$record.TerminalPid -le 0) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the record carries no terminal pid" -f $tier.Label)
+            }
+            if ([string]$record.Title -cne $tier.Title) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the record latched the title '{1}', not '{2}'" -f $tier.Label, $record.Title, $tier.Title)
+            }
+
+            # --- with the title intact, nothing is reported as changed ------
+            $presence = Get-CamWindowPresence -Config $sandbox.Config -Title $tier.Title
+            $evidence += ("{0}: before the foreign tab: found {1} by {2}, title now '{3}', changed {4}" -f `
+                    $tier.Label, $presence.Found, $presence.Source, $presence.CurrentTitle, $presence.TitleChanged)
+            if (-not ($presence.Found -and $presence.Source -eq 'hwnd' -and -not $presence.TitleChanged)) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: a window whose title is intact must be found by handle and reported unchanged" -f $tier.Label)
+            }
+
+            # --- THE CONDITION: the title moves to a foreign tab -----------
+            $moved = Add-CamTestForeignTab -Window $window -ForeignTitle ($tier.Title + '.foreign')
+            if (-not $moved) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: adding a second tab did not move the window title away from '{1}', so the condition was never reproduced" -f `
+                        $tier.Label, $tier.Title)
+                continue
+            }
+            $byTitle = @(Get-CamTerminalWindow -Title $tier.Title).Count
+            $presence = Get-CamWindowPresence -Config $sandbox.Config -Title $tier.Title
+            $evidence += ("{0}: foreign tab {1} active, window now titled '{2}': title search finds {3}, presence finds {4} by {5} at {6}, changed {7}, reports '{8}'" -f `
+                    $tier.Label, $window.ForeignPid, $moved, $byTitle, $presence.Found, $presence.Source, `
+                    $presence.HwndHex, $presence.TitleChanged, $presence.CurrentTitle)
+            if ($byTitle -ne 0) {
+                $evidence += ("{0}: NOTE the title search still found {1} - the divergence this check exists for was not in force" -f $tier.Label, $byTitle)
+                $ok = $false
+                $evidence += ("FAIL: {0}: the window still answers to its title, so nothing about the handle path was proved" -f $tier.Label)
+            }
+            if (-not $presence.Found) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the window is open and watched but reported ABSENT once its title moved - this is the bug item [81] fixed" -f $tier.Label)
+            }
+            if ($presence.Source -ne 'hwnd') {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the window was not found by the published handle but by '{1}'" -f $tier.Label, $presence.Source)
+            }
+            if ([int64]$presence.Hwnd.ToInt64() -ne [int64]$window.Hwnd) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: presence reports handle {1}, not the window under test (0x{2:X})" -f `
+                        $tier.Label, $presence.HwndHex, $window.Hwnd)
+            }
+            if (-not $presence.TitleChanged) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the title moved and presence did not say so, which is the one fact the Operator cannot get elsewhere" -f $tier.Label)
+            }
+            if ([string]$presence.CurrentTitle -cne [string]$moved) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: presence reports the title '{1}' while the window shows '{2}'" -f `
+                        $tier.Label, $presence.CurrentTitle, $moved)
+            }
+
+            # --- the window goes, and is reported gone ---------------------
+            # Closed by HANDLE and nothing else: with the title moved, closing
+            # it by title is exactly what no longer works, and the warden must
+            # be left to notice the close itself. Killing it here - which is
+            # what Stop-CamTestWardenWindow does as a backstop - would stop it
+            # reaching its own shutdown, and the record removal asserted below
+            # would then be measuring the test rather than the warden.
+            [void](Close-CamTestWindow -Window $window)
+            $gone = $false
+            $deadline = (Get-Date).AddSeconds(60)
+            while ((Get-Date) -lt $deadline) {
+                $gone = (-not (Get-Process -Id $window.WardenPid -ErrorAction SilentlyContinue))
+                if ($gone) { break }
+                Start-Sleep -Milliseconds 500
+            }
+            $record = Get-CamWindowRecord -Config $sandbox.Config -Title $tier.Title
+            $presence = Get-CamWindowPresence -Config $sandbox.Config -Title $tier.Title
+            $evidence += ("{0}: window closed, warden gone {1}, record left behind {2}, presence finds {3} by {4}" -f `
+                    $tier.Label, $gone, [bool]$record, $presence.Found, $presence.Source)
+            if (-not $gone) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the warden outlived its window" -f $tier.Label)
+            }
+            elseif ($record) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the warden exited leaving its record at {1} - a stale file claiming a live window" -f $tier.Label, $recordPath)
+            }
+            if ($presence.Found) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the window is closed and still reported PRESENT" -f $tier.Label)
+            }
+
+            # --- a stale record must not resurrect it ----------------------
+            # The handle is now dead, which is what a record written by a
+            # warden that was TERMINATED rather than closed looks like: an
+            # orderly stop kills the warden outright and it never reaches the
+            # removal. Believing the file would report a window that is gone.
+            [void](Set-CamWindowRecord -Config $sandbox.Config -Title $tier.Title `
+                    -Hwnd ([IntPtr]::new([int64]$window.Hwnd)) -JobName $tier.JobName)
+            $stale = Get-CamWindowRecord -Config $sandbox.Config -Title $tier.Title
+            $presence = Get-CamWindowPresence -Config $sandbox.Config -Title $tier.Title
+            $evidence += ("{0}: stale record written for the dead handle {1}: presence finds {2} by {3}" -f `
+                    $tier.Label, $(if ($stale) { $stale.HwndHex } else { 'not written' }), $presence.Found, $presence.Source)
+            if (-not $stale) {
+                $ok = $false
+                $evidence += ("FAIL: {0}: the stale record could not be written, so the false positive was never tested" -f $tier.Label)
+            }
+            if ($presence.Found -or $presence.Source -ne 'none') {
+                $ok = $false
+                $evidence += ("FAIL: {0}: a stale record was believed and a closed window reported PRESENT" -f $tier.Label)
+            }
+            [void](Remove-CamWindowRecord -Config $sandbox.Config -Title $tier.Title)
+        }
+    }
+    finally {
+        foreach ($window in $opened) { if ($window) { Stop-CamTestWardenWindow -Window $window } }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'windowid' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'a warden publishes the handle it latched onto, and both tiers report the window by that handle and its current title once a foreign tab has taken the title over; a closed window is reported gone, and a stale record pointing at a dead handle is not believed' `
+        -Evidence $evidence
+}
+
+
 function Invoke-CamCheckProcs {
     <#
         Asserts that no ffmpeg or MediaMTX is left over from a test run.
@@ -1554,6 +1762,7 @@ foreach ($check in $Checks) {
         'autostart'  { Invoke-CamCheckAutostart  -Run $run }
         'crashsafe'  { Invoke-CamCheckCrashSafe  -Run $run }
         'windowclose' { Invoke-CamCheckWindowClose -Run $run }
+        'windowid'   { Invoke-CamCheckWindowId   -Run $run }
         'leak'       { Invoke-CamCheckLeak       -Run $run }
         'uileak'     { Invoke-CamCheckUiLeak     -Run $run }
         'procs'      { Invoke-CamCheckProcs      -Run $run }

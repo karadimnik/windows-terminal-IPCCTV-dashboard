@@ -1183,3 +1183,55 @@ The Operator approved all four. Documentation only; no code touched.
       Note for later readers: the limitation numbers in items **[32]** and **[34]** above are the
       old ones. [34]'s "known limitation 11" is now the paragraph in the README's health-strip
       section, and [32]'s "limitation 14" is now limitation 13.
+
+- [x] **[81]** `cam.ps1 -Status` resolves the NVR and dashboard windows by **current title**
+      (`Get-CamTerminalWindow`), but a Windows Terminal window's title follows its *active tab*. Observed
+      2026-10-14: the NVR warden was healthily watching hwnd `0x1190726` while that window was titled
+      `nk`, so `-Status` printed `0 window(s) titled 'cam.nvr'` with the host, warden and job all alive.
+      Two harms: `-Status` reads as "the NVR window is gone" when nothing is wrong, and the Operator
+      cannot identify which window owns the recorder before closing it. The warden already knows the
+      HWND - have it publish it to `_state`, and have `-Status` report that HWND's liveness via
+      `IsWindow` plus its *current* title, falling back to the title search only when no HWND is
+      published. Safety is unaffected either way; this is reporting and identification only.
+
+      FIXED 2026-10-14. `Start-CamJobWarden` now writes `_state\window-<title>.json` - handle,
+      terminal pid, the title at latch time, its own pid and the job name - between latching the
+      handle and entering the watch loop, and removes it in its `finally`, last of everything, so
+      nothing comes between the window going and the kernel sweep. Both tiers get it from the one
+      function. Publishing cannot throw into the warden: `Set-CamWindowRecord` swallows its own
+      failures and the config resolution is wrapped, because everything below that line is the
+      warden's actual duty. The record is removed only by the warden that wrote it, since the file
+      is keyed by title and a warden that disarmed must not delete a live one's.
+
+      `Get-CamWindowPresence` is the one reader: the published handle when `IsTerminalWindow` says
+      it is still a visible Windows Terminal window, the title search otherwise. **The fallback is
+      on liveness, not on the record merely existing** - a record whose handle is dead is treated
+      as no record, which is what keeps a restart's few seconds of overlap from reporting a plainly
+      open window as absent, and what makes a stale file left by a TERMINATED warden harmless.
+      `-Status` prints the handle, the terminal pid, the warden pid and the title the window is
+      showing NOW, and says outright when that is not the title we gave it.
+
+      Three of the four other `Get-CamTerminalWindow` call sites moved too, all in
+      `Start-CamNvrWindow`, and one of them was a correctness bug rather than a cosmetic one: the
+      dead-NVR clearing path *stops processes* on a window count, so a wrongly-zero count skipped
+      the clear and left a dead window for the next launch to collide with. The post-clear wait
+      re-checks the handle it found before the clear as well as a fresh read, because the dying
+      warden takes its record with it. The adopted-tab refusal survives but is no longer reachable
+      from an adopted tab - that case is now simply "already open". `cam.ps1`'s health-strip count
+      stays on the title search: no warden watches that window, so there is no handle to publish,
+      and `Stop-CamHealthStrip` already stops it by process identity for the same reason.
+      `Stop-CamTerminalWindow` was reviewed and deliberately left alone - it is a kill path, and
+      teaching it to close a window the title search does not find would change kill semantics,
+      which this item is not.
+
+      Harness grew a fifteenth check, `windowid`, which drives the real condition in a sandbox
+      rather than on the Operator's window: a warden window per tier, a second tab added so the
+      title moves to it, then the title search must find nothing while the presence reader still
+      finds the window by handle and reports the title it is actually showing. Each tier is then
+      checked for the absent case twice - the window closed, and a stale record hand-written for
+      the dead handle. Two new testlib primitives, `Add-CamTestForeignTab` and a
+      `Stop-CamTestWardenWindow` that closes by handle when the title no longer finds the window.
+
+      Note for whoever reads `-Status` next: the live wardens were started before this change and
+      publish nothing, so until the NVR and the dashboard are next restarted both windows are
+      reported through the title fallback - correctly, and saying so on the line.
