@@ -36,3 +36,6 @@ mockups/
 # Built UI binary, cross-compiled from ui/ (see ui/build.sh)
 camui.exe
 camui.config.json
+
+# Agent working notes for this workspace - local to the machine, never published
+.claude/
