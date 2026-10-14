@@ -803,6 +803,206 @@ function Get-CamTestStatusJson {
 
 
 # ---------------------------------------------------------------------------
+# A synthetic camera, and a sandbox that cannot raise a real alert
+# ---------------------------------------------------------------------------
+
+function Test-CamTestPortFree {
+    <# True when nothing on this machine listens on TCP $Port, on any address. #>
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
+    return (@($listeners | Where-Object { $_.Port -eq $Port }).Count -eq 0)
+}
+
+
+function Start-CamTestSyntheticCamera {
+    <#
+        A stand-in for an IP camera, so the real supervisor can record without
+        any camera being contacted: a sandbox MediaMTX on loopback:$Port, with
+        one ffmpeg publisher per path pushing a lavfi test pattern as H.264 and
+        a sine tone as G.711 A-law - the two codecs these cameras send.
+
+        MediaMTX rather than ffmpeg as its own RTSP listener, because a
+        listening ffmpeg serves exactly one client and exits when it leaves:
+        the checks that kill the recorder's child need the source to accept
+        the reconnect, as a camera does.
+
+        Everything but RTSP over TCP is switched off, so no default port of the
+        Operator's relay (8554, 9997, 8000/8001 UDP, 1935, 8888...) is opened.
+        The publishers use a 1 s GOP so a -c copy segment can cut within a
+        second of its boundary. Returns the processes for
+        Stop-CamTestSyntheticCamera, which kills exactly these pids.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Dir,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string[]]$PathName,
+        [int]$TimeoutSeconds = 20
+    )
+
+    if (-not (Test-CamTestPortFree -Port $Port)) { throw "TCP port $Port is already in use; the synthetic camera needs it free." }
+
+    $work = Join-Path -Path $Dir -ChildPath 'synthcam'
+    [void](New-Item -ItemType Directory -Path $work -Force)
+    $config = Join-Path -Path $work -ChildPath 'mediamtx.yml'
+    $log = Join-Path -Path $work -ChildPath 'mediamtx.out'
+    $yml = @(
+        'logLevel: info', 'logDestinations: [stdout]', 'api: no', 'metrics: no', 'pprof: no', 'playback: no',
+        'rtsp: yes', 'rtspTransports: [tcp]', "rtspAddress: 127.0.0.1:$Port",
+        'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'moq: no', 'paths:'
+    ) + @($PathName | ForEach-Object { "  ${_}: {}" })
+    [System.IO.File]::WriteAllText($config, (($yml -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+    $camera = [pscustomobject]@{
+        Port       = $Port
+        Dir        = $work
+        Log        = $log
+        MediaMtx   = $null
+        Publishers = @()
+    }
+
+    try {
+        $camera.MediaMtx = Start-Process -FilePath 'C:\mediamtx\mediamtx.exe' -ArgumentList @("`"$config`"") -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+        [void]$camera.MediaMtx.Handle
+
+        $ffmpeg = (Get-CamConfigDefault).FfmpegPath
+        foreach ($name in $PathName) {
+            $publish = @('-hide_banner', '-loglevel', 'warning', '-nostdin',
+                '-re', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=15',
+                '-re', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=8000',
+                '-map', '0:v', '-map', '1:a',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
+                '-g', '15', '-keyint_min', '15', '-sc_threshold', '0',
+                '-c:a', 'pcm_alaw', '-ar', '8000', '-ac', '1',
+                '-f', 'rtsp', '-rtsp_transport', 'tcp', "rtsp://127.0.0.1:$Port/$name")
+            $publisherLog = Join-Path -Path $work -ChildPath "publish-$name.err"
+            # Retried until MediaMTX is listening: a publisher that connects
+            # first exits at once, and that is the only race here.
+            $publisher = $null
+            $deadline = [DateTime]::Now.AddSeconds($TimeoutSeconds)
+            while ($true) {
+                $online = @(Get-CamFileTailLines -Path $log -Count 200 | Where-Object { $_ -like "*listeners on 127.0.0.1:$Port*" }).Count -gt 0
+                if ($online) {
+                    $publisher = Start-Process -FilePath $ffmpeg -ArgumentList (Get-CamCommandLine -Arguments $publish) -PassThru -WindowStyle Hidden `
+                        -RedirectStandardOutput "$publisherLog.out" -RedirectStandardError $publisherLog
+                    [void]$publisher.Handle
+                    break
+                }
+                if ($camera.MediaMtx.HasExited) { throw "The synthetic camera's MediaMTX exited with code $($camera.MediaMtx.ExitCode): $log" }
+                if ([DateTime]::Now -ge $deadline) { throw "The synthetic camera's MediaMTX did not listen on $Port within ${TimeoutSeconds}s: $log" }
+                Start-Sleep -Milliseconds 250
+            }
+            $camera.Publishers += $publisher
+        }
+
+        $deadline = [DateTime]::Now.AddSeconds($TimeoutSeconds)
+        while ($true) {
+            $lines = @(Get-CamFileTailLines -Path $log -Count 400)
+            $waiting = @($PathName | Where-Object { $n = $_; @($lines | Where-Object { $_.Contains("[path $n] stream is available and online") }).Count -eq 0 })
+            if ($waiting.Count -eq 0) { break }
+            foreach ($publisher in $camera.Publishers) {
+                if ($publisher.HasExited) { throw "A synthetic camera publisher exited with code $($publisher.ExitCode); see $work" }
+            }
+            if ([DateTime]::Now -ge $deadline) { throw "The synthetic camera did not serve $($waiting -join ', ') within ${TimeoutSeconds}s: $log" }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+    catch {
+        [void](Stop-CamTestSyntheticCamera -Camera $camera)
+        throw
+    }
+
+    return $camera
+}
+
+
+function Stop-CamTestSyntheticCamera {
+    <#
+        Kills the synthetic camera's own processes by pid - publishers first,
+        then MediaMTX - and never anything by image name: ffmpeg and mediamtx
+        on this machine may be the Operator's. Returns $true when every one of
+        them has exited.
+    #>
+    param([Parameter(Mandatory = $true)]$Camera)
+
+    $all = @(@($Camera.Publishers) + @($Camera.MediaMtx) | Where-Object { $_ })
+    foreach ($process in $all) {
+        if (-not $process.HasExited) {
+            try { $process.Kill() } catch { }
+            [void]$process.WaitForExit(10000)
+        }
+    }
+    return (@($all | Where-Object { -not $_.HasExited }).Count -eq 0)
+}
+
+
+function Set-CamTestAlertStub {
+    <#
+        Replaces Send-CamAlert in the SANDBOX copy of cam.common.ps1 with one
+        that appends to <sandbox>\alerts.log and writes the product's ALERT
+        line to the log it was given, so a supervisor run in the sandbox can
+        never raise a toast or write the Operator's event log. Appended last,
+        so it is the definition the dot-sourced library ends up with.
+    #>
+    param([Parameter(Mandatory = $true)]$Sandbox)
+
+    $stub = @'
+
+
+# --- test sandbox only: alerts are recorded, never shown ---
+function Send-CamAlert {
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Message,
+        [int]$EventId = 100,
+        [string]$EntryType = 'Warning',
+        [AllowEmptyString()][string]$LogPath = '',
+        [int]$LogMaxBytes = 0
+    )
+    $title = Get-CamRedacted -Text $Title
+    $body = Get-CamRedacted -Text $Message
+    $channels = 'recorded by the test sandbox stub, not shown'
+    [System.IO.File]::AppendAllText((Join-Path -Path $script:CamLibRoot -ChildPath 'alerts.log'),
+        ("{0} {1} {2} - {3}" -f $EventId, $EntryType, $title, $body) + [Environment]::NewLine)
+    if (-not [string]::IsNullOrEmpty($LogPath)) {
+        try { Write-CamLog -Path $LogPath -Message ("ALERT {0} - {1} [{2}]" -f $title, $body, $channels) -MaxBytes $LogMaxBytes }
+        catch { }
+    }
+    return @{ Title = $title; Message = $body; Channels = $channels }
+}
+'@
+    $common = Join-Path -Path $Sandbox.Dir -ChildPath 'cam.common.ps1'
+    [System.IO.File]::AppendAllText($common, $stub, (New-Object System.Text.UTF8Encoding($false)))
+    return (Join-Path -Path $Sandbox.Dir -ChildPath 'alerts.log')
+}
+
+
+function New-CamTestSynthSandbox {
+    <#
+        A sandbox whose cameras are synthetic: each camera's IP is
+        127.0.0.1:$Port and its stream path is its own name, so the product
+        builds an rtsp:// URL to the synthetic camera through Get-CamRtspUrl
+        and Get-CamFfmpegArgs, unmodified. Throwaway credential, relay off,
+        Send-CamAlert stubbed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string[]]$CameraName,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [hashtable]$Config = @{}
+    )
+
+    $cameras = @($CameraName | ForEach-Object { [pscustomobject]@{ Name = $_; IP = "127.0.0.1:$Port"; Quality = $_; Record = $true } })
+    $sandbox = New-CamTestSandbox -Name $Name -Cameras $cameras -Config $Config
+    $alerts = Set-CamTestAlertStub -Sandbox $sandbox
+    $sandbox | Add-Member -NotePropertyName AlertLog -NotePropertyValue $alerts
+    $sandbox | Add-Member -NotePropertyName SupervisorLog -NotePropertyValue (Join-Path -Path $sandbox.Root -ChildPath '_logs\recorder.log')
+    return $sandbox
+}
+
+
+# ---------------------------------------------------------------------------
 # A warden and the window it watches
 # ---------------------------------------------------------------------------
 
