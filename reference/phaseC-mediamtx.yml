@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------------------
+# MediaMTX configuration for the IPCCTV restreamer, Phase C candidate.
+# CONTINGENT: only relevant if the Operator keeps the restreamer decision after
+# reading the revised trade-off in phaseA2-connection-evidence.md. Nothing here
+# is installed; this file is a review artifact.
+#
+# Role: transport fan-out ONLY. One RTSP session per camera is pulled here and
+# re-served to local consumers. Recording stays entirely in cam.recorder.ps1 -
+# MediaMTX's own record feature is deliberately NOT used, because the existing
+# supervisor already has proven crash safety, credential redaction, backoff and
+# a stall watchdog.
+#
+# WHERE THIS FILE MUST LIVE: an NTFS path, NOT the repo. MediaMTX watches its
+# config file with ReadDirectoryChanges, which the WSL \\wsl.localhost 9P share
+# does not implement; started from the repo it exits at once with
+# "ReadDirectoryChanges: Incorrect function." Measured 2026-10-11 on v1.21.2.
+# Suggested location: C:\ProgramData\ipcctv\mediamtx.yml with the exe beside it.
+# ---------------------------------------------------------------------------
+
+logLevel: info
+logDestinations: [stdout]        # the launcher pipes stdout through Get-CamRedacted
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 2048             # 2048 packets ~ 40 s of one camera's audio+video
+
+# Localhost control API. Used by the recorder's and dashboard's reachability
+# check and for diagnostics; it exposes no media.
+api: yes
+apiAddress: 127.0.0.1:9997
+metrics: no
+pprof: no
+playback: no
+
+# RTSP fan-out, TCP only, LOOPBACK ONLY.
+# Loopback binding is what makes anonymous access acceptable: no process off
+# this machine can reach it. If this is ever bound to a LAN address, internal
+# authentication MUST be configured first.
+rtsp: yes
+rtspTransports: [tcp]
+rtspAddress: 127.0.0.1:8554
+
+# Every other server off. This is a fan-out, not a media server.
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+moq: no
+
+pathDefaults:
+  rtspTransport: tcp
+  # Hold the camera session continuously, independent of how many consumers are
+  # attached. On-demand pulling would re-open a camera session on every
+  # consumer gap and defeat the single-session guarantee.
+  sourceOnDemand: no
+
+# One path per camera, named cam<last-octet> of the camera IP.
+# The name deliberately contains NO underscore: MediaMTX maps a path parameter
+# to the environment variable MTX_PATHS_<PATHNAME>_<PARAM>, and an underscore
+# in the path name makes that mapping ambiguous.
+#
+# Each `source` is supplied at launch via MTX_PATHS_CAM<NN>_SOURCE so the
+# camera credential is never written to disk. Verified working on v1.21.2.
+paths:
+  cam15: { source: publisher }   # Front Entrance      192.168.50.15
+  cam13: { source: publisher }   # Rear Balcony        192.168.50.13
+  cam32: { source: publisher }   # Field Front         192.168.50.32
+  cam10: { source: publisher }   # Car Garage          192.168.50.10
+  cam16: { source: publisher }   # Workshop Entrance   192.168.50.16
+  cam33: { source: publisher }   # Workshop            192.168.50.33

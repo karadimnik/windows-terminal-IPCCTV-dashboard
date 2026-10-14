@@ -1,0 +1,260 @@
+{
+ "Schema": 1,
+ "State": "running",
+ "SupervisorPid": 77320,
+ "StartedAt": "2026-10-12T18:55:28.7287336+03:00",
+ "UpdatedAt": "2026-10-12T18:56:11.7958787+03:00",
+ "UptimeSeconds": 43.1,
+ "RootPath": "E:\\cameras",
+ "Container": "mkv",
+ "SegmentSeconds": 900,
+ "Disk": {
+  "FreeGB": 282.98,
+  "ReserveGB": 20,
+  "PruneHysteresisGB": 5,
+  "ArchiveGB": 18.22,
+  "ArchiveBytes": 19568576693,
+  "ArchiveFiles": 210,
+  "OldestSegment": "2026-10-11T22:38:27.6087544+03:00",
+  "NewestSegment": "2026-10-12T18:24:30.0824936+03:00",
+  "MeasuredGBPerDay": 22.13,
+  "ProjectedDaysRemaining": 11.88,
+  "ScannedAt": "2026-10-12T18:55:34.3046408+03:00"
+ },
+ "Prune": {
+  "LastRunAt": "2026-10-12T18:55:35.4607298+03:00",
+  "DeletedTotal": 0,
+  "FreedGBTotal": 0,
+  "Blocked": false,
+  "LastMessage": ""
+ },
+ "Restreamer": {
+  "Enabled": true,
+  "RelayBase": "rtsp://127.0.0.1:8554",
+  "Pid": 16700,
+  "LastPid": 16700,
+  "Alive": true,
+  "StartedAt": "2026-10-12T18:55:31.6704414+03:00",
+  "RestartsTotal": 0,
+  "Paths": [
+   "frontentrance",
+   "rearbalcony",
+   "fieldfront",
+   "cargarage",
+   "workshopentrance",
+   "workshop"
+  ],
+  "LastError": "",
+  "LastErrorAt": null
+ },
+ "Events": [
+  {
+   "At": "2026-10-12 18:56:02 +03:00",
+   "Text": "start Field Front pid 3836 on the direct input: ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://***:***@192.168.50.32/stream1 -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska E:\\cameras\\Field_Front\\Field_Front_%Y%m%d_%H%M%S%z.mkv"
+  },
+  {
+   "At": "2026-10-12 18:56:01 +03:00",
+   "Text": "start Workshop pid 70468 on the direct input: ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://***:***@192.168.50.33/stream1 -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska E:\\cameras\\Workshop\\Workshop_%Y%m%d_%H%M%S%z.mkv"
+  },
+  {
+   "At": "2026-10-12 18:55:58 +03:00",
+   "Text": "exit -138 after 12s for Field Front; restart #1 in 3s"
+  },
+  {
+   "At": "2026-10-12 18:55:57 +03:00",
+   "Text": "exit -138 after 11s for Workshop; restart #1 in 3s"
+  },
+  {
+   "At": "2026-10-12 18:55:47 +03:00",
+   "Text": "start Field Front pid 78496 on the direct input: ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://***:***@192.168.50.32/stream1 -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska E:\\cameras\\Field_Front\\Field_Front_%Y%m%d_%H%M%S%z.mkv"
+  },
+  {
+   "At": "2026-10-12 18:55:46 +03:00",
+   "Text": "Field Front: the restreamer did not serve 'fieldfront' within 15s, starting it on the direct input"
+  },
+  {
+   "At": "2026-10-12 18:55:46 +03:00",
+   "Text": "start Workshop pid 80464 on the direct input: ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://***:***@192.168.50.33/stream1 -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska E:\\cameras\\Workshop\\Workshop_%Y%m%d_%H%M%S%z.mkv"
+  },
+  {
+   "At": "2026-10-12 18:55:46 +03:00",
+   "Text": "Workshop: the restreamer did not serve 'workshop' within 15s, starting it on the direct input"
+  },
+  {
+   "At": "2026-10-12 18:55:36 +03:00",
+   "Text": "start Car Garage pid 86608 on the relay input: ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://127.0.0.1:8554/cargarage -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska E:\\cameras\\Car_Garage\\Car_Garage_%Y%m%d_%H%M%S%z.mkv"
+  },
+  {
+   "At": "2026-10-12 18:55:33 +03:00",
+   "Text": "start Workshop Entrance pid 85168 on the relay input: ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://127.0.0.1:8554/workshopentrance -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska E:\\cameras\\Workshop_Entrance\\Workshop_Entrance_%Y%m%d_%H%M%S%z.mkv"
+  },
+  {
+   "At": "2026-10-12 18:55:33 +03:00",
+   "Text": "start Front Entrance pid 86772 on the relay input: ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://127.0.0.1:8554/frontentrance -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska E:\\cameras\\Front_Entrance\\Front_Entrance_%Y%m%d_%H%M%S%z.mkv"
+  },
+  {
+   "At": "2026-10-12 18:55:32 +03:00",
+   "Text": "start Rear Balcony pid 70600 on the relay input: ffmpeg -hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://127.0.0.1:8554/rearbalcony -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska E:\\cameras\\Rear_Balcony\\Rear_Balcony_%Y%m%d_%H%M%S%z.mkv"
+  },
+  {
+   "At": "2026-10-12 18:55:31 +03:00",
+   "Text": "restreamer control API answered after 0.2s, serving 3 of 6 path(s): frontentrance, rearbalcony, workshopentrance"
+  },
+  {
+   "At": "2026-10-12 18:55:31 +03:00",
+   "Text": "start restreamer pid 16700: C:\\mediamtx\\mediamtx.exe serving 6 path(s): cargarage, fieldfront, frontentrance, rearbalcony, workshop, workshopentrance"
+  },
+  {
+   "At": "2026-10-12 18:55:29 +03:00",
+   "Text": "reconcile: 6 of 6 camera(s) set to record, 6 child(ren) managed"
+  },
+  {
+   "At": "2026-10-12 18:55:28 +03:00",
+   "Text": "supervisor starting: pid 77320, container mkv, segments 900s, root E:\\cameras, reconcile 5s, reserve 20.00 GB"
+  },
+  {
+   "At": "2026-10-12 18:24:30 +03:00",
+   "Text": "supervisor stopped"
+  },
+  {
+   "At": "2026-10-12 18:24:30 +03:00",
+   "Text": "kill restreamer pid 79740: stop requested"
+  },
+  {
+   "At": "2026-10-12 18:24:30 +03:00",
+   "Text": "kill Car Garage pid 80232: stop requested"
+  },
+  {
+   "At": "2026-10-12 18:24:30 +03:00",
+   "Text": "kill Workshop Entrance pid 81736: stop requested"
+  }
+ ],
+ "Cameras": [
+  {
+   "Name": "Front Entrance",
+   "SafeName": "Front_Entrance",
+   "Record": true,
+   "Pid": 86772,
+   "LastPid": 86772,
+   "Alive": true,
+   "CurrentSegment": "Front_Entrance_20261012_185535+0300.mkv",
+   "CurrentSegmentBytes": 7077888,
+   "SecondsSinceLastClosedSegment": 1902.2,
+   "InputMode": "relay",
+   "RestartsLastHour": 0,
+   "RestartsTotal": 0,
+   "StartedAt": "2026-10-12T18:55:33.2499837+03:00",
+   "NextStartAt": null,
+   "LastError": "",
+   "LastErrorAt": null,
+   "ArchiveFiles": 43,
+   "ArchiveBytes": 4255825387,
+   "ConfigError": ""
+  },
+  {
+   "Name": "Rear Balcony",
+   "SafeName": "Rear_Balcony",
+   "Record": true,
+   "Pid": 70600,
+   "LastPid": 70600,
+   "Alive": true,
+   "CurrentSegment": "Rear_Balcony_20261012_185535+0300.mkv",
+   "CurrentSegmentBytes": 5505024,
+   "SecondsSinceLastClosedSegment": 1902.1,
+   "InputMode": "relay",
+   "RestartsLastHour": 0,
+   "RestartsTotal": 0,
+   "StartedAt": "2026-10-12T18:55:32.6983486+03:00",
+   "NextStartAt": null,
+   "LastError": "",
+   "LastErrorAt": null,
+   "ArchiveFiles": 44,
+   "ArchiveBytes": 3391025779,
+   "ConfigError": ""
+  },
+  {
+   "Name": "Field Front",
+   "SafeName": "Field_Front",
+   "Record": true,
+   "Pid": 3836,
+   "LastPid": 3836,
+   "Alive": true,
+   "CurrentSegment": "Field_Front_20261012_164501+0300.mkv",
+   "CurrentSegmentBytes": 151519232,
+   "SecondsSinceLastClosedSegment": 7870.5,
+   "InputMode": "direct",
+   "RestartsLastHour": 1,
+   "RestartsTotal": 1,
+   "StartedAt": "2026-10-12T18:56:02.2592150+03:00",
+   "NextStartAt": null,
+   "LastError": "ffmpeg exited with code -138 after 12s",
+   "LastErrorAt": "2026-10-12T18:55:58.8924815+03:00",
+   "ArchiveFiles": 39,
+   "ArchiveBytes": 4086789960,
+   "ConfigError": ""
+  },
+  {
+   "Name": "Car Garage",
+   "SafeName": "Car_Garage",
+   "Record": true,
+   "Pid": 86608,
+   "LastPid": 86608,
+   "Alive": true,
+   "CurrentSegment": "Car_Garage_20261012_185538+0300.mkv",
+   "CurrentSegmentBytes": 4980736,
+   "SecondsSinceLastClosedSegment": 1901.7,
+   "InputMode": "relay",
+   "RestartsLastHour": 0,
+   "RestartsTotal": 0,
+   "StartedAt": "2026-10-12T18:55:36.7032324+03:00",
+   "NextStartAt": null,
+   "LastError": "",
+   "LastErrorAt": null,
+   "ArchiveFiles": 44,
+   "ArchiveBytes": 3590385350,
+   "ConfigError": ""
+  },
+  {
+   "Name": "Workshop Entrance",
+   "SafeName": "Workshop_Entrance",
+   "Record": true,
+   "Pid": 85168,
+   "LastPid": 85168,
+   "Alive": true,
+   "CurrentSegment": "Workshop_Entrance_20261012_185537+0300.mkv",
+   "CurrentSegmentBytes": 6553600,
+   "SecondsSinceLastClosedSegment": 1902.3,
+   "InputMode": "relay",
+   "RestartsLastHour": 0,
+   "RestartsTotal": 0,
+   "StartedAt": "2026-10-12T18:55:33.7938943+03:00",
+   "NextStartAt": null,
+   "LastError": "",
+   "LastErrorAt": null,
+   "ArchiveFiles": 43,
+   "ArchiveBytes": 4254511689,
+   "ConfigError": ""
+  },
+  {
+   "Name": "Workshop",
+   "SafeName": "Workshop",
+   "Record": true,
+   "Pid": 70468,
+   "LastPid": 70468,
+   "Alive": true,
+   "CurrentSegment": "Workshop_20261011_223650+0300.mkv",
+   "CurrentSegmentBytes": 14155776,
+   "SecondsSinceLastClosedSegment": null,
+   "InputMode": "direct",
+   "RestartsLastHour": 1,
+   "RestartsTotal": 1,
+   "StartedAt": "2026-10-12T18:56:01.0790037+03:00",
+   "NextStartAt": null,
+   "LastError": "ffmpeg exited with code -138 after 11s",
+   "LastErrorAt": "2026-10-12T18:55:57.7563707+03:00",
+   "ArchiveFiles": 1,
+   "ArchiveBytes": 14155776,
+   "ConfigError": ""
+  }
+ ]
+}

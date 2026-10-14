@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>IPCCTV control</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <div class="top">
+    <div class="brand">IPCCTV <span>/ control</span></div>
+    <nav class="tabs" id="tabs">
+      <button data-t="dash" aria-current="page">Dashboard</button>
+      <button data-t="set">Settings</button>
+      <button data-t="foot">Footage</button>
+    </nav>
+    <div class="feed">
+      <span id="feed"></span>
+      <span class="when" id="feedWhen"></span>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+  <!-- What is running right now, with the seconds ticking. Filled by
+       renderProgress while an action is in flight. -->
+  <div id="progress"></div>
+
+  <!-- ============== DASHBOARD ============== -->
+  <section data-tab="dash">
+
+    <div id="banner"></div>
+    <div id="stopNotice"></div>
+
+    <div class="actions" id="controls">
+      <button class="btn primary" data-action="start" data-scope="all">Start everything</button>
+      <button class="btn danger" data-action="stop" data-scope="all">Stop everything</button>
+      <button class="btn" data-action="start" data-scope="recorder">Start recorder</button>
+      <button class="btn danger" data-action="stop" data-scope="recorder">Stop recorder</button>
+      <button class="btn" data-action="start" data-scope="dashboard">Start viewers</button>
+      <button class="btn" data-action="stop" data-scope="dashboard">Stop viewers</button>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <div id="camsA">
+      <div class="panel">
+        <header><h2>Cameras</h2><span class="muted" id="recCount"></span></header>
+        <table>
+          <thead><tr><th>Camera</th><th>Status</th><th>Input</th><th>Last segment</th><th>Restarts/h</th><th>Record</th></tr></thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="camsC" class="clist"></div>
+
+    <div class="panel" style="margin-top:16px">
+      <header><h2>Recent events</h2><span class="muted" id="eventCount"></span></header>
+      <ul class="events" id="events"></ul>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <header><h2>Services</h2></header>
+      <ul class="events" id="tasks"></ul>
+    </div>
+
+    <footer class="note">
+      Status is read from <code>status.json</code> and whether the recorder is up is decided by its
+      process, not by what the file last said. Actions call <code>cam.ps1</code>.
+      No camera credential ever reaches this page.
+    </footer>
+  </section>
+
+  <!-- ============== SETTINGS ============== -->
+  <section data-tab="set" class="hide">
+
+    <div class="panel" style="margin-bottom:16px">
+      <header><h2>Cameras</h2><span class="muted" id="camCount"></span></header>
+      <div class="row rowhead">
+        <span>Name</span><span>Address</span><span>Stream</span><span>Record</span><span></span>
+      </div>
+      <div id="setRows"></div>
+      <div class="formfoot">
+        <div class="actions">
+          <button class="btn" id="addCam">Add camera</button>
+          <button class="btn primary" id="saveCams" disabled>Save cameras</button>
+          <button class="btn" id="discardCams" disabled>Discard</button>
+        </div>
+        <div id="camNote" class="formnote"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <header><h2>Recording</h2></header>
+      <div class="form">
+        <div class="field" data-field="SegmentSeconds">
+          <label for="SegmentSeconds">Segment length</label>
+          <select id="SegmentSeconds">
+            <option value="300">5 minutes</option>
+            <option value="900">15 minutes</option>
+            <option value="1800">30 minutes</option>
+            <option value="3600">60 minutes</option>
+          </select>
+          <span class="hint">Clock-aligned. Longer segments mean fewer files but a larger loss window if one is corrupted.</span>
+        </div>
+        <div class="field" data-field="ReserveGB">
+          <label for="ReserveGB">Reserve free space</label>
+          <input id="ReserveGB" inputmode="decimal" autocomplete="off">
+          <span class="hint">GB. The pruner deletes the oldest footage to keep free space above this.</span>
+        </div>
+        <div class="field" data-field="PruneHysteresisGB">
+          <label for="PruneHysteresisGB">Prune hysteresis</label>
+          <input id="PruneHysteresisGB" inputmode="decimal" autocomplete="off">
+          <span class="hint">GB above the reserve the pruner frees before it stops, so every new segment does not re-trigger it.</span>
+        </div>
+        <div class="field" data-field="MaxRetentionDays">
+          <label for="MaxRetentionDays">Maximum retention</label>
+          <input id="MaxRetentionDays" inputmode="numeric" autocomplete="off">
+          <span class="hint">Days must be between 1 and 365, or blank for no age limit.</span>
+        </div>
+        <div class="field">
+          <label for="archiveRoot">Archive location</label>
+          <input id="archiveRoot" readonly>
+          <span class="hint">Not editable here: moving the archive needs the recorder stopped.</span>
+        </div>
+        <div class="actions">
+          <button class="btn primary" id="saveConfig" disabled>Save changes</button>
+          <button class="btn" id="discardConfig" disabled>Discard</button>
+          <span id="configNote" class="formnote"></span>
+        </div>
+      </div>
+    </div>
+
+    <footer class="note">
+      Writes go through the same atomic save the CLI uses, preserving every field and the file's
+      byte-order mark. A camera change is picked up by the running recorder within seconds;
+      the settings above it reads when it starts.
+    </footer>
+  </section>
+
+  <!-- ============== FOOTAGE ============== -->
+  <section data-tab="foot" class="hide">
+    <div class="foot">
+
+      <div class="pick" id="fCam">
+        <div class="phead">Camera</div>
+      </div>
+
+      <div class="pick" id="fDay">
+        <div class="phead">Date</div>
+      </div>
+
+      <div>
+        <div class="player" id="fPlayer"></div>
+        <div class="panel" style="margin-top:12px">
+          <header>
+            <h2>Segments</h2>
+            <span class="muted" id="fCount"></span>
+            <button class="btn small" id="fRefresh">Refresh</button>
+          </header>
+          <div id="fGaps"></div>
+          <ul class="events seglist" id="fSegs"></ul>
+        </div>
+      </div>
+
+    </div>
+
+    <footer class="note">
+      The index is parsed from filenames &mdash; <code>Front_Entrance_20261013_190147+0300.mkv</code>
+      already carries the camera, the date, the time and the UTC offset, so there is no database and
+      nothing opens a segment to list it. A segment plays as MP4 remuxed on request: the video is
+      copied and only the 8&nbsp;kHz camera audio is re-encoded. The segment being recorded right now
+      plays up to the point it has reached.
+    </footer>
+  </section>
+</div>
+
+<!-- Confirmation for anything that stops footage being recorded. -->
+<dialog id="confirm">
+  <form method="dialog">
+    <h2 id="confirmTitle"></h2>
+    <p id="confirmBody"></p>
+    <div class="actions">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn danger" id="confirmGo" value="go"></button>
+    </div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

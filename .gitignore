@@ -4,6 +4,8 @@
 # Ignore generated credentials and local camera configurations
 camera_creds.xml
 cameras.json
+# Local recorder config; copy recorder.config.example.json to create it
+recorder.config.json
 
 # ========================
 # PowerShell & Logs
@@ -27,3 +29,10 @@ ehthumbs_vista.db
 *.stackdump
 [Dd]esktop.ini
 $RECYCLE.BIN/
+
+# Local design mockups, not part of the project
+mockups/
+
+# Built UI binary, cross-compiled from ui/ (see ui/build.sh)
+camui.exe
+camui.config.json
