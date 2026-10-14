@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -3360,6 +3360,104 @@ function Invoke-CamCheckInstallSandbox {
 }
 
 
+function Invoke-CamCheckDocSwitches {
+    <#
+        Every -Switch the documentation names must exist. Two rules, over
+        README.md and docs\*.md:
+
+        - A switch written after one of this repository's scripts, in the same
+          code span or code line, must be a parameter of THAT script, common
+          parameters included - so `.\cam.recorder.ps1 -InstallUi` fails.
+        - Any other -Switch shaped like a PowerShell parameter (-Abc...),
+          anywhere in the text, must be a
+          parameter of one of the scripts or one of the few external
+          PowerShell parameters the docs quote, listed below.
+
+        Lower-case flags belong to camui, bash, ffmpeg and mpv and are not
+        checked. The parameter lists come from Get-Command on each script,
+        which parses it and runs nothing.
+    #>
+    param($Run)
+
+    $repo = Get-CamTestRepo
+    $scripts = [ordered]@{
+        'cam.ps1'                            = 'cam.ps1'
+        'cam.recorder.ps1'                   = 'cam.recorder.ps1'
+        'cam.health.ps1'                     = 'cam.health.ps1'
+        'mpv.cam.autolayout.autorestart.ps1' = 'mpv.cam.autolayout.autorestart.ps1'
+        'cam.tests.ps1'                      = 'tests\cam.tests.ps1'
+    }
+    # Parameters of Windows PowerShell itself and of the cmdlets the docs
+    # quote, not of this repository.
+    $external = @('NoProfile', 'ExecutionPolicy', 'File', 'Command', 'WindowStyle', 'EncodedCommand',
+        'FilterHashtable', 'TaskName', 'Scope', 'Source')
+
+    $declared = @{}
+    $any = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $scripts.Keys) {
+        $declared[$name] = @((Get-Command -Name (Join-Path -Path $repo -ChildPath $scripts[$name])).Parameters.Keys)
+        foreach ($parameter in $declared[$name]) { [void]$any.Add($parameter) }
+    }
+    foreach ($parameter in $external) { [void]$any.Add($parameter) }
+
+    $docs = @(Get-Item -LiteralPath (Join-Path -Path $repo -ChildPath 'README.md')) +
+        @(Get-ChildItem -LiteralPath (Join-Path -Path $repo -ChildPath 'docs') -Filter '*.md')
+    $scriptPattern = '(?<![\w.-])(' + ((@($scripts.Keys) | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
+    $switchPattern = '(?<![\w-])-([A-Za-z][A-Za-z0-9]*)'
+    $problems = New-Object System.Collections.ArrayList
+    $attributed = 0
+    $bare = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($doc in $docs) {
+        $text = [System.IO.File]::ReadAllText($doc.FullName)
+        $code = New-Object System.Collections.ArrayList
+        $inFence = $false
+        foreach ($line in ($text -split "`r?`n")) {
+            if ($line.StartsWith('```')) { $inFence = -not $inFence; continue }
+            if ($inFence) { [void]$code.Add($line); continue }
+            foreach ($span in [regex]::Matches($line, '`([^`]+)`')) { [void]$code.Add($span.Groups[1].Value) }
+        }
+
+        foreach ($fragment in $code) {
+            $mentions = @([regex]::Matches($fragment, $scriptPattern))
+            for ($i = 0; $i -lt $mentions.Count; $i++) {
+                $from = $mentions[$i].Index + $mentions[$i].Length
+                $to = $(if ($i + 1 -lt $mentions.Count) { $mentions[$i + 1].Index } else { $fragment.Length })
+                $segment = $fragment.Substring($from, $to - $from)
+                $cut = [regex]::Match($segment, '\s#|\||;')
+                if ($cut.Success) { $segment = $segment.Substring(0, $cut.Index) }
+                foreach ($switch in [regex]::Matches($segment, $switchPattern)) {
+                    $attributed++
+                    if ($declared[$mentions[$i].Value] -notcontains $switch.Groups[1].Value) {
+                        [void]$problems.Add(("{0}: '{1} -{2}' - {1} declares no such parameter" -f $doc.Name, $mentions[$i].Value, $switch.Groups[1].Value))
+                    }
+                }
+            }
+        }
+
+        foreach ($switch in [regex]::Matches($text, '(?<![\w-])-([A-Z][a-z][A-Za-z0-9]*)')) {
+            [void]$bare.Add($switch.Groups[1].Value)
+            if (-not $any.Contains($switch.Groups[1].Value)) {
+                [void]$problems.Add(("{0}: '-{1}' is a parameter of none of {2}" -f $doc.Name, $switch.Groups[1].Value, (@($scripts.Keys) -join ', ')))
+            }
+        }
+    }
+
+    $evidence = @(
+        ("{0} document(s): {1}" -f $docs.Count, (@($docs | ForEach-Object { $_.Name }) -join ', ')),
+        ("{0} switch use(s) attributed to a named script; {1} distinct capitalised switch(es) in all: {2}" -f $attributed, $bare.Count, ((@($bare) | Sort-Object) -join ' '))
+    )
+    foreach ($name in @('cam.ps1', 'cam.recorder.ps1')) {
+        $evidence += ("{0} declares: {1}" -f $name, ((@($declared[$name]) | Sort-Object) -join ' '))
+    }
+    $evidence += @($problems | Sort-Object -Unique | ForEach-Object { 'FAIL ' + $_ })
+
+    Add-CamTestResult -Run $Run -Check 'docswitches' -Status $(if ($problems.Count) { 'FAIL' } else { 'PASS' }) `
+        -Message 'every -Switch README.md and docs\*.md name is a declared parameter of the script it is written after, or of one of them' `
+        -Evidence $evidence
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -3398,6 +3496,7 @@ foreach ($check in $Checks) {
         'installplan' { Invoke-CamCheckInstallPlan -Run $run }
         'installpreflight' { Invoke-CamCheckInstallPreflight -Run $run }
         'installsandbox' { Invoke-CamCheckInstallSandbox -Run $run }
+        'docswitches' { Invoke-CamCheckDocSwitches -Run $run }
     }
 }
 
