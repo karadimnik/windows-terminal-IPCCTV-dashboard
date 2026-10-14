@@ -1043,7 +1043,7 @@ was touched: the Operator was using it throughout.
       is not read" - and was left alone because this commission's boundary was documentation plus
       the archive root. It is worth one line in a later pass.
 
-## [74] SIMPLIFY - the Operator's feedback, 2026-10-13
+## [74] SIMPLIFY - the Operator's feedback, 2026-10-13 - [74], [76] and [77] done
 
 > "I went through the readme - super complex stuff and commands. Are all these needed? I doubt it,
 > we need to simplify"
@@ -1054,18 +1054,40 @@ and the normal state is that he touches nothing.
 
 The job is to work out what a person actually needs and demote the rest, NOT to delete capability.
 
-- [ ] **[74]** Restructure around the three real audiences, in this order:
-      1. **"It is running, where do I look?"** - the URL, and that is nearly all of it.
-      2. **"Something is wrong"** - a short symptom table.
-      3. **"I am installing this from scratch"** - the current step list, moved to the back or to
-         `docs/install.md`. Most readers never need it; it currently opens the document.
+- [x] **[74]** Restructured, 478 lines to 314. The document now opens with the running system:
+      `http://127.0.0.1:8787/` is on **line 9**, followed by the three screens and the three
+      commands anyone actually types - `-Status`, `-Start`, `-Stop`. Then one symptom table that
+      folds the old two-part troubleshooting and the alert-id table together, then How it works,
+      then a pointer to `docs/install.md`, then the command tables and the limitations as
+      Reference. The eleven-step install no longer opens the document, and the Features list is
+      gone: it was marketing labels for things How it works already explains properly, and it
+      pushed the URL to line 101. Nothing was deleted. Verified token by token and sentence by
+      sentence against the previous revision - every backticked identifier still exists somewhere,
+      and three facts that condensing had cost were put back: the `--msg-level=all=error` gutter
+      explanation, `EventCreate.exe` as the message resource, and the proof that the NVR host does
+      restart a killed supervisor. Every hard-won correction survives verbatim: the credential
+      claim with its direct-input exception, the `-Run` warning in both places it appeared, the
+      fourteen harness checks with the skip count explicitly not fixed, `camui.log` rolling only
+      at launcher start, the scripts reading the token but never printing it, and the event-log
+      readback filtering on the `IPCCTV: ` prefix rather than a provider.
 - [ ] **[75]** Collapse the command surface. Seven `-Install*`/`-Remove*` pairs is a lot to carry.
       Consider one `-Install` that does the lot and one `-Uninstall`, with the granular switches kept
       but demoted to a reference section. Do not remove them - scripts and recovery paths use them.
-- [ ] **[76]** Move the config tables to `docs/configuration.md`. Four keys are editable from the UI;
-      the rest are tuning nobody should need. The README should name the four and link the rest.
-- [ ] **[77]** Cut every number that drifts. The GB/day figure already had to be corrected once; any
-      measurement baked into prose is a future lie. Point at `-Status`.
+- [x] **[76]** `docs/configuration.md` (77 lines) holds all five configuration tables, and marks
+      the four keys the UI's Settings screen can edit - `SegmentSeconds`, `ReserveGB`,
+      `PruneHysteresisGB`, `MaxRetentionDays`. The README names those four in Reference and links
+      the rest. `docs/install.md` (117 lines) took the prerequisites, the execution-policy note,
+      the eleven steps, the `cameras.json` schema and the credential setup. Limitation 8's "marked
+      * in the tables above" now points at the configuration page.
+- [x] **[77]** Out: the GB/day range, the harness's twelve-passes-two-skips tally, the 170 MB
+      clip size, the computed 2250 s stall window, the health strip's 6 px and 13 px edge offsets,
+      the 900.02-900.05 s segment measurement, "free space has never fallen to `ReserveGB`", and
+      the 11 and 13 second recovery timings. The rule applied: a number that describes the current
+      state of a running system goes, and the prose points at `.\cam.recorder.ps1 -Status` or the
+      health strip instead; a configuration default stays, because it is an input rather than a
+      reading. Retention now says "do not plan from a number in a document" and names where the
+      live figure is. One correction carried forward from [71]: `cam.ps1 -Status` prints no disk
+      figures, so both places that mention the disk say which `-Status` to use.
 
 Judge the result by a simple test: can someone who has never seen the project get to the UI and
 understand what they are looking at within two minutes of opening the README?
