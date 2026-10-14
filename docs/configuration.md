@@ -26,6 +26,7 @@ Values written by the UI go through the same code the CLI uses: validated, writt
 | `PruneHysteresisGB` **UI** | `5` | How much extra it frees once it starts, so it does not thrash. |
 | `PruneIntervalSeconds` | `300` | How often it looks. |
 | `MaxRetentionDays` **UI** | `null` | Optional age cap, on top of the space rule. |
+| `MaxAgePruneFraction` | `0.5` | Circuit breaker on `MaxRetentionDays`. A run that would delete more than this share of the archive by age - by segment count or by bytes - deletes nothing by age, logs one `PRUNE AGE RULE HELD` line with both shares and alerts once (event id 122), so a mistyped retention cannot empty the archive. Lower `MaxRetentionDays` in steps to shorten retention a long way. Must be from `0.01` to `1.0`; `1.0` switches the brake off. Never holds back the free-space rule: a disk below `ReserveGB` keeps pruning. |
 
 ## Supervisor
 

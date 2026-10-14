@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'pruneowner', 'prunelive')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'pruneowner')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -2027,7 +2027,7 @@ function Get-CamDeletedPathList {
 
 function New-CamPruneState {
     <# The supervisor's prune state, as Invoke-CamSupervisor creates it. #>
-    return @{ LastRunAt = $null; DeletedTotal = 0; FreedBytes = 0; Blocked = $false; LastMessage = ''; RefusalAlerted = ''; ClockRefused = $false }
+    return @{ LastRunAt = $null; DeletedTotal = 0; FreedBytes = 0; Blocked = $false; LastMessage = ''; RefusalAlerted = ''; ClockRefused = $false; BlockedAlerted = $false; AgeBreakerTripped = $false }
 }
 
 function Complete-CamPruneCheck {
@@ -2060,7 +2060,7 @@ function Invoke-CamCheckPruneMatrix {
     . (Get-CamTestRecorderFunctions -Name $script:CamPruneFunctions)
     $evidence = @()
     $ok = $true
-    $t = New-CamTestPruneRoot -Name 'prune-matrix' -Config @{ MaxRetentionDays = 1 }
+    $t = New-CamTestPruneRoot -Name 'prune-matrix' -Config @{ MaxRetentionDays = 1; MaxAgePruneFraction = 1.0 }
     try {
         $root = $t.Root
         $now = [DateTime]::Now
@@ -2234,7 +2234,7 @@ function Invoke-CamCheckPruneRoots {
         }
 
         # (b) a real drive root: subst over a sandbox that even holds a marker.
-        $drive = New-CamTestPruneRoot -Name 'prune-roots-drive' -Config @{ MaxRetentionDays = 1 }
+        $drive = New-CamTestPruneRoot -Name 'prune-roots-drive' -Config @{ MaxRetentionDays = 1; MaxAgePruneFraction = 1.0 }
         $sandboxes += $drive
         & $seed $drive
         $claim = Initialize-CamArchiveOwner -Config $drive.Config
@@ -2253,7 +2253,7 @@ function Invoke-CamCheckPruneRoots {
         if (-not $outcome.Ok) { $ok = $false; $evidence += 'FAIL: the drive root was not refused cleanly' }
 
         # (c) a profile-like folder.
-        $profileLike = New-CamTestPruneRoot -Name 'prune-roots-profile' -Config @{ MaxRetentionDays = 1 }
+        $profileLike = New-CamTestPruneRoot -Name 'prune-roots-profile' -Config @{ MaxRetentionDays = 1; MaxAgePruneFraction = 1.0 }
         $sandboxes += $profileLike
         & $seed $profileLike
         foreach ($leaf in @('Desktop\todo.txt', 'Documents\report.docx', 'AppData\Local\settings.dat', 'NTUSER.DAT')) {
@@ -2271,7 +2271,7 @@ function Invoke-CamCheckPruneRoots {
         if (-not $outcome.Ok) { $ok = $false; $evidence += 'FAIL: the profile-like folder was not refused cleanly' }
 
         # (d) clean, but no marker: a real run refuses, a dry run previews.
-        $noMarker = New-CamTestPruneRoot -Name 'prune-roots-nomarker' -Config @{ MaxRetentionDays = 1 }
+        $noMarker = New-CamTestPruneRoot -Name 'prune-roots-nomarker' -Config @{ MaxRetentionDays = 1; MaxAgePruneFraction = 1.0 }
         $sandboxes += $noMarker
         & $seed $noMarker
         $outcome = & $scenario 'clean root, no marker' $noMarker $noMarker.Config '*restart the recorder and it claims it*'
@@ -2287,7 +2287,7 @@ function Invoke-CamCheckPruneRoots {
         }
 
         # (e) a foreign top-level entry.
-        $foreignTop = New-CamTestPruneRoot -Name 'prune-roots-foreign' -Config @{ MaxRetentionDays = 1 }
+        $foreignTop = New-CamTestPruneRoot -Name 'prune-roots-foreign' -Config @{ MaxRetentionDays = 1; MaxAgePruneFraction = 1.0 }
         $sandboxes += $foreignTop
         & $seed $foreignTop
         [void](New-Item -ItemType Directory -Path (Join-Path $foreignTop.Root 'Photos') -Force)
@@ -2475,7 +2475,7 @@ function Invoke-CamCheckPruneClock {
         $now = [DateTime]::Now
         $case = {
             param([string]$Name, [scriptblock]$Build, [TimeSpan]$Shift, [string]$Expect)
-            $t = New-CamTestPruneRoot -Name ('prune-clock-' + $Name) -Config @{ MaxRetentionDays = 1 }
+            $t = New-CamTestPruneRoot -Name ('prune-clock-' + $Name) -Config @{ MaxRetentionDays = 1; MaxAgePruneFraction = 1.0 }
             $fe = Join-Path $t.Root 'Front_Entrance'
             & $Build $fe
             [void](Initialize-CamArchiveOwner -Config $t.Config)
@@ -2525,7 +2525,7 @@ function Invoke-CamCheckPruneClock {
 
         # Control: the 'ahead' fixture with the real clock deletes its two
         # expired segments, so the refusal above is what saved them.
-        $control = New-CamTestPruneRoot -Name 'prune-clock-control' -Config @{ MaxRetentionDays = 1 }
+        $control = New-CamTestPruneRoot -Name 'prune-clock-control' -Config @{ MaxRetentionDays = 1; MaxAgePruneFraction = 1.0 }
         $sandboxes += $control
         & $plain (Join-Path $control.Root 'Front_Entrance')
         [void](Initialize-CamArchiveOwner -Config $control.Config)
@@ -2537,6 +2537,243 @@ function Invoke-CamCheckPruneClock {
 
     Complete-CamPruneCheck -Run $Run -Check 'pruneclock' -Ok $ok -Evidence $evidence -Sandboxes $sandboxes `
         -Message 'a run is refused before its first deletion, deleting nothing and logging once, when the clock is far ahead of the newest segment, a segment is future-dated, or the oldest candidate is later than the newest segment'
+}
+
+
+function Invoke-CamCheckPruneBreaker {
+    <#
+        The age rule's circuit breaker. Over the run's age-rule candidates -
+        after every other gate - the share of the archive's segments and of
+        its bytes is measured; above MaxAgePruneFraction by EITHER, the age
+        rule deletes nothing that run, says so in one loud line naming both
+        shares and the limit, alerts once per episode, and the run carries on.
+        At 40 % it deletes exactly the expired set. A breach by bytes alone and
+        by count alone each trip it. And it never holds back the watermark:
+        with the age rule tripped and free space below the reserve, the
+        watermark still deletes globally oldest-first to its target. Alerts are
+        recorded by a Send-CamAlert stub; nothing is shown on screen.
+    #>
+    param($Run)
+
+    . (Get-CamTestRecorderFunctions -Name $script:CamPruneFunctions)
+    $recordedAlerts = New-CamTestAlertRecorder
+    function Send-CamAlert { param($Title, $Message, $EventId, $EntryType, $LogPath, $LogMaxBytes) Add-CamTestAlertCall -List $recordedAlerts -Title $Title -Message $Message -EventId $EventId -EntryType $EntryType }
+    # Free space: 1 GB per $freeUnit bytes deleted under $freeRoot, from 10 GB.
+    $freeRoot = $null
+    $freeUnit = 65536
+    $freeInitial = 0.0
+    $sizeOf = { [double](@(Get-ChildItem -LiteralPath $freeRoot -Recurse -File -Force | Measure-Object -Property Length -Sum).Sum) }
+    function Get-CamFreeSpaceGB { param([string]$Path) return [math]::Round(10.0 + (($freeInitial - (& $sizeOf)) / $freeUnit), 2) }
+
+    $evidence = @()
+    $ok = $true
+    $sandboxes = @()
+    $now = [DateTime]::Now
+
+    # Ten segments over two cameras, $Expired of them past a 1-day cutoff
+    # (5 days old, oldest first in the returned list), the rest recent.
+    $build = {
+        param([string]$Name, [int]$Expired, [int]$ExpiredBytes, [int]$RecentBytes)
+        $t = New-CamTestPruneRoot -Name ('prune-breaker-' + $Name) -Config @{ MaxRetentionDays = 1; MaxAgePruneFraction = 0.5 }
+        $cams = @('Cam_A', 'Cam_B')
+        $old = @()
+        for ($i = 0; $i -lt $Expired; $i++) {
+            $cam = $cams[$i % 2]
+            $old += New-CamTestSegment -Dir (Join-Path $t.Root $cam) -Camera $cam -Time $now.AddDays(-5).AddHours($i) -Bytes $ExpiredBytes
+        }
+        for ($i = 0; $i -lt (8 - $Expired); $i++) {
+            $cam = $cams[$i % 2]
+            [void](New-CamTestSegment -Dir (Join-Path $t.Root $cam) -Camera $cam -Time $now.AddHours(-2 - $i) -Bytes $RecentBytes)
+        }
+        foreach ($cam in $cams) { [void](New-CamTestSegment -Dir (Join-Path $t.Root $cam) -Camera $cam -Time $now.AddMinutes(-1) -Bytes $RecentBytes) }
+        [void](Initialize-CamArchiveOwner -Config $t.Config)
+        Set-Variable -Name freeRoot -Value $t.Root -Scope 1
+        Set-Variable -Name freeInitial -Value (& $sizeOf) -Scope 1
+        return [pscustomobject]@{ T = $t; Old = $old }
+    }
+    $heldLines = { param($t) @(Get-Content -LiteralPath $t.Log | Where-Object { $_ -like '*PRUNE AGE RULE HELD*' }) }
+
+    try {
+        # 60 % of the segments (and of the bytes) expired: held.
+        $f = & $build 'count60' 6 1024 1024
+        $sandboxes += $f.T
+        $state = New-CamPruneState
+        $before = Get-CamTestFileManifest -Path $f.T.Dir
+        $first = Invoke-CamPrune -Config $f.T.Config -SupervisorLog $f.T.Log -State $state
+        $second = Invoke-CamPrune -Config $f.T.Config -SupervisorLog $f.T.Log -State $state
+        $diff = Compare-CamTestFileManifest -Before $before -After (Get-CamTestFileManifest -Path $f.T.Dir)
+        $lines = @(& $heldLines $f.T)
+        $evidence += ("60 % expired, limit 0.5: deleted {0} then {1}, files changed {2}, held lines {3}, alerts {4}" -f $first.Deleted, $second.Deleted, ($diff.Removed.Count + $diff.Changed.Count + $diff.Added.Count), $lines.Count, $recordedAlerts.Count)
+        $evidence += @($lines | Select-Object -First 1)
+        $evidence += $first.StopLine
+        if ($first.Deleted -ne 0 -or $second.Deleted -ne 0 -or ($diff.Removed.Count + $diff.Changed.Count + $diff.Added.Count) -ne 0) { $ok = $false; $evidence += 'FAIL: the age rule deleted past the breaker' }
+        if ($lines.Count -ne 1 -or $lines[0] -notlike '*6 of 10 segments (60.0%)*(60.0%) of the bytes*MaxAgePruneFraction 0.5*') { $ok = $false; $evidence += 'FAIL: expected exactly one held line naming both shares and the limit over two runs' }
+        if ($recordedAlerts.Count -ne 1 -or $recordedAlerts[0].EventId -ne 122 -or $recordedAlerts[0].EntryType -ne 'Error') { $ok = $false; $evidence += 'FAIL: expected exactly one Error alert with id 122 over two runs' }
+        else { $evidence += ("alert: [{0} {1}] {2} - {3}" -f $recordedAlerts[0].EventId, $recordedAlerts[0].EntryType, $recordedAlerts[0].Title, $recordedAlerts[0].Message) }
+        if ($first.StopLine -notlike 'prune stop: age rule HELD by the circuit breaker*; watermark not needed*') { $ok = $false; $evidence += 'FAIL: the run did not carry on to the watermark, or the stop line does not say the age rule was held' }
+
+        # The episode ends on a run that is within the limit, and a new one alerts again.
+        $f.T.Config.MaxRetentionDays = 30
+        $calm = Invoke-CamPrune -Config $f.T.Config -SupervisorLog $f.T.Log -State $state
+        $f.T.Config.MaxRetentionDays = 1
+        $again = Invoke-CamPrune -Config $f.T.Config -SupervisorLog $f.T.Log -State $state
+        $evidence += ("episode: a run within the limit (deleted {0}), then held again: alerts {1}, held lines {2}" -f $calm.Deleted, $recordedAlerts.Count, (& $heldLines $f.T).Count)
+        if ($calm.Deleted -ne 0 -or $again.Deleted -ne 0 -or $recordedAlerts.Count -ne 2 -or (& $heldLines $f.T).Count -ne 2) { $ok = $false; $evidence += 'FAIL: a new episode after a run within the limit did not log and alert again' }
+
+        # 40 %: proceeds and deletes exactly the expired set, oldest first.
+        $recordedAlerts.Clear()
+        $f = & $build 'count40' 4 1024 1024
+        $sandboxes += $f.T
+        $result = Invoke-CamPrune -Config $f.T.Config -SupervisorLog $f.T.Log -State (New-CamPruneState)
+        $order = Get-CamDeletedPathList -Result $result
+        $evidence += ("40 % expired: deleted in order " + (@($order | ForEach-Object { Split-Path -Path $_ -Leaf }) -join ' > ') + ("; held lines {0}, alerts {1}" -f (& $heldLines $f.T).Count, $recordedAlerts.Count))
+        if (($order -join '|') -ne ($f.Old -join '|') -or (& $heldLines $f.T).Count -ne 0 -or $recordedAlerts.Count -ne 0) { $ok = $false; $evidence += 'FAIL: under the limit the age rule did not delete exactly the four expired segments' }
+
+        # By bytes only (40 % of the count, 72.7 % of the bytes), and by count only (60 %, 8.6 %).
+        foreach ($spec in @(
+                @{ Name = 'bytes'; Expired = 4; ExpiredBytes = 4096; RecentBytes = 1024; Expect = '*4 of 10 segments (40.0%)*(72.7%) of the bytes*' },
+                @{ Name = 'count'; Expired = 6; ExpiredBytes = 512; RecentBytes = 8192; Expect = '*6 of 10 segments (60.0%)*(8.6%) of the bytes*' })) {
+            $recordedAlerts.Clear()
+            $f = & $build $spec.Name $spec.Expired $spec.ExpiredBytes $spec.RecentBytes
+            $sandboxes += $f.T
+            $result = Invoke-CamPrune -Config $f.T.Config -SupervisorLog $f.T.Log -State (New-CamPruneState)
+            $lines = @(& $heldLines $f.T)
+            $evidence += ("breach by {0} only: deleted {1}, alerts {2} - {3}" -f $spec.Name, $result.Deleted, $recordedAlerts.Count, $(if ($lines.Count) { $lines[0] } else { 'no held line' }))
+            if ($result.Deleted -ne 0 -or $lines.Count -ne 1 -or $lines[0] -notlike $spec.Expect -or $recordedAlerts.Count -ne 1) { $ok = $false; $evidence += ('FAIL: a breach by ' + $spec.Name + ' alone did not trip the breaker') }
+        }
+
+        # Tripped age rule, free space below the reserve: the watermark still
+        # deletes the five globally oldest (one 64 KB segment = 1 GB) to 15 GB.
+        $recordedAlerts.Clear()
+        $f = & $build 'watermark' 6 $freeUnit $freeUnit
+        $sandboxes += $f.T
+        $f.T.Config.ReserveGB = 13
+        $f.T.Config.PruneHysteresisGB = 2
+        $result = Invoke-CamPrune -Config $f.T.Config -SupervisorLog $f.T.Log -State (New-CamPruneState)
+        $order = Get-CamDeletedPathList -Result $result
+        $want = @($f.Old | Select-Object -First 5)
+        $byAge = @($result.Deletions | Where-Object { $_ -like '*MaxRetentionDays*' })
+        $evidence += ("tripped + free 10 < reserve 13: held={0}, deleted in order {1}; age-reason deletions {2}; free after {3}" -f [bool]$result.AgeBreaker, (@($order | ForEach-Object { Split-Path -Path $_ -Leaf }) -join ' > '), $byAge.Count, $result.FreeGBAfter)
+        $evidence += $result.StopLine
+        if (-not $result.AgeBreaker -or ($order -join '|') -ne ($want -join '|') -or $byAge.Count -ne 0 -or $result.Blocked) { $ok = $false; $evidence += 'FAIL: the breaker held back the watermark, or the watermark did not delete the five oldest to its target' }
+        if ($result.StopLine -notlike '*watermark reached its target 15.00 GB after 5 deletion(s)*') { $ok = $false; $evidence += 'FAIL: the watermark did not stop at its target' }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message + ' at ' + $_.InvocationInfo.PositionMessage) }
+
+    Complete-CamPruneCheck -Run $Run -Check 'prunebreaker' -Ok $ok -Evidence $evidence -Sandboxes $sandboxes `
+        -Message 'above MaxAgePruneFraction by segments or by bytes the age rule deletes nothing, logs one line with both shares, alerts once per episode and the run carries on; under it the expired set goes; the watermark is never held back'
+}
+
+
+function Invoke-CamCheckPruneBlocked {
+    <#
+        A BLOCKED prune - free space below the reserve and nothing deletable
+        left - alerts once when the episode starts (id 121, Error, with the
+        numbers and what to do), not again while it lasts, and again only
+        after a run that was not blocked. A dry run never alerts. Free space is
+        pinned at 1 GB by replacing Get-CamFreeSpaceGB; alerts are recorded by
+        a Send-CamAlert stub, nothing is shown on screen.
+    #>
+    param($Run)
+
+    . (Get-CamTestRecorderFunctions -Name $script:CamPruneFunctions)
+    $recordedAlerts = New-CamTestAlertRecorder
+    function Send-CamAlert { param($Title, $Message, $EventId, $EntryType, $LogPath, $LogMaxBytes) Add-CamTestAlertCall -List $recordedAlerts -Title $Title -Message $Message -EventId $EventId -EntryType $EntryType }
+    function Get-CamFreeSpaceGB { param([string]$Path) return 1.0 }
+
+    $evidence = @()
+    $ok = $true
+    $t = New-CamTestPruneRoot -Name 'prune-blocked' -Config @{ ReserveGB = 20 }
+    try {
+        $now = [DateTime]::Now
+        $fe = Join-Path $t.Root 'Front_Entrance'
+        $old = New-CamTestSegment -Dir $fe -Camera 'Front_Entrance' -Time $now.AddHours(-3)
+        $newest = New-CamTestSegment -Dir $fe -Camera 'Front_Entrance' -Time $now.AddMinutes(-1)
+        [void](Initialize-CamArchiveOwner -Config $t.Config)
+        $state = New-CamPruneState
+
+        $dry = Invoke-CamPrune -Config $t.Config -SupervisorLog $t.Log -State $state -DryRun
+        $evidence += ("dry run: blocked={0}, alerts {1}" -f $dry.Blocked, $recordedAlerts.Count)
+        if (-not $dry.Blocked -or $recordedAlerts.Count -ne 0) { $ok = $false; $evidence += 'FAIL: the dry run was not blocked, or alerted' }
+
+        $runs = @()
+        $runs += Invoke-CamPrune -Config $t.Config -SupervisorLog $t.Log -State $state
+        $afterEntry = $recordedAlerts.Count
+        $runs += Invoke-CamPrune -Config $t.Config -SupervisorLog $t.Log -State $state
+        $afterRepeat = $recordedAlerts.Count
+        $t.Config.ReserveGB = 0
+        $runs += Invoke-CamPrune -Config $t.Config -SupervisorLog $t.Log -State $state
+        $afterClear = $recordedAlerts.Count
+        $t.Config.ReserveGB = 20
+        $runs += Invoke-CamPrune -Config $t.Config -SupervisorLog $t.Log -State $state
+        $afterNew = $recordedAlerts.Count
+
+        $evidence += ("runs blocked: {0}; alerts after each run: {1}, {2}, {3}, {4}" -f (@($runs | ForEach-Object { $_.Blocked }) -join ', '), $afterEntry, $afterRepeat, $afterClear, $afterNew)
+        $evidence += ("first run deleted {0}; the newest segment exists: {1}" -f $runs[0].Deleted, (Test-Path -LiteralPath $newest))
+        if (-not $runs[0].Blocked -or -not $runs[1].Blocked -or $runs[2].Blocked -or -not $runs[3].Blocked) { $ok = $false; $evidence += 'FAIL: the runs were not blocked, blocked, clear, blocked' }
+        if ($afterEntry -ne 1 -or $afterRepeat -ne 1 -or $afterClear -ne 1 -or $afterNew -ne 2) { $ok = $false; $evidence += 'FAIL: expected one alert on entry, none while it lasts, one more after a clear run' }
+        if ($runs[0].Deleted -ne 1 -or (Test-Path -LiteralPath $old) -or -not (Test-Path -LiteralPath $newest)) { $ok = $false; $evidence += 'FAIL: the blocked run did not delete the one deletable segment and keep the newest' }
+        foreach ($alert in @($recordedAlerts)) {
+            $evidence += ("alert: [{0} {1}] {2} - {3}" -f $alert.EventId, $alert.EntryType, $alert.Title, $alert.Message)
+            if ($alert.EventId -ne 121 -or $alert.EntryType -ne 'Error' -or $alert.Message -notlike '*free 1.00 GB*20.00 GB reserve*' -or $alert.Message -notlike '*ReserveGB*' -or $alert.Message -notlike '*RootPath*' -or $alert.Message -notlike '*free space*' -or $alert.Message -notlike '*Recording continues*') {
+                $ok = $false; $evidence += 'FAIL: the alert is not id 121 Error with free and reserve GB, what to do, and that recording continues'
+            }
+        }
+        if (@(Get-CamAlertEventIdList) -notcontains 121 -or @(Get-CamAlertEventIdList) -notcontains 122) { $ok = $false; $evidence += 'FAIL: 121 and 122 are not in Get-CamAlertEventIdList' }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message + ' at ' + $_.InvocationInfo.PositionMessage) }
+
+    Complete-CamPruneCheck -Run $Run -Check 'pruneblocked' -Ok $ok -Evidence $evidence -Sandboxes @($t) `
+        -Message 'a BLOCKED prune alerts once on entering the state (id 121, Error, with the numbers and what to do), not again while it lasts, again after a clear run, and never from a dry run'
+}
+
+
+function Invoke-CamCheckPruneConfig {
+    <#
+        MaxAgePruneFraction is validated at load like the other checked keys:
+        0, -1, 1.5 and a non-number are refused with a message naming the key
+        and its range; 1.0 and 0.5 load; a file without it gets 0.5. The
+        example config and the configuration reference both list it.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $dir = Join-Path $env:TEMP 'cam-tests\prune-config'
+    $sandbox = [pscustomobject]@{ Dir = $dir; Log = (Join-Path $env:TEMP 'cam-tests\prune-config.none') }
+    try {
+        Remove-CamTestTree -Path $dir
+        [void](New-Item -ItemType Directory -Path $dir -Force)
+        $load = {
+            param([string]$Json)
+            $path = Join-Path $dir 'recorder.config.json'
+            [System.IO.File]::WriteAllText($path, $Json)
+            try { return [pscustomobject]@{ Value = (Get-CamConfig -Path $path).MaxAgePruneFraction; Error = '' } }
+            catch { return [pscustomobject]@{ Value = $null; Error = $_.Exception.Message } }
+        }
+        foreach ($bad in @('0', '-1', '1.5', '"abc"')) {
+            $outcome = & $load ('{ "MaxAgePruneFraction": ' + $bad + ' }')
+            $evidence += ("{0}: refused='{1}'" -f $bad, $outcome.Error)
+            if (-not $outcome.Error -or $outcome.Error -notlike '*MaxAgePruneFraction*0.01*1.0*') { $ok = $false; $evidence += ('FAIL: ' + $bad + ' was not refused with a message naming the key and its range') }
+        }
+        foreach ($good in @(@{ Text = '1.0'; Value = 1.0 }, @{ Text = '0.5'; Value = 0.5 })) {
+            $outcome = & $load ('{ "MaxAgePruneFraction": ' + $good.Text + ' }')
+            $evidence += ("{0}: loaded {1} {2}" -f $good.Text, [string]$outcome.Value, $outcome.Error)
+            if ($outcome.Error -or [double]$outcome.Value -ne $good.Value) { $ok = $false; $evidence += ('FAIL: ' + $good.Text + ' was not accepted') }
+        }
+        $outcome = & $load '{ "ReserveGB": 20 }'
+        $evidence += ("key absent: loaded {0} {1}" -f [string]$outcome.Value, $outcome.Error)
+        if ($outcome.Error -or [double]$outcome.Value -ne 0.5) { $ok = $false; $evidence += 'FAIL: the default is not 0.5' }
+
+        $example = [System.IO.File]::ReadAllText((Join-Path (Get-CamTestRepo) 'recorder.config.example.json')) | ConvertFrom-Json
+        $docRows = @(Get-Content -LiteralPath (Join-Path (Get-CamTestRepo) 'docs\configuration.md') | Where-Object { $_.StartsWith('| `MaxAgePruneFraction` | `0.5` |') })
+        $evidence += ("example config MaxAgePruneFraction = {0}; configuration.md rows {1}" -f [string]$example.MaxAgePruneFraction, $docRows.Count)
+        if ([string]$example.MaxAgePruneFraction -ne '0.5' -or $docRows.Count -ne 1) { $ok = $false; $evidence += 'FAIL: the example config or the configuration reference does not list the key with its default' }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message + ' at ' + $_.InvocationInfo.PositionMessage) }
+
+    Complete-CamPruneCheck -Run $Run -Check 'pruneconfig' -Ok $ok -Evidence $evidence -Sandboxes @($sandbox) `
+        -Message 'MaxAgePruneFraction outside 0.01..1.0 or not a number is a config error naming the key; 1.0 and 0.5 load; the default is 0.5; the example config and the docs list it'
 }
 
 
@@ -2664,6 +2901,9 @@ function Invoke-CamCheckPruneLive {
         foreach ($spec in @(@{ Label = 'MaxRetentionDays=1'; Key = 'MaxRetentionDays'; Value = 1 }, @{ Label = 'ReserveGB=100000'; Key = 'ReserveGB'; Value = 100000 })) {
             $trial = $config.Clone()
             $trial[$spec.Key] = $spec.Value
+            # The breaker would hold a 1-day retention on this archive and list
+            # nothing; switched off, every segment the age rule reaches is checked.
+            $trial.MaxAgePruneFraction = 1.0
             $result = Invoke-CamPrune -Config $trial -SupervisorLog $log -DryRun
             $paths = Get-CamDeletedPathList -Result $result
             $notSegments = @($paths | Where-Object { $_ -notmatch $independent })
@@ -2725,6 +2965,9 @@ foreach ($check in $Checks) {
         'pruneage'   { Invoke-CamCheckPruneAge   -Run $run }
         'prunewatermark' { Invoke-CamCheckPruneWatermark -Run $run }
         'pruneclock' { Invoke-CamCheckPruneClock -Run $run }
+        'prunebreaker' { Invoke-CamCheckPruneBreaker -Run $run }
+        'pruneblocked' { Invoke-CamCheckPruneBlocked -Run $run }
+        'pruneconfig' { Invoke-CamCheckPruneConfig -Run $run }
         'pruneowner' { Invoke-CamCheckPruneOwner -Run $run }
         'prunelive'  { Invoke-CamCheckPruneLive  -Run $run }
     }

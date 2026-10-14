@@ -78,6 +78,9 @@ and carried across restarts so the NVR being back up does not erase the fact tha
 | `102` | Error | it stopped and the restart budget is spent, so it is staying down |
 | `103` | Warning | the NVR window was closed, so nothing is recording and nothing will restart it |
 | `110` | Warning | one camera has written nothing for `CameraDownAlertMinutes` |
+| `120` | Error | pruning is disabled: `RootPath` is unsafe or not the recorder's own archive, so the disk will fill |
+| `121` | Error | pruning is blocked: free space is below `ReserveGB` and nothing deletable is left, so the disk is filling. Once per episode; recording continues |
+| `122` | Error | the age rule's circuit breaker held a run that would have deleted more than `MaxAgePruneFraction` of the archive. Once per episode; the free-space rule still runs |
 
 Registering a custom event source writes to `HKLM` and needs elevation, so by default the entries go
 out under the always-registered `Application` source and need no elevation anywhere.
@@ -86,7 +89,7 @@ with `EventCreate.exe` as the message resource, which is what makes `.Message` r
 them back:
 
 ```powershell
-Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 100,101,102,103,110 } |
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 100,101,102,103,110,120,121,122 } |
   Select-Object TimeCreated, Id, LevelDisplayName, ProviderName,
     @{ n = 'Text'; e = { if ($_.Message) { $_.Message } else { [string]$_.Properties[0].Value } } } |
   Where-Object { $_.Text -like 'IPCCTV: *' }
@@ -141,7 +144,7 @@ Two details in there are not preferences:
 
 ### Retention
 
-The pruner runs every `PruneIntervalSeconds` and watches free space rather than age. When free space falls below `ReserveGB` it deletes oldest-first until `ReserveGB + PruneHysteresisGB` is free, which stops it thrashing at the boundary. It never deletes the segment being written. Set `MaxRetentionDays` if you also want an age cap.
+The pruner runs every `PruneIntervalSeconds` and watches free space rather than age. When free space falls below `ReserveGB` it deletes oldest-first until `ReserveGB + PruneHysteresisGB` is free, which stops it thrashing at the boundary. It never deletes the segment being written. If nothing deletable is left and free space is still below `ReserveGB` it alerts once (id 121) and keeps recording. Set `MaxRetentionDays` if you also want an age cap; a run that would delete more than `MaxAgePruneFraction` (default half) of the archive by age deletes nothing by age and alerts once (id 122), so a mistyped retention cannot empty it.
 
 **Do not plan from a number in a document.** The rate footage accrues at depends on how many cameras are up, which stream each one is on and how much the scenes move, so it drifts with the system rather than sitting still. `.\cam.recorder.ps1 -Status` and the health strip both print the rate measured over the archive as it stands, with the days of headroom left - that figure is the one to plan from, because it is the only one that is current.
 
