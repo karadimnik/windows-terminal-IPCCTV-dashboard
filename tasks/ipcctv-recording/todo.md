@@ -1070,7 +1070,7 @@ The job is to work out what a person actually needs and demote the rest, NOT to 
       fourteen harness checks with the skip count explicitly not fixed, `camui.log` rolling only
       at launcher start, the scripts reading the token but never printing it, and the event-log
       readback filtering on the `IPCCTV: ` prefix rather than a provider.
-- [ ] **[75]** Collapse the command surface. Seven `-Install*`/`-Remove*` pairs is a lot to carry.
+- [x] **[75]** DONE b1010e8 + cac6bdd (merged locally, not pushed). Collapse the command surface. Seven `-Install*`/`-Remove*` pairs is a lot to carry.
       Consider one `-Install` that does the lot and one `-Uninstall`, with the granular switches kept
       but demoted to a reference section. Do not remove them - scripts and recovery paths use them.
 - [x] **[76]** `docs/configuration.md` (77 lines) holds all five configuration tables, and marks
@@ -1274,3 +1274,12 @@ The Operator approved all four. Documentation only; no code touched.
       OPEN QUESTION: settings.json has `"windowingBehavior": "useNew"`, not `useExisting` as the code comments
       say. How the NVR came to be a tab in window `nk` (0x1190726), and whether the other tabs there are the
       Operator's own, is unverified.
+
+- [ ] **[85]** README is still a manual, not a front door: 7,128 words after [75] (it was 7,000). The install
+      section is good (309 words) but the Operator's complaint was that the whole README is "super complex stuff
+      and commands". Heaviest sections: Known limitations 738, The control UI 736 plus a second camui.exe section
+      332, Something is wrong 628, The alerts 454, When something stops unexpectedly 418, Autostart 361.
+      Plan agreed with the Operator 2026-10-14: split, do not delete. README becomes a front door of about
+      1,500-2,000 words (what it is, quick reference, install/uninstall, where to look); the reference material
+      moves verbatim into docs/ with links. Nothing lost, proven by a sentence-level check; `docswitches` stays
+      green. [75] lesson: a size target given in lines passed at -3 lines while words grew; give word counts.
