@@ -1235,3 +1235,11 @@ The Operator approved all four. Documentation only; no code touched.
       Note for whoever reads `-Status` next: the live wardens were started before this change and
       publish nothing, so until the NVR and the dashboard are next restarted both windows are
       reported through the title fallback - correctly, and saying so on the line.
+
+- [ ] **[82]** `Stop-CamTerminalWindow` still resolves its target by **title only**, so when a window's
+      title has moved (another tab active - see [81]) it finds nothing and returns 0, which its callers
+      read as "closed". Nothing is broken today: both live callers, `Stop-CamDashboard` (~3158) and
+      `Stop-CamHealthStrip` (~3791), back the close with a process-identity stop, and `Stop-CamNvr` does
+      not use it at all - it stops the warden by inventory identity, which is title-independent. Left out
+      of [81] on purpose because teaching it the published handle **changes kill semantics**, and [81] was
+      scoped to reporting and identification. Decide whether to close that blind spot.
