@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -3457,6 +3457,54 @@ function Invoke-CamCheckDocSwitches {
         -Evidence $evidence
 }
 
+function Invoke-CamCheckDocLinks {
+    <#
+        Every relative link in README.md and docs\*.md names a file that exists,
+        and every #anchor - file.md#anchor or in-page - is a real heading of its
+        target by GitHub's rules. Moving text between files is what breaks
+        anchors, and nothing else notices.
+
+        A positive control runs first on the same documents in memory, with a
+        missing file, a broken in-page anchor and a broken cross-file anchor
+        planted in README.md: the check is worth nothing unless it flags all
+        three. No file on disk is changed.
+    #>
+    param($Run)
+
+    $repo = Get-CamTestRepo
+    $files = @(Get-Item -LiteralPath (Join-Path -Path $repo -ChildPath 'README.md')) +
+        @(Get-ChildItem -LiteralPath (Join-Path -Path $repo -ChildPath 'docs') -Filter '*.md')
+    $documents = @{}
+    foreach ($file in $files) { $documents[$file.FullName] = [System.IO.File]::ReadAllText($file.FullName) }
+    $result = Find-CamDocLinkProblems -Documents $documents
+
+    $readme = $files[0].FullName
+    $planted = $documents.Clone()
+    $text = $planted[$readme]
+    $text = ([regex]'\]\(#[^)\s]+\)').Replace($text, '](#no-such-heading)', 1)
+    $text = ([regex]'\]\((docs/[^)#\s]+\.md)#[^)\s]+\)').Replace($text, '](${1}#no-such-heading)', 1)
+    $text = ([regex]'\]\(docs/[^)#\s]+\.md\)').Replace($text, '](docs/no-such-file.md)', 1)
+    $planted[$readme] = $text
+    $control = @((Find-CamDocLinkProblems -Documents $planted).Problems | Where-Object { $result.Problems -notcontains $_ })
+    $controlOk = $control.Count -eq 3 -and
+        @($control | Where-Object { $_ -like "*'docs/no-such-file.md' - no such file" }).Count -eq 1 -and
+        @($control | Where-Object { $_ -like "*'#no-such-heading' - README.md has no heading*" }).Count -eq 1 -and
+        @($control | Where-Object { $_ -like "*'docs/*.md#no-such-heading' - * has no heading*" }).Count -eq 1
+
+    $evidence = @(
+        ("{0} document(s): {1}" -f $files.Count, (@($files | ForEach-Object { $_.Name }) -join ', ')),
+        ("{0} relative link(s) checked, {1} of them with an anchor" -f $result.Links, $result.Anchors),
+        ("control - one missing file, one in-page and one cross-file anchor planted in README.md in memory: {0} of 3 flagged" -f $control.Count)
+    )
+    $evidence += @($control | ForEach-Object { 'control ' + $_ })
+    $evidence += @($result.Problems | ForEach-Object { 'FAIL ' + $_ })
+
+    $status = $(if ($controlOk -and -not $result.Problems.Count) { 'PASS' } else { 'FAIL' })
+    $message = $(if ($controlOk) { 'every relative link in README.md and docs\*.md names a file that exists, and every #anchor a heading of its target' }
+        else { 'the positive control did not flag all three planted breaks, so a clean result would prove nothing' })
+    Add-CamTestResult -Run $Run -Check 'doclinks' -Status $status -Message $message -Evidence $evidence
+}
+
 
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
@@ -3497,6 +3545,7 @@ foreach ($check in $Checks) {
         'installpreflight' { Invoke-CamCheckInstallPreflight -Run $run }
         'installsandbox' { Invoke-CamCheckInstallSandbox -Run $run }
         'docswitches' { Invoke-CamCheckDocSwitches -Run $run }
+        'doclinks' { Invoke-CamCheckDocLinks -Run $run }
     }
 }
 

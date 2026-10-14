@@ -1492,3 +1492,88 @@ function Get-CamTestComponentStatus {
     if (-not $match.Success) { return $null }
     return $match.Groups[1].Value
 }
+
+
+function Get-CamMarkdownAnchors {
+    <#
+        The anchors GitHub gives the headings of one markdown text: lower case,
+        punctuation dropped, spaces to hyphens, and -1, -2 on repeats. A line
+        starting with # inside a fenced block is code, not a heading.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+
+    $anchors = New-Object System.Collections.Generic.HashSet[string]
+    $seen = @{}
+    $inFence = $false
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^\s{0,3}```') { $inFence = -not $inFence; continue }
+        if ($inFence) { continue }
+        $heading = [regex]::Match($line, '^\s{0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$')
+        if (-not $heading.Success) { continue }
+        $words = [regex]::Replace($heading.Groups[1].Value, '!?\[([^\]]*)\]\([^)]*\)', '$1')
+        $slug = [regex]::Replace($words.ToLowerInvariant(), '[^\w\- ]', '').Replace(' ', '-')
+        if ($seen.ContainsKey($slug)) {
+            $seen[$slug]++
+            [void]$anchors.Add(('{0}-{1}' -f $slug, $seen[$slug]))
+        } else {
+            $seen[$slug] = 0
+            [void]$anchors.Add($slug)
+        }
+    }
+    return , $anchors
+}
+
+
+function Find-CamDocLinkProblems {
+    <#
+        Every relative link in the given markdown documents, checked: the file
+        it names must exist, and an #anchor - into another file or into the
+        same one - must be a heading of its target. Documents is a hashtable of
+        full path to text; a target in it is judged by that text rather than by
+        the file on disk, which is what lets a check break a link in memory.
+        Links inside code are not links. URLs with a scheme are not checked.
+        Returns Links, Anchors (counts checked) and Problems (strings).
+    #>
+    param([Parameter(Mandatory = $true)][hashtable]$Documents)
+
+    $problems = New-Object System.Collections.ArrayList
+    $anchorCache = @{}
+    $links = 0
+    $anchors = 0
+
+    foreach ($path in @($Documents.Keys | Sort-Object)) {
+        $prose = New-Object System.Collections.ArrayList
+        $inFence = $false
+        foreach ($line in ($Documents[$path] -split "`r?`n")) {
+            if ($line -match '^\s{0,3}```') { $inFence = -not $inFence; continue }
+            if (-not $inFence) { [void]$prose.Add([regex]::Replace($line, '`[^`]*`', '')) }
+        }
+
+        foreach ($link in [regex]::Matches(($prose -join "`n"), '!?\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')) {
+            $target = $link.Groups[1].Value
+            if ($target -match '^[A-Za-z][A-Za-z0-9+.-]*:' -or $target.StartsWith('//')) { continue }
+            $links++
+            $file, $anchor = $target -split '#', 2
+            if ($file) {
+                $resolved = [System.IO.Path]::GetFullPath((Join-Path -Path (Split-Path -Path $path -Parent) -ChildPath ($file -replace '/', '\')))
+                if (-not $Documents.ContainsKey($resolved) -and -not (Test-Path -LiteralPath $resolved)) {
+                    [void]$problems.Add(("{0}: '{1}' - no such file" -f (Split-Path -Path $path -Leaf), $target))
+                    continue
+                }
+            } else {
+                $resolved = $path
+            }
+            if (-not $anchor) { continue }
+            $anchors++
+            if (-not $anchorCache.ContainsKey($resolved)) {
+                $text = $(if ($Documents.ContainsKey($resolved)) { $Documents[$resolved] } else { [System.IO.File]::ReadAllText($resolved) })
+                $anchorCache[$resolved] = Get-CamMarkdownAnchors -Text $text
+            }
+            if (-not $anchorCache[$resolved].Contains($anchor)) {
+                [void]$problems.Add(("{0}: '{1}' - {2} has no heading with anchor #{3}" -f (Split-Path -Path $path -Leaf), $target, (Split-Path -Path $resolved -Leaf), $anchor))
+            }
+        }
+    }
+
+    return [pscustomobject]@{ Links = $links; Anchors = $anchors; Problems = @($problems) }
+}
