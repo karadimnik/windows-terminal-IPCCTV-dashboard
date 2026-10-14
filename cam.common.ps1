@@ -2773,6 +2773,46 @@ function Get-CamWindowRecord {
 }
 
 
+function Test-CamWindowRecordLive {
+    <#
+        Whether the warden a record names is still running: that pid is alive
+        AND that process was already running when the record was written, so
+        a pid the system has since recycled onto something else is not taken
+        for the warden.
+
+        This, and not the handle alone, is what makes a record valid. A
+        handle can outlive the NVR indefinitely: the NVR can be a TAB in the
+        Operator's own window, which stays open with his tabs in it after the
+        NVR is gone. Believing the record on the handle alone reported that
+        window as the NVR's after an orderly stop, and the start path then
+        waited for it to close and threw - three times on 2026-10-14, 5 min
+        34 s with nothing recorded. Item [84].
+
+        Creation time from Win32_Process rather than Get-Process: StartTime
+        needs a handle to the process and comes back empty for one this
+        process may not open, which would read as "not the warden".
+
+        A query that FAILS is not an answer, and returns $true: a record is
+        deleted on the strength of this, and deleting a live warden's record
+        costs -Status the only name it has for the window.
+    #>
+    param([Parameter(Mandatory = $true)]$Record)
+
+    $wardenPid = 0
+    if (-not [int]::TryParse([string]$Record.WardenPid, [ref]$wardenPid) -or $wardenPid -le 0) { return $false }
+    $at = Get-CamDateTimeOrNull -Value $Record.At
+    if ($null -eq $at) { return $false }
+
+    try {
+        $process = @(Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId = {0}" -f $wardenPid) -ErrorAction Stop)
+    }
+    catch { return $true }
+
+    if ($process.Count -eq 0 -or $null -eq $process[0].CreationDate) { return $false }
+    return ($process[0].CreationDate.ToUniversalTime() -le $at.ToUniversalTime())
+}
+
+
 function Remove-CamWindowRecord {
     <#
         Drops the record. Called by the warden on its way out, so a file left
@@ -2780,19 +2820,33 @@ function Remove-CamWindowRecord {
 
         It is only half the defence, and deliberately so: a warden that was
         TERMINATED - which is exactly what an orderly stop does to it - never
-        runs this at all. That is why Get-CamWindowPresence re-checks the
-        handle with IsWindow rather than believing the file.
+        runs this at all. That is why every reader re-checks the warden with
+        Test-CamWindowRecordLive rather than believing the file, and removes
+        what it finds stale.
 
-        Never throws. Returns $true when nothing is left at the path.
+        -Expected removes the record only while it is still THAT record - the
+        same warden and the same publication time. A reader that found a stale
+        record must not delete the one a new warden published in between.
+
+        Never throws. Returns $true when the record it was asked to remove is
+        no longer at the path.
     #>
     param(
         [Parameter(Mandatory = $true)]$Config,
-        [Parameter(Mandatory = $true)][string]$Title
+        [Parameter(Mandatory = $true)][string]$Title,
+        $Expected = $null
     )
 
     try {
         $path = Get-CamWindowRecordPath -Config $Config -Title $Title
-        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+        if (-not (Test-Path -LiteralPath $path)) { return $true }
+        if ($Expected) {
+            $current = Get-CamWindowRecord -Config $Config -Title $Title
+            if ($current -and ([string]$current.WardenPid -cne [string]$Expected.WardenPid -or [string]$current.At -cne [string]$Expected.At)) {
+                return $true
+            }
+        }
+        Remove-Item -LiteralPath $path -Force
         return $true
     }
     catch { return $false }
@@ -2809,13 +2863,17 @@ function Get-CamWindowPresence {
         already-open test and the launcher's post-clear wait all need the same
         answer and used to each ask the title search for it.
 
-        THE FALLBACK IS ON LIVENESS, not merely on the record existing. A
-        record whose handle is dead is treated as no record at all, and the
-        title search runs. That matters during a restart: the old warden's
-        record can still be on disk for the seconds between the window going
-        and the new warden publishing, and reporting "absent" there - with a
-        new window plainly open and correctly titled - would be a fresh way of
-        being wrong rather than a fix.
+        THE FALLBACK IS ON LIVENESS, not merely on the record existing, and on
+        two kinds of it. A record whose WARDEN is dead is stale even when its
+        window is open - the window can be shared with the Operator's own tabs
+        and outlive the NVR - so it is removed here; see
+        Test-CamWindowRecordLive, item [84]. A record whose HANDLE is dead is
+        ignored but left for its warden, which is about to notice and remove
+        it. Either way the title search runs. That matters during a restart:
+        the old record can still be on disk for the seconds between the window
+        going and the new warden publishing, and reporting "absent" there -
+        with a new window plainly open and correctly titled - would be a fresh
+        way of being wrong rather than a fix.
 
         CurrentTitle is read from the window every time. When it differs from
         the title asked for, the window is ours and something else is showing
@@ -2830,6 +2888,11 @@ function Get-CamWindowPresence {
 
     $record = $null
     try { $record = Get-CamWindowRecord -Config $Config -Title $Title } catch { $record = $null }
+
+    if ($record -and -not (Test-CamWindowRecordLive -Record $record)) {
+        [void](Remove-CamWindowRecord -Config $Config -Title $Title -Expected $record)
+        $record = $null
+    }
 
     if ($record -and $record.Hwnd) {
         $hwnd = [IntPtr]::new([int64]$record.Hwnd)
@@ -4113,6 +4176,130 @@ function Start-CamNvrHost {
 }
 
 
+function Resolve-CamWindowStart {
+    <#
+        The start path's decision for one wardened window, taken before
+        anything is launched: the window is already open, or what is here is
+        a corpse to clear first, or the way is clear.
+
+        Apart from Start-CamNvrWindow so that the decision itself can be driven
+        against a sandbox window and job. Everything it needs to know about the
+        machine is passed in - who is recording, and which warden and host
+        processes belong to this window - because the NVR's own sources for
+        those, the process tree, the heartbeat and the inventory, describe the
+        live NVR wherever they are read from. Item [84].
+
+        Returns AlreadyOpen with the presence the window was found by, or the
+        pids cleared on the way to a launch. Throws when it must not launch.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$JobName,
+
+        # Who is recording, named for the refusal; empty when nothing is.
+        [AllowEmptyString()][string]$RecordingBy = '',
+
+        # This window's own warden and host processes: what a clear stops.
+        [AllowEmptyCollection()][int[]]$WardenPid = @(),
+        [AllowEmptyCollection()][int[]]$HostPid = @(),
+
+        [int]$WaitSeconds = 10
+    )
+
+    Import-CamJobApi
+    Import-CamWindowApi
+
+    $result = [pscustomobject]@{
+        AlreadyOpen = $false
+        Presence    = $null
+        Cleaned     = @()
+    }
+
+    # By the warden's published HWND first, by the title only when there is no
+    # live handle to go on. The title is not a reliable name for this window -
+    # it follows the active tab - and this is the call site where that cost
+    # the most: a title search that came back zero while the NVR was running
+    # used to produce the refusal below, and a title search that came back
+    # zero while it was NOT running used to skip the clearing path and leave a
+    # dead window for the next launch to collide with. Item [81].
+    $presence = Get-CamWindowPresence -Config $Config -Title $Title
+    $result.Presence = $presence
+    $windows = $presence.Count
+
+    if ($RecordingBy) {
+        if ($presence.Found) {
+            $result.AlreadyOpen = $true
+            return $result
+        }
+
+        # Recording, and the window cannot be identified at all: no warden has
+        # published a live handle and nothing carries the title. Clearing the
+        # job here would kill a working supervisor, MediaMTX and six ffmpeg.
+        # Refuse, and name the pids doing the work.
+        #
+        # Until item [81] this was also the adopted-foreign-tab case, which is
+        # common on a machine whose windowingBehavior is useExisting and is
+        # now handled above by the published handle. What is left is a window
+        # whose warden never published and whose title has moved, or no window
+        # at all with a supervisor somehow still running outside one.
+        throw ("The NVR IS running ({0}) but its window could not be identified - no warden has published a live window handle to '{1}' and no window carries the title '{2}', so a second one cannot be started. Nothing has been changed and recording is unaffected. Stop the whole NVR with cam.ps1 -Stop -Recorder first if you really want to restart it." -f `
+                $RecordingBy, (Get-CamWindowRecordPath -Config $Config -Title $Title), $Title)
+    }
+
+    # Nothing is recording, so any window or job still here is a corpse, not an
+    # NVR. This is the state cam.ps1 -Stop -Recorder used to leave behind: the
+    # host pane sitting at a -NoExit prompt with its window still open and the
+    # warden still holding the job, which made the window look open and the job
+    # look taken while nothing recorded. Clearing it is the published recovery,
+    # so do it here rather than leave a system its own start command cannot
+    # start. Item [63].
+    #
+    # A warden or host still running counts on its own: neither may be left
+    # behind a new launch, whether or not anything still answers to the title.
+    $owned = @(@($WardenPid) + @($HostPid))
+    if ($windows -ge 1 -or [CamJob]::Exists($JobName) -or $owned.Count -gt 0) {
+        $stale = Stop-CamWardenedWindow -Config $Config -Title $Title -JobName $JobName -WardenPid $WardenPid -HostPid $HostPid
+        $result.Cleaned = $stale.Stopped
+        Write-Host ("cleared a dead NVR: {0} window(s) ({1}) and job '{2}' held with nothing recording; stopped pid(s) {3}" -f `
+                $windows, `
+                $(if ($presence.Found) { "{0}, titled '{1}'" -f $presence.HwndHex, $presence.CurrentTitle } else { "none titled '$Title'" }), `
+                $JobName, `
+                $(if ($stale.Stopped.Count -gt 0) { ($stale.Stopped | Sort-Object) -join ', ' } else { 'none' })) -ForegroundColor Yellow
+
+        # Wait for what is the NVR's OWN to be gone: its warden and host, its
+        # job, and any window that still answers to it - a live warden's
+        # published handle, or its own tab still active under its title. That
+        # is the protection: no second NVR while the first one's warden, host
+        # or job is alive, and no new warden left to latch onto the old tab.
+        #
+        # NOT the window the record named. The NVR can be a tab in a window
+        # shared with the Operator's own tabs, which stays open after the NVR
+        # has gone and will never close; the next launch adds a tab to it like
+        # any other. Waiting for that handle to close threw at every start
+        # after an orderly stop, item [84].
+        $alive = @()
+        $job = $false
+        $deadline = (Get-Date).AddSeconds($WaitSeconds)
+        while ($true) {
+            $alive = @($owned | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+            $windows = (Get-CamWindowPresence -Config $Config -Title $Title).Count
+            $job = [CamJob]::Exists($JobName)
+            if ($alive.Count -eq 0 -and $windows -eq 0 -and -not $job) { break }
+            if ((Get-Date) -ge $deadline) {
+                throw ("Nothing is recording, but the NVR is still there after stopping its host and warden: {0} window(s) answering to '{1}', job '{2}' held: {3}, its own process(es) still alive: {4} (stopped: {5}; survived: {6}). Something outside this project holds them. Run cam.ps1 -Status, which names the window by handle and by the title it is actually showing, and the processes by role, then try again." -f `
+                        $windows, $Title, $JobName, $job, `
+                        $(if ($alive.Count -gt 0) { ($alive | Sort-Object) -join ', ' } else { 'none' }), `
+                        (($stale.Stopped | Sort-Object) -join ', '), (($stale.Survived | Sort-Object) -join ', '))
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+
+    return $result
+}
+
+
 function Start-CamNvrWindow {
     <#
         Opens the NVR: one Windows Terminal window of its own, titled
@@ -4184,79 +4371,21 @@ function Start-CamNvrWindow {
     $inventory = @(Get-CamProcessInventory -Config $Config)
     $live = @($inventory | Where-Object { $_.Role -eq 'Supervisor' })
     $heartbeat = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
-    $recording = ($live.Count -gt 0 -or $heartbeat.Running)
+    $recordingBy = ''
+    if ($live.Count -gt 0) { $recordingBy = 'supervisor ' + (($live | ForEach-Object { $_.ProcessId }) -join ', ') }
+    elseif ($heartbeat.Running) { $recordingBy = "supervisor pid $($heartbeat.Pid) by heartbeat" }
 
-    # By the warden's published HWND first, by the title only when there is no
-    # live handle to go on. The title is not a reliable name for this window -
-    # it follows the active tab - and this is the call site where that cost
-    # the most: a title search that came back zero while the NVR was running
-    # used to produce the refusal below, and a title search that came back
-    # zero while it was NOT running used to skip the clearing path and leave a
-    # dead window for the next launch to collide with. Item [81].
-    $presence = Get-CamWindowPresence -Config $Config -Title $title
-    $windows = $presence.Count
-
-    if ($recording) {
-        if ($presence.Found) {
-            $report.AlreadyOpen = $true
-            $report.WindowFound = $true
-            $report.Hwnd = $presence.HwndHex
-            $report.CurrentTitle = $presence.CurrentTitle
-            return $report
-        }
-
-        # Recording, and the window cannot be identified at all: no warden has
-        # published a live handle and nothing carries the title. Clearing the
-        # job here would kill a working supervisor, MediaMTX and six ffmpeg.
-        # Refuse, and name the pids doing the work.
-        #
-        # Until item [81] this was also the adopted-foreign-tab case, which is
-        # common on a machine whose windowingBehavior is useExisting and is
-        # now handled above by the published handle. What is left is a window
-        # whose warden never published and whose title has moved, or no window
-        # at all with a supervisor somehow still running outside one.
-        throw ("The NVR IS running (supervisor {0}) but its window could not be identified - no warden has published a live window handle to '{1}' and no window carries the title '{2}', so a second one cannot be started. Nothing has been changed and recording is unaffected. Stop the whole NVR with cam.ps1 -Stop -Recorder first if you really want to restart it." -f `
-                $(if ($live.Count -gt 0) { ($live | ForEach-Object { $_.ProcessId }) -join ', ' } else { "pid $($heartbeat.Pid) by heartbeat" }), `
-                (Get-CamWindowRecordPath -Config $Config -Title $title), $title)
+    $start = Resolve-CamWindowStart -Config $Config -Title $title -JobName $jobName -RecordingBy $recordingBy `
+        -WardenPid @($inventory | Where-Object { $_.Role -eq 'NvrWarden' } | ForEach-Object { [int]$_.ProcessId }) `
+        -HostPid @($inventory | Where-Object { $_.Role -eq 'NvrHost' } | ForEach-Object { [int]$_.ProcessId })
+    if ($start.AlreadyOpen) {
+        $report.AlreadyOpen = $true
+        $report.WindowFound = $true
+        $report.Hwnd = $start.Presence.HwndHex
+        $report.CurrentTitle = $start.Presence.CurrentTitle
+        return $report
     }
-
-    # Nothing is recording, so any window or job still here is a corpse, not an
-    # NVR. This is the state cam.ps1 -Stop -Recorder used to leave behind: the
-    # host pane sitting at a -NoExit prompt with its window still open and the
-    # warden still holding the job, which made the window look open and the job
-    # look taken while nothing recorded. Clearing it is the published recovery,
-    # so do it here rather than leave a system its own start command cannot
-    # start. Item [63].
-    if ($windows -ge 1 -or [CamJob]::Exists($jobName)) {
-        # The handle found above, remembered before the clear. The warden
-        # removes its record as it dies, so after this a fresh presence read
-        # has only the title search to go on - and a dead window that outlived
-        # the clear with a foreign tab active answers to neither. Launching a
-        # second NVR over it is exactly what the wait below exists to prevent,
-        # so the known handle is re-checked alongside.
-        $known = $presence.Hwnd
-        $stale = Stop-CamNvr -Config $Config
-        $report.Cleaned = $stale.Stopped
-        Write-Host ("cleared a dead NVR: {0} window(s) ({1}) and job '{2}' held with nothing recording; stopped pid(s) {3}" -f `
-                $windows, `
-                $(if ($presence.Found) { "{0}, titled '{1}'" -f $presence.HwndHex, $presence.CurrentTitle } else { "none titled '$title'" }), `
-                $jobName, `
-                $(if ($stale.Stopped.Count -gt 0) { ($stale.Stopped | Sort-Object) -join ', ' } else { 'none' })) -ForegroundColor Yellow
-
-        $deadline = (Get-Date).AddSeconds(10)
-        while ((Get-Date) -lt $deadline) {
-            $windows = (Get-CamWindowPresence -Config $Config -Title $title).Count
-            if ([CamWin]::IsTerminalWindow($known)) { $windows = 1 }
-            if ($windows -eq 0 -and -not [CamJob]::Exists($jobName)) { break }
-            Start-Sleep -Milliseconds 250
-        }
-        if ($windows -ge 1 -or [CamJob]::Exists($jobName)) {
-            throw ("Nothing is recording, but {0} window(s) for '{1}' and job '{2}' held: {3} are still there after stopping the NVR host and warden (stopped: {4}; survived: {5}). Something outside this project holds them. Run cam.ps1 -Status, which names the window by handle and by the title it is actually showing, close that window, and try again." -f `
-                    $windows, $title, $jobName, [CamJob]::Exists($jobName), `
-                    (($stale.Stopped | Sort-Object) -join ', '), (($stale.Survived | Sort-Object) -join ', '))
-        }
-    }
-
+    $report.Cleaned = $start.Cleaned
     $wardenLog = Join-Path -Path (Get-CamStateDirPath -Config $Config) -ChildPath 'nvr-warden.log'
     $wardenScript = ". '{0}'`nStart-CamNvrWarden -LogPath '{1}' -ControlSurface '{2}'" -f `
         $libPath.Replace("'", "''"), $wardenLog.Replace("'", "''"), $controlPath.Replace("'", "''")
@@ -4338,11 +4467,36 @@ function Stop-CamNvr {
     #>
     param([AllowNull()]$Config)
 
-    Import-CamJobApi
-    $jobName = Get-CamNvrJobName
     $inventory = @(Get-CamProcessInventory -Config $Config)
-    $wardens = @($inventory | Where-Object { $_.Role -eq 'NvrWarden' } | ForEach-Object { [int]$_.ProcessId })
-    $hosts = @($inventory | Where-Object { $_.Role -eq 'NvrHost' } | ForEach-Object { [int]$_.ProcessId })
+    return (Stop-CamWardenedWindow -Config $Config -Title (Get-CamNvrWindowTitle) -JobName (Get-CamNvrJobName) `
+        -WardenPid @($inventory | Where-Object { $_.Role -eq 'NvrWarden' } | ForEach-Object { [int]$_.ProcessId }) `
+        -HostPid @($inventory | Where-Object { $_.Role -eq 'NvrHost' } | ForEach-Object { [int]$_.ProcessId }))
+}
+
+
+function Stop-CamWardenedWindow {
+    <#
+        The body of Stop-CamNvr, for one window whose warden and host pids are
+        already known: the warden by termination first, then any host the
+        kernel sweep did not take. Apart from Stop-CamNvr so that it can be
+        driven against a sandbox window - Stop-CamNvr finds its pids in the
+        machine-wide inventory, which names the live NVR. Item [84].
+
+        A terminated warden never reaches the finally that removes its window
+        record, so the record of a warden stopped here is removed here.
+    #>
+    param(
+        [AllowNull()]$Config,
+        # The title the warden watches, which is what its window record is keyed by.
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$JobName,
+        [AllowEmptyCollection()][int[]]$WardenPid = @(),
+        [AllowEmptyCollection()][int[]]$HostPid = @()
+    )
+
+    Import-CamJobApi
+    $wardens = @($WardenPid)
+    $hosts = @($HostPid)
 
     $report = [pscustomobject]@{
         Wardens   = $wardens
@@ -4374,6 +4528,13 @@ function Stop-CamNvr {
     if ($left.Count -gt 0) {
         $result = Stop-CamProcessList -ProcessId $left
         foreach ($id in $result.Stopped) { [void]$stopped.Add([int]$id) }
+    }
+
+    if ($Config) {
+        $record = Get-CamWindowRecord -Config $Config -Title $Title
+        if ($record -and @($stopped) -contains [int]$record.WardenPid -and -not (Test-CamWindowRecordLive -Record $record)) {
+            [void](Remove-CamWindowRecord -Config $Config -Title $Title -Expected $record)
+        }
     }
 
     $report.Stopped = @($stopped)
