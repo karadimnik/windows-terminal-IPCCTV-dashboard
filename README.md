@@ -148,7 +148,7 @@ The generated `mediamtx.yml` contains no password. Every path is left as `source
 
 ### The health strip
 
-The strip at the bottom of the screen is a Windows Terminal window that the dashboard places by pixel and fills with `cam.health.ps1`. It reads one file, `_state\status.json`, and nothing else, so it can never be the thing that costs you a camera slot. It renders four sections, which you can reorder or switch off individually with `HealthSections`: `status` (supervisor state and uptime, relay state, free space, days left), `cameras` (per camera: record flag, child alive, relay or direct, time since the last closed segment, restarts in the last hour, last error), `events` (the supervisor's most recent log lines, newest first) and `archive` (the span and size of the footage, the measured daily rate, and what the pruner has deleted). Set `HealthStripHeightPx` to 0 to switch the strip off entirely and get the original full-height grid back.
+The strip at the bottom of the screen is a Windows Terminal window that the dashboard places by pixel and fills with `cam.health.ps1`. It reads one file, `_state\status.json`, and nothing else, so it can never be the thing that costs you a camera slot. It renders four sections, which you can reorder or switch off individually with `HealthSections`: `status` (supervisor state and uptime, relay state, free space, days left), `cameras` (per camera: record flag, child alive, relay or direct, time since the last closed segment, restarts in the last hour, last error), `events` (the supervisor's most recent log lines, newest first) and `archive` (the span and size of the footage, the measured daily rate, and what the pruner has deleted). Set `HealthStripHeightPx` to 0 to switch the strip off entirely and get the original full-height grid back. The strip does not quite reach the screen's left and right edges, where a few pixels of desktop show: that cannot be fixed while the strip is a Windows Terminal window, because covering the full width needs a window rect wider than the screen and that is exactly what makes Windows Terminal mis-size itself. Top and bottom are exact and no video is affected.
 
 ### The control UI
 
@@ -214,6 +214,7 @@ To prevent quoting and bracket parsing errors when passing complex `mpv` argumen
 * **Configuration** - [docs/configuration.md](docs/configuration.md). Four keys are editable from the UI's Settings screen: `SegmentSeconds`, `ReserveGB`, `PruneHysteresisGB` and `MaxRetentionDays`. The rest is tuning nobody should need. Add, remove or modify cameras by editing `cameras.json`, or from the same screen.
 * **Installation** - [docs/install.md](docs/install.md).
 * **The Go toolchain** for building the UI - [docs/go-toolchain.md](docs/go-toolchain.md).
+* **Development notes** - [docs/development.md](docs/development.md). Harness invocation and the dashboard's diagnostic switches.
 
 ### Everything at once: `cam.ps1`
 
@@ -255,8 +256,6 @@ Nothing here is identified by image name or window title. Every process is class
 | Command | What it does |
 | --- | --- |
 | `.\mpv.cam.autolayout.autorestart.ps1` | Opens the grid and the health strip. Right-click the script and choose "Run with PowerShell", or run it from a terminal. Close the dashboard by closing its Windows Terminal window. |
-| `-PrintUrls` | Prints the input each camera would use right now, redacted, and the computed layout, then exits without opening a window. The quickest way to see whether the relay is being used. |
-| `-NoHealthStrip` | Reserves the strip but launches no health window in it. |
 
 ### The health strip: `cam.health.ps1`
 
@@ -290,9 +289,7 @@ The binary has to sit beside the scripts: with no `-script-dir` it looks for `ca
 | `-Checks <names>` | Run only these. |
 | `-Live -Checks relay` | Adds the relay lifecycle proof, which starts MediaMTX and `ffmpeg` against the real cameras in a sandbox. It is the only check `-Live` unlocks. |
 
-**A check that skips is not a check that failed, and how many skip depends on the machine.** Exit code 0 means no check failed, so read the tally rather than counting on a fixed split. Four can skip: `autostart` and `procs` while the real recorder is installed and running (limitation 13), and `leak` and `uileak` when there is no `camera_creds.xml`, because then there is no password to scan for and a clean scan would prove nothing. `uileak` also skips when `camui.exe` has not been built or will not start.
-
-One trap worth knowing: `powershell.exe -File .\tests\cam.tests.ps1 -Checks parse,strip` binds the whole list as a single string and fails validation. Use `powershell.exe -Command "& '.\tests\cam.tests.ps1' -Checks parse,strip"`.
+**A check that skips is not a check that failed, and how many skip depends on the machine.** Exit code 0 means no check failed, so read the tally rather than counting on a fixed split. Four can skip: `autostart` and `procs` while the real recorder is installed and running (limitation 12), and `leak` and `uileak` when there is no `camera_creds.xml`, because then there is no password to scan for and a clean scan would prove nothing. `uileak` also skips when `camui.exe` has not been built or will not start.
 
 ### Known limitations
 
@@ -308,7 +305,6 @@ These are measured, not theoretical. None of them is hidden in the code.
 8. **Several tuning keys are absent from `recorder.config.example.json`.** They are marked * in [docs/configuration.md](docs/configuration.md); add them by hand if you want to change one.
 9. **The test harness leaves its sandbox behind on purpose**, under `%TEMP%\cam-tests\<check>`, so you can inspect what a check did. The credential copy it makes is always deleted; footage a live check recorded is not. Delete the folder when you are done with it.
 10. **Autostart depends on the recorder's path being reachable at logon.** If the repository lives inside WSL, the launcher polls `\\wsl.localhost` for up to 300 s and the task then retries up to three times, but nothing records while WSL is down. Keeping the repository on a local drive avoids the wait entirely. The launcher log at `%LOCALAPPDATA%\IPCCTV\autostart.log` is the first thing to read if autostart did not work.
-11. **The health strip does not quite reach the screen edges.** A few pixels of desktop show at its left and right edges. Top and bottom are exact and no video is affected. It cannot be fixed while the strip is a Windows Terminal window: covering the full width needs a window rect wider than the screen, and that is exactly what makes Windows Terminal mis-size itself.
-12. **The footage player cannot seek ahead of what has arrived.** A clip is remuxed on demand and streamed, so the response carries `Accept-Ranges: none` and no length, and the browser can only seek inside what it has already buffered. Nothing is lost, it is just a wait: once the whole clip has arrived it is all seekable.
-13. **Two harness checks always skip on a live NVR.** `autostart` refuses to run while a task named `IPCCTV-Recorder` is registered, because it would rewrite and then delete the real autostart, and `procs` refuses while the recorder is running, because the processes it hunts for already have a legitimate owner. On this machine both skip permanently. How many skip is not a constant: `leak` and `uileak` skip as well on a machine with no `camera_creds.xml`, and `uileak` skips if `camui.exe` is not there to start - so read the tally the harness prints.
-14. **`status.json` reports configured relay paths, not ready ones.** The strip says `N path(s)` and tells relay from direct per camera in its `MODE` column, which is the honest signal; do not read the count as readiness.
+11. **The footage player cannot seek ahead of what has arrived.** A clip is remuxed on demand and streamed, so the response carries `Accept-Ranges: none` and no length, and the browser can only seek inside what it has already buffered. Nothing is lost, it is just a wait: once the whole clip has arrived it is all seekable.
+12. **Two harness checks always skip on a live NVR.** `autostart` refuses to run while a task named `IPCCTV-Recorder` is registered, because it would rewrite and then delete the real autostart, and `procs` refuses while the recorder is running, because the processes it hunts for already have a legitimate owner. On this machine both skip permanently. How many skip is not a constant: `leak` and `uileak` skip as well on a machine with no `camera_creds.xml`, and `uileak` skips if `camui.exe` is not there to start - so read the tally the harness prints.
+13. **`status.json` reports configured relay paths, not ready ones.** The strip says `N path(s)` and tells relay from direct per camera in its `MODE` column, which is the honest signal; do not read the count as readiness.

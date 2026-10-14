@@ -29,6 +29,8 @@ Values written by the UI go through the same code the CLI uses: validated, writt
 
 ## Supervisor
 
+Every key here is a tuning constant rather than a setting: the defaults are the values this system was measured on, and a wrong one will degrade a working supervisor rather than configure it.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `ReconcileSeconds` * | `5` | How quickly an `-Enable` or an edited IP is picked up. |
@@ -45,6 +47,8 @@ Values written by the UI go through the same code the CLI uses: validated, writt
 
 ## Relay
 
+The paths and addresses here are configuration; the keys marked * are tuning constants, set from measurement, and a wrong one will degrade a working relay rather than configure it.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `RestreamerEnabled` | `true` | Set false to run on direct camera inputs only. |
@@ -60,6 +64,8 @@ Values written by the UI go through the same code the CLI uses: validated, writt
 | `StartStaggerMs` * | `300` | Delay between consecutive consumer starts, recorder children and `mpv` panes alike, so six of them do not burst onto the relay, the control API and the cameras in the same instant. |
 
 ## Dashboard layout and health strip
+
+`HealthStripHeightPx` is the one setting here - it is how you resize the strip or switch it off. The keys marked * are tuning constants that describe the layout this system already computes correctly, and a wrong one will degrade a working grid rather than configure it.
 
 | Key | Default | Meaning |
 | --- | --- | --- |

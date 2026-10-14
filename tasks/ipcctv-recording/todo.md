@@ -1138,3 +1138,48 @@ Deliberately NOT done, and left here rather than built: the camera record toggle
 static "…" while it is in flight. It was left alone because the commission named the six control
 actions and supplied measured durations only for those, and a toggle is one config rewrite rather
 than a process lifecycle operation. Its real duration has not been measured.
+
+## Four further documentation cuts, 2026-10-14 - item [80]
+
+The [74] restructure listed four things it had *moved* which it believed should have been *deleted*.
+The Operator approved all four. Documentation only; no code touched.
+
+- [x] **[80]** All four cut. README 314 to 310 lines, `docs/configuration.md` 77 to 83,
+      new `docs/development.md` at 18.
+
+      1. The Supervisor, Relay and Layout tables in `docs/configuration.md` keep every key -
+         capability was not being removed - but each section now opens with one line saying these
+         are tuning constants and that a wrong value degrades a working system rather than
+         configuring it. The Relay and Layout lines scope the warning to the `*` keys, because the
+         unstarred ones above them (the paths, the addresses and `HealthStripHeightPx`) are real
+         configuration. The suggested shortening of the per-key prose was **not** done, and that is
+         a deliberate answer rather than an omission: of the starred keys, all eleven Supervisor
+         entries are already key plus default plus one short phrase, and the few that carry a
+         second sentence carry a *reason* - `ArchiveScanSeconds` is separate because it touches
+         every file, `RelayReadyWaitSeconds` is spent only on a first attempt, `HealthSections`
+         errors on an unknown name - which is the only content that helps the rare reader who has
+         to change one. The header line fixes what was actually wrong (a reader could not tell
+         tuning from configuration) without deleting a why.
+      2. Limitation 11, the health strip's screen-edge gap, is now two sentences at the end of the
+         health-strip section, keeping every fact: the few pixels of desktop, that top and bottom
+         are exact and no video is affected, and that it cannot be fixed while the strip is a
+         Windows Terminal window. Limitations 12-14 renumbered to 11-13, and the one cross-
+         reference - the harness skip paragraph's "(limitation 13)" - repointed to 12.
+      3. and 4. New `docs/development.md` holds the `-File` versus `-Command` quoting trap, which
+         is a PowerShell parameter-binding quirk rather than a fact about this NVR, and the two
+         dashboard switches `-PrintUrls` and `-NoHealthStrip`, which were the only reference
+         entries that tied to no symptom in the troubleshooting table. Both switch descriptions
+         moved verbatim; the capability is documented, just not in the README a person opens to
+         find out whether their cameras are recording. Linked from Reference so nothing is orphaned.
+
+      Verified mechanically rather than by re-reading, per the method [74] used: all 333 backticked
+      spans from the previous revision still resolve in the new file set, 0 of 336 old sentences
+      flag on the 0.30 distinctive-word threshold, and a stricter verbatim-sentence diff listed 14
+      changed runs - every one either a deliberate cut above or an artifact of where the
+      concatenation boundary between files fell. All 15 internal links and anchors resolve, proved
+      with a negative control. The six hard-won corrections were each grepped and quoted from the
+      final document. `cameras.json` byte-identical; only `.md` files changed.
+
+      Note for later readers: the limitation numbers in items **[32]** and **[34]** above are the
+      old ones. [34]'s "known limitation 11" is now the paragraph in the README's health-strip
+      section, and [32]'s "limitation 14" is now limitation 13.
