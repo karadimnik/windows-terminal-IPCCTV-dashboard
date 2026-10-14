@@ -989,6 +989,71 @@ function Stop-CamTestWardenWindow {
 }
 
 
+function Wait-CamTestWindowRecord {
+    <# The record the warden of a test window published, or $null if none appeared in time. #>
+    param(
+        [Parameter(Mandatory = $true)]$Sandbox,
+        [Parameter(Mandatory = $true)][string]$Title,
+        [int]$TimeoutSeconds = 20
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        $record = Get-CamWindowRecord -Config $Sandbox.Config -Title $Title
+        if ($record) { return $record }
+        Start-Sleep -Milliseconds 250
+    }
+    return $null
+}
+
+
+function Select-CamTestTab {
+    <#
+        Makes tab $Index of a test window the active one, and waits until the
+        window shows $ExpectTitle. Index 0 is the warden's own pane: after
+        Add-CamTestForeignTab this puts our title back on the window, which is
+        the NVR's dead host tab being the active one at the moment a start
+        clears it.
+
+        Returns $true when the window shows the expected title.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Window,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][string]$ExpectTitle,
+        [int]$TimeoutSeconds = 15
+    )
+
+    Import-CamWindowApi
+    $hwnd = [IntPtr]::new([int64]$Window.Hwnd)
+    & wt.exe @('-w', $Window.WtName, 'focus-tab', '--target', [string]$Index)
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if ([CamWin]::TitleOf($hwnd) -ceq $ExpectTitle) { return $true }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+
+function Wait-CamTestProcessExit {
+    <# $true once none of these pids is running. #>
+    param(
+        [AllowEmptyCollection()][int[]]$ProcessId = @(),
+        [int]$TimeoutSeconds = 15
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $alive = @($ProcessId | Where-Object { $_ -gt 0 -and (Get-Process -Id $_ -ErrorAction SilentlyContinue) })
+        if ($alive.Count -eq 0) { return $true }
+        if ((Get-Date) -ge $deadline) { return $false }
+        Start-Sleep -Milliseconds 250
+    }
+}
+
+
 # ---------------------------------------------------------------------------
 # Pruner: recorder functions in-process, and a filesystem you can diff
 # ---------------------------------------------------------------------------

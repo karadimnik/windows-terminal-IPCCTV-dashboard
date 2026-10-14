@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'pruneowner', 'prunelive')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'pruneowner', 'prunelive')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'pruneowner')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'pruneowner')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -1426,6 +1426,256 @@ function Invoke-CamCheckWindowId {
 }
 
 
+function Invoke-CamCheckNvrStart {
+    <#
+        Item [84]. An orderly stop and then a start must always bring the NVR
+        back, whatever window it ran in.
+
+        THE CONDITION UNDER TEST is the one that failed in production on
+        2026-10-14: the NVR's window is shared with the Operator's own tabs,
+        so it outlives the NVR, and cam.ps1 -Stop -Recorder TERMINATES the
+        warden, which therefore never removes its window record. The next
+        start believed that record, waited for a window that will never close,
+        and threw - three times, 5 min 34 s with nothing recorded.
+
+        Driven through Resolve-CamWindowStart, the start path's own decision,
+        on sandbox windows and jobs named cam.test.*, with the facts the live
+        machine would supply passed in: who is recording, and which warden and
+        host pids belong to the window. Never cam.nvr.
+
+          sequence   window watched by a warden, a foreign tab active in it,
+                     the warden terminated as Stop-CamNvr does it, then a start:
+                     it must proceed, and the stale record must be gone
+          wait       a window cleared while its own tab was active, left open
+                     with only a foreign tab and no warden: it must not block
+          stop       Stop-CamWardenedWindow, the body of Stop-CamNvr, removes
+                     the record of the warden it terminates
+          recycled   a record naming a live process that started after the
+                     record was written is a recycled pid, not the warden
+          controls   with the warden ALIVE no second launch: recording, it is
+                     found already open by its handle; not recording, while it
+                     survives the clear the start refuses and the record stays
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $opened = @()
+    $sleeper = $null
+
+    $sandbox = New-CamTestSandbox -Name 'nvrstart' -Cameras @(
+        [pscustomobject]@{ Name = 'nvrstart-a'; IP = '10.255.255.13'; Quality = 'main'; Record = $true }
+    )
+    $config = $sandbox.Config
+
+    try {
+        # === the production sequence, and the controls on a live warden =====
+        $title = 'cam.test.nvrstart'
+        $job = 'cam.test.nvrstart.job'
+        $a = Start-CamTestWardenWindow -Sandbox $sandbox -Title $title -JobName $job
+        $opened += $a
+        $record = Wait-CamTestWindowRecord -Sandbox $sandbox -Title $title
+        $evidence += ("sequence: window hwnd 0x{0:X}, warden {1}, pane {2}, record {3}" -f `
+                $a.Hwnd, $a.WardenPid, $a.PanePid, $(if ($record) { "names warden $($record.WardenPid)" } else { 'NOT published' }))
+        if (-not ($a.WindowFound -and $a.Watching -and $a.PanePid -gt 0 -and $record)) {
+            throw 'the sequence window, its warden or its record did not come up'
+        }
+
+        $foreign = Add-CamTestForeignTab -Window $a -ForeignTitle ($title + '.foreign')
+        $byTitle = @(Get-CamTerminalWindow -Title $title).Count
+        $evidence += ("sequence: foreign tab {0} active, window titled '{1}', title search finds {2}" -f $a.ForeignPid, $foreign, $byTitle)
+        if (-not $foreign -or $byTitle -ne 0) { throw 'the foreign tab did not take the title over, so the shared-window case was never reproduced' }
+
+        # --- control: recording, warden alive -> found open, nothing launched
+        $decision = Resolve-CamWindowStart -Config $config -Title $title -JobName $job -RecordingBy 'cam.test supervisor' `
+            -WardenPid @($a.WardenPid) -HostPid @($a.PanePid)
+        $wardenAlive = [bool](Get-Process -Id $a.WardenPid -ErrorAction SilentlyContinue)
+        $evidence += ("control, recording: already open {0}, found by {1} at {2}, warden alive {3}" -f `
+                $decision.AlreadyOpen, $decision.Presence.Source, $decision.Presence.HwndHex, $wardenAlive)
+        if (-not ($decision.AlreadyOpen -and $decision.Presence.Source -eq 'hwnd' -and $wardenAlive)) {
+            $ok = $false
+            $evidence += 'FAIL: control, recording: a live warden''s window was not found open by its handle - a second NVR would be launched'
+        }
+
+        # --- control: nothing recording, warden alive and NOT one the clear may stop
+        $refused = ''
+        try {
+            [void](Resolve-CamWindowStart -Config $config -Title $title -JobName $job -WaitSeconds 3)
+        }
+        catch { $refused = $_.Exception.Message }
+        $record = Get-CamWindowRecord -Config $config -Title $title
+        $wardenAlive = [bool](Get-Process -Id $a.WardenPid -ErrorAction SilentlyContinue)
+        $evidence += ("control, warden survives the clear: refused {0}, warden alive {1}, record kept {2}" -f `
+                [bool]$refused, $wardenAlive, [bool]$record)
+        if ($refused) { $evidence += ('  ' + $refused) }
+        if (-not $refused) {
+            $ok = $false
+            $evidence += 'FAIL: control, warden survives the clear: the start went ahead while the first warden still held the job'
+        }
+        if (-not $wardenAlive) {
+            $ok = $false
+            $evidence += 'FAIL: control, warden survives the clear: the warden is gone, so the control proved nothing'
+        }
+        if (-not $record -or [int]$record.WardenPid -ne [int]$a.WardenPid) {
+            $ok = $false
+            $evidence += 'FAIL: control, warden survives the clear: the record of a LIVE warden was removed'
+        }
+
+        # --- THE SEQUENCE: the warden terminated as Stop-CamNvr does it ----
+        [void](Stop-CamProcessList -ProcessId @($a.WardenPid))
+        $gone = Wait-CamTestProcessExit -ProcessId @($a.WardenPid, $a.PanePid)
+        $deadline = (Get-Date).AddSeconds(10)
+        while ([CamJob]::Exists($job) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+        $left = Get-CamWindowRecord -Config $config -Title $title
+        $hwndA = [IntPtr]::new([int64]$a.Hwnd)
+        $evidence += ("sequence: warden terminated; warden and pane gone {0}, job gone {1}, record left behind {2}, window still open {3} titled '{4}'" -f `
+                $gone, (-not [CamJob]::Exists($job)), [bool]$left, [CamWin]::IsTerminalWindow($hwndA), [CamWin]::TitleOf($hwndA))
+        if (-not ($gone -and $left -and [CamWin]::IsTerminalWindow($hwndA) -and -not [CamJob]::Exists($job))) {
+            throw 'the production state - warden dead, record left behind, shared window still open - was not reached'
+        }
+
+        $started = Get-Date
+        $threw = ''
+        $decision = $null
+        try { $decision = Resolve-CamWindowStart -Config $config -Title $title -JobName $job }
+        catch { $threw = $_.Exception.Message }
+        $after = Get-CamWindowRecord -Config $config -Title $title
+        $presence = Get-CamWindowPresence -Config $config -Title $title
+        $evidence += ("sequence: start decision after {0}s: {1}; record afterwards {2}; presence then finds {3} by {4}" -f `
+                (Format-CamNumber -Value ((Get-Date) - $started).TotalSeconds), $(if ($threw) { 'THREW' } else { 'proceeds to launch' }), `
+                $(if ($after) { "STILL THERE naming dead warden $($after.WardenPid)" } else { 'gone' }), $presence.Found, $presence.Source)
+        if ($threw) {
+            $ok = $false
+            $evidence += ('FAIL: sequence: the start threw - this is the production failure of item [84]: ' + $threw)
+        }
+        elseif ($decision.AlreadyOpen) {
+            $ok = $false
+            $evidence += 'FAIL: sequence: the start reported the dead NVR as already open'
+        }
+        if ($after) {
+            $ok = $false
+            $evidence += 'FAIL: sequence: the stale record of a dead warden is still on disk after the start path read it'
+        }
+        if ($presence.Found) {
+            $ok = $false
+            $evidence += ("FAIL: sequence: a window whose warden is dead is reported PRESENT by {0} - defect (a)" -f $presence.Source)
+        }
+
+        # === recycled pid: a live process that is not the warden ============
+        # Window a is still open and is a real terminal window, so only the
+        # warden check can tell these two records apart.
+        # One timestamp for both records: this harness was running before it,
+        # the sleeper is started after it.
+        $stamp = Format-CamTimestamp -Value (Get-Date)
+        Start-Sleep -Milliseconds 200
+        $sleeper = Start-CamDetachedProcess -Script 'Start-Sleep -Seconds 120'
+        $recordPath = Get-CamWindowRecordPath -Config $config -Title $title
+        foreach ($case in @(
+                [pscustomobject]@{ Label = 'started after the record'; Pid = $sleeper.Id; Believe = $false }
+                [pscustomobject]@{ Label = 'started before the record'; Pid = $PID; Believe = $true })) {
+            $forged = [pscustomobject]@{
+                Schema = 1; Title = $title; Hwnd = [int64]$a.Hwnd; HwndHex = ("0x{0:X}" -f [int64]$a.Hwnd)
+                TerminalPid = [CamWin]::ProcessIdOf($hwndA); WardenPid = $case.Pid; JobName = $job
+                At = $stamp
+            }
+            [System.IO.File]::WriteAllText($recordPath, (ConvertTo-Json -InputObject $forged), (New-Object System.Text.UTF8Encoding($false)))
+            $presence = Get-CamWindowPresence -Config $config -Title $title
+            $kept = Test-Path -LiteralPath $recordPath
+            $evidence += ("recycled: record naming live pid {0} {1}: believed {2}, record kept {3}" -f `
+                    $case.Pid, $case.Label, ($presence.Source -eq 'hwnd'), $kept)
+            if (($presence.Source -eq 'hwnd') -ne $case.Believe -or $kept -ne $case.Believe) {
+                $ok = $false
+                $evidence += ("FAIL: recycled: a record naming a live pid {0} must be {1}" -f `
+                        $case.Label, $(if ($case.Believe) { 'believed and kept' } else { 'ignored and removed' }))
+            }
+        }
+        [void](Remove-CamWindowRecord -Config $config -Title $title)
+
+        # === the wait alone: (b) without (a) ================================
+        # The record is withdrawn before the start, so the window is known by
+        # its title alone - its own tab active - and a stale record cannot be
+        # what blocks. The clear then takes the warden and its pane, the pane's
+        # tab goes, and the window stays open on the foreign tab.
+        $titleB = 'cam.test.nvrstart.b'
+        $jobB = 'cam.test.nvrstart.b.job'
+        $b = Start-CamTestWardenWindow -Sandbox $sandbox -Title $titleB -JobName $jobB
+        $opened += $b
+        $record = Wait-CamTestWindowRecord -Sandbox $sandbox -Title $titleB
+        $foreignB = Add-CamTestForeignTab -Window $b -ForeignTitle ($titleB + '.foreign')
+        $back = Select-CamTestTab -Window $b -Index 0 -ExpectTitle $titleB
+        [void](Remove-CamWindowRecord -Config $config -Title $titleB)
+        $evidence += ("wait: window hwnd 0x{0:X}, warden {1}, pane {2}, record published {3}, foreign tab {4}, own tab active again {5}, record withdrawn {6}" -f `
+                $b.Hwnd, $b.WardenPid, $b.PanePid, [bool]$record, [bool]$foreignB, $back, `
+                (-not (Get-CamWindowRecord -Config $config -Title $titleB)))
+        if (-not ($b.Watching -and $b.PanePid -gt 0 -and $record -and $foreignB -and $back)) {
+            throw 'the wait window did not reach the state under test'
+        }
+
+        $started = Get-Date
+        $threw = ''
+        $decision = $null
+        try { $decision = Resolve-CamWindowStart -Config $config -Title $titleB -JobName $jobB -WardenPid @($b.WardenPid) -HostPid @($b.PanePid) }
+        catch { $threw = $_.Exception.Message }
+        $hwndB = [IntPtr]::new([int64]$b.Hwnd)
+        $evidence += ("wait: start decision after {0}s: {1}; cleared {2}; window still open {3} titled '{4}', warden alive {5}, job held {6}" -f `
+                (Format-CamNumber -Value ((Get-Date) - $started).TotalSeconds), $(if ($threw) { 'THREW' } else { 'proceeds to launch' }), `
+                $(if ($decision) { (@($decision.Cleaned) | Sort-Object) -join ', ' } else { '-' }), `
+                [CamWin]::IsTerminalWindow($hwndB), [CamWin]::TitleOf($hwndB), `
+                [bool](Get-Process -Id $b.WardenPid -ErrorAction SilentlyContinue), [CamJob]::Exists($jobB))
+        if ($threw) {
+            $ok = $false
+            $evidence += ('FAIL: wait: the start threw over a shared window that only a foreign tab is holding open - defect (b): ' + $threw)
+        }
+        if (-not [CamWin]::IsTerminalWindow($hwndB)) {
+            $evidence += 'NOTE: wait: the window closed with its pane, so the shared-window condition did not hold to the end'
+            $ok = $false
+            $evidence += 'FAIL: wait: the condition under test was not reproduced'
+        }
+
+        # === Stop-CamNvr's body removes the record of the warden it kills ===
+        $titleC = 'cam.test.nvrstart.c'
+        $jobC = 'cam.test.nvrstart.c.job'
+        $c = Start-CamTestWardenWindow -Sandbox $sandbox -Title $titleC -JobName $jobC
+        $opened += $c
+        $record = Wait-CamTestWindowRecord -Sandbox $sandbox -Title $titleC
+        if (-not ($c.Watching -and $record)) { throw 'the stop window or its record did not come up' }
+        $stop = $null
+        $threw = ''
+        try { $stop = Stop-CamWardenedWindow -Config $config -Title $titleC -JobName $jobC -WardenPid @($c.WardenPid) -HostPid @($c.PanePid) }
+        catch { $threw = $_.Exception.Message }
+        $left = Get-CamWindowRecord -Config $config -Title $titleC
+        $evidence += ("stop: warden {0} with a published record; stopped {1}, survived {2}, job held {3}; record afterwards {4}" -f `
+                $c.WardenPid, $(if ($stop) { (@($stop.Stopped) | Sort-Object) -join ', ' } else { '-' }), `
+                $(if ($stop) { (@($stop.Survived) | Sort-Object) -join ', ' } else { '-' }), [CamJob]::Exists($jobC), `
+                $(if ($left) { "STILL THERE naming dead warden $($left.WardenPid)" } else { 'gone' }))
+        if ($threw) {
+            $ok = $false
+            $evidence += ('FAIL: stop: threw: ' + $threw)
+        }
+        if (-not $stop -or @($stop.Stopped) -notcontains [int]$c.WardenPid) {
+            $ok = $false
+            $evidence += 'FAIL: stop: the warden was not terminated'
+        }
+        if ($left) {
+            $ok = $false
+            $evidence += 'FAIL: stop: the warden was terminated and its record left behind'
+        }
+    }
+    catch {
+        $ok = $false
+        $evidence += ('FAIL: ' + $_.Exception.Message)
+    }
+    finally {
+        foreach ($window in $opened) { if ($window) { Stop-CamTestWardenWindow -Window $window } }
+        if ($sleeper -and -not $sleeper.HasExited) { try { $sleeper.Kill() } catch { } }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'nvrstart' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'after the warden of a shared window is terminated the way an orderly stop does it, the start path proceeds and removes its stale record; a window held open only by a foreign tab does not block a start; Stop-CamNvr removes the record of the warden it terminates; a recycled pid is not a warden; and with the warden alive no second NVR is launched' `
+        -Evidence $evidence
+}
+
+
 function Invoke-CamCheckProcs {
     <#
         Asserts that no ffmpeg or MediaMTX is left over from a test run.
@@ -2465,6 +2715,7 @@ foreach ($check in $Checks) {
         'crashsafe'  { Invoke-CamCheckCrashSafe  -Run $run }
         'windowclose' { Invoke-CamCheckWindowClose -Run $run }
         'windowid'   { Invoke-CamCheckWindowId   -Run $run }
+        'nvrstart'   { Invoke-CamCheckNvrStart   -Run $run }
         'leak'       { Invoke-CamCheckLeak       -Run $run }
         'uileak'     { Invoke-CamCheckUiLeak     -Run $run }
         'procs'      { Invoke-CamCheckProcs      -Run $run }
