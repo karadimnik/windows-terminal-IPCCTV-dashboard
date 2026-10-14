@@ -987,3 +987,271 @@ function Stop-CamTestWardenWindow {
         try { if (Get-Process -Id $id -ErrorAction SilentlyContinue) { Stop-Process -Id $id -Force } } catch { }
     }
 }
+
+
+# ---------------------------------------------------------------------------
+# Pruner: recorder functions in-process, and a filesystem you can diff
+# ---------------------------------------------------------------------------
+
+function Get-CamTestRecorderFunctions {
+    <#
+        The named functions of cam.recorder.ps1 as one scriptblock, for the
+        caller to dot-source into its own scope:
+
+            . (Get-CamTestRecorderFunctions -Name 'Invoke-CamPrune', 'Write-CamHost')
+
+        Taken from the parsed file rather than by dot-sourcing the script,
+        which would run its entry point. Named, never all: the recorder has
+        functions that share a name with this harness's own (Add-CamTestResult)
+        and would shadow them. Dot-sourced into a check's scope, a function the
+        check defines there - Get-CamFreeSpaceGB, Send-CamAlert - replaces the
+        product's for every call the loaded functions make, because PowerShell
+        resolves commands through the caller's scopes.
+    #>
+    param([Parameter(Mandatory = $true)][string[]]$Name)
+
+    $path = Join-Path -Path (Get-CamTestRepo) -ChildPath 'cam.recorder.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
+    $found = @{}
+    foreach ($definition in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
+        $found[$definition.Name] = $definition.Extent.Text
+    }
+
+    $text = New-Object System.Text.StringBuilder
+    foreach ($wanted in $Name) {
+        if (-not $found.ContainsKey($wanted)) { throw "cam.recorder.ps1 defines no function '$wanted'." }
+        [void]$text.AppendLine($found[$wanted])
+    }
+    return [scriptblock]::Create($text.ToString())
+}
+
+
+function Set-CamTestFileAge {
+    <# Backdates a file's write AND creation time; the pruner reads both. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][DateTime]$Time
+    )
+    $item = Get-Item -LiteralPath $Path -Force
+    $item.CreationTime = $Time
+    $item.LastWriteTime = $Time
+}
+
+
+function New-CamTestFileReparsePoint {
+    <#
+        Makes $Path a FILE reparse point. A real symbolic link to $Target when
+        this account may create one (elevated, or Developer Mode), otherwise a
+        reparse point with a private non-Microsoft tag, which needs no
+        privilege. Both carry FILE_ATTRIBUTE_REPARSE_POINT, which is what the
+        pruner refuses on; the second simply cannot be opened by anybody.
+
+        Returns which kind was made, for the evidence.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Target,
+        # Applied to the stand-in before it is tagged, after which nothing can
+        # open it to set a time. A symbolic link reports its own times.
+        [DateTime]$Time = [DateTime]::Now
+    )
+
+    try {
+        [void](New-Item -ItemType SymbolicLink -Path $Path -Target $Target -ErrorAction Stop)
+        return 'symbolic link'
+    }
+    catch { }
+
+    if (-not ('CamTestReparse' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class CamTestReparse {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool DeviceIoControl(SafeFileHandle handle, uint code, byte[] input, int inputLength, IntPtr output, int outputLength, out int returned, IntPtr overlapped);
+    // FSCTL_SET_REPARSE_POINT with a REPARSE_GUID_DATA_BUFFER: any tag
+    // without the Microsoft bit needs only write access to the file.
+    public static void Set(string path) {
+        using (SafeFileHandle handle = CreateFileW(path, 0x40000000, 0, IntPtr.Zero, 3, 0x00200000 | 0x02000000, IntPtr.Zero)) {
+            if (handle.IsInvalid) throw new System.ComponentModel.Win32Exception();
+            byte[] data = new byte[] { 0x43, 0x41, 0x4D, 0x54 };
+            byte[] buffer = new byte[24 + data.Length];
+            BitConverter.GetBytes((uint)0x00004341).CopyTo(buffer, 0);
+            BitConverter.GetBytes((ushort)data.Length).CopyTo(buffer, 4);
+            new Guid("6a0f3c1e-2b7d-4c55-9f3e-1d2c3b4a5f60").ToByteArray().CopyTo(buffer, 8);
+            data.CopyTo(buffer, 24);
+            int returned;
+            if (!DeviceIoControl(handle, 0x000900A4, buffer, buffer.Length, IntPtr.Zero, 0, out returned, IntPtr.Zero)) {
+                throw new System.ComponentModel.Win32Exception();
+            }
+        }
+    }
+}
+'@
+    }
+    [System.IO.File]::WriteAllText($Path, 'reparse stand-in')
+    Set-CamTestFileAge -Path $Path -Time $Time
+    [CamTestReparse]::Set($Path)
+    return 'private-tag reparse point (this account may not create symbolic links)'
+}
+
+
+function Get-CamTestFileManifest {
+    <#
+        Every file under $Path, keyed by full path, with a sha256 of its
+        content. Never descends through a reparse point - that is the bug this
+        harness is looking for - and records the reparse point itself by its
+        attributes, size and times instead of a hash, since some cannot be
+        opened at all.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        # Size, attributes and write time only, no file opened. For the live
+        # archive, which is read-only to every test and far too big to hash.
+        [switch]$MetadataOnly
+    )
+
+    $manifest = @{}
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $pending = New-Object System.Collections.Stack
+        $pending.Push((Get-Item -LiteralPath $Path -Force))
+        while ($pending.Count -gt 0) {
+            $dir = $pending.Pop()
+            foreach ($item in @(Get-ChildItem -LiteralPath $dir.FullName -Force)) {
+                $reparse = (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+                if ($reparse) {
+                    $manifest[$item.FullName] = "reparse|{0}|{1}" -f $item.Attributes, $item.LastWriteTimeUtc.Ticks
+                    continue
+                }
+                if ($item.PSIsContainer) { $pending.Push($item); continue }
+                if ($MetadataOnly) {
+                    $manifest[$item.FullName] = "{0}|{1}|{2}" -f $item.Length, $item.Attributes, $item.LastWriteTimeUtc.Ticks
+                    continue
+                }
+                $stream = [System.IO.File]::Open($item.FullName, 'Open', 'Read', 'ReadWrite')
+                try { $hash = [System.BitConverter]::ToString($sha.ComputeHash($stream)) }
+                finally { $stream.Dispose() }
+                $manifest[$item.FullName] = "{0}|{1}|{2}" -f $hash, $item.Length, $item.Attributes
+            }
+        }
+    }
+    finally { $sha.Dispose() }
+    return $manifest
+}
+
+
+function Compare-CamTestFileManifest {
+    <# What changed between two manifests: Removed, Added and Changed paths. #>
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Before,
+        [Parameter(Mandatory = $true)][hashtable]$After
+    )
+
+    $diff = [pscustomobject]@{ Removed = @(); Added = @(); Changed = @() }
+    foreach ($key in $Before.Keys) {
+        if (-not $After.ContainsKey($key)) { $diff.Removed += $key }
+        elseif ($After[$key] -ne $Before[$key]) { $diff.Changed += $key }
+    }
+    foreach ($key in $After.Keys) {
+        if (-not $Before.ContainsKey($key)) { $diff.Added += $key }
+    }
+    $diff.Removed = @($diff.Removed | Sort-Object)
+    $diff.Added = @($diff.Added | Sort-Object)
+    $diff.Changed = @($diff.Changed | Sort-Object)
+    return $diff
+}
+
+
+function Remove-CamTestTree {
+    <#
+        Deletes a test directory without ever following a reparse point out of
+        it: every junction and link inside is unlinked first, then the tree.
+        The test trees under cam-tests hold junctions to bait directories on
+        purpose.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $pending = New-Object System.Collections.Stack
+    $pending.Push((Get-Item -LiteralPath $Path -Force))
+    while ($pending.Count -gt 0) {
+        $dir = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $dir.FullName -Force)) {
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                if ($item.PSIsContainer) { [System.IO.Directory]::Delete($item.FullName, $false) }
+                else { [System.IO.File]::Delete($item.FullName) }
+            }
+            elseif ($item.PSIsContainer) { $pending.Push($item) }
+        }
+    }
+    Remove-Item -LiteralPath $Path -Recurse -Force
+}
+
+
+function New-CamTestPruneRoot {
+    <#
+        An empty archive root at %TEMP%\cam-tests\<Name>\archive with a config
+        pointing at it: both rules off, so a test switches on exactly the rule
+        it is about. The directory is cleared first, junctions unlinked rather
+        than followed. Log is the supervisor log the pruner writes to, kept
+        outside the directory so it never shows up in a manifest of it.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [hashtable]$Config = @{}
+    )
+
+    $dir = Join-Path -Path $env:TEMP -ChildPath ("cam-tests\" + $Name)
+    Remove-CamTestTree -Path $dir
+    $root = Join-Path -Path $dir -ChildPath 'archive'
+    [void](New-Item -ItemType Directory -Path $root -Force)
+    $log = Join-Path -Path $env:TEMP -ChildPath ("cam-tests\" + $Name + '.log')
+    if (Test-Path -LiteralPath $log) { Remove-Item -LiteralPath $log -Force }
+
+    $settings = Get-CamConfigDefault
+    $settings.RootPath = $root
+    $settings.ReserveGB = 0
+    $settings.PruneHysteresisGB = 0
+    $settings.MaxRetentionDays = $null
+    foreach ($key in $Config.Keys) { $settings[$key] = $Config[$key] }
+
+    return [pscustomobject]@{ Dir = $dir; Root = $root; Config = $settings; Log = $log }
+}
+
+
+function New-CamTestSegment {
+    <#
+        Writes a file named the way the recorder names a segment,
+        <camera>_<yyyyMMdd>_<HHmmss><+hhmm><extension>, backdated to $Time.
+
+        The name is spelled out here from the naming scheme on purpose, NOT
+        produced by the product's own pattern code: a test built on it then
+        checks that code instead of repeating it. The content embeds the name
+        so every file hashes differently. Returns the full path.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Dir,
+        [Parameter(Mandatory = $true)][string]$Camera,
+        [Parameter(Mandatory = $true)][DateTime]$Time,
+        [int]$Bytes = 1024,
+        [string]$Extension = '.mkv'
+    )
+
+    $offset = [TimeZoneInfo]::Local.GetUtcOffset($Time)
+    $sign = $(if ($offset -lt [TimeSpan]::Zero) { '-' } else { '+' })
+    $zone = '{0}{1:00}{2:00}' -f $sign, [math]::Abs($offset.Hours), [math]::Abs($offset.Minutes)
+    $name = '{0}_{1}{2}{3}' -f $Camera, $Time.ToString('yyyyMMdd_HHmmss', [System.Globalization.CultureInfo]::InvariantCulture), $zone, $Extension
+
+    if (-not (Test-Path -LiteralPath $Dir)) { [void](New-Item -ItemType Directory -Path $Dir -Force) }
+    $path = Join-Path -Path $Dir -ChildPath $name
+    $content = New-Object byte[] $Bytes
+    $stamp = [System.Text.Encoding]::ASCII.GetBytes($path)
+    for ($i = 0; $i -lt $Bytes; $i++) { $content[$i] = $stamp[$i % $stamp.Length] }
+    [System.IO.File]::WriteAllBytes($path, $content)
+    Set-CamTestFileAge -Path $path -Time $Time
+    return $path
+}

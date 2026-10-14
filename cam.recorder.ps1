@@ -1183,7 +1183,8 @@ function Test-CamPruneGuards {
         Check (i): nothing outside the archive root can ever be a prune
         candidate. These are the cases that matter - a traversal out of a camera
         directory, a sibling directory whose name merely starts with the root's,
-        and an absolute path somewhere else entirely.
+        and an absolute path somewhere else entirely - plus the roots a mistake
+        could produce, and the names that are and are not recorder segments.
     #>
     param([Parameter(Mandatory = $true)]$Config)
 
@@ -1196,7 +1197,47 @@ function Test-CamPruneGuards {
         @{ Path = $root; Expect = $false; Label = 'the archive root itself' }
     )
 
+    # Roots a mistake could produce. Tested as a predicate only: nothing is
+    # created in, or read from, any of these folders.
+    $userProfile = [Environment]::GetFolderPath('UserProfile')
+    $roots = @(
+        @{ Root = $root; Expect = ''; Label = 'the configured root' },
+        @{ Root = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($root)); Expect = 'refused'; Label = 'the drive the archive is on' },
+        @{ Root = '\\server\share'; Expect = 'refused'; Label = 'a UNC share root' },
+        @{ Root = [Environment]::GetFolderPath('Windows'); Expect = 'refused'; Label = 'the Windows directory' },
+        @{ Root = [Environment]::GetFolderPath('ProgramFiles'); Expect = 'refused'; Label = 'Program Files' },
+        @{ Root = $userProfile; Expect = 'refused'; Label = 'the user profile' },
+        @{ Root = (Split-Path -Path $userProfile -Parent); Expect = 'refused'; Label = 'the folder holding the profiles' },
+        @{ Root = (Get-CamLibRoot); Expect = 'refused'; Label = 'the recorder''s own directory' },
+        @{ Root = (Split-Path -Path (Get-CamLibRoot) -Parent); Expect = 'refused'; Label = 'an ancestor of the recorder''s directory' }
+    )
+    $names = @(
+        @{ Name = ('Front_Entrance_20261012_105730+0300' + (Get-CamContainerProfile -Config $Config).Extension); Expect = $true; Label = 'a segment of its own camera' },
+        @{ Name = 'Front_Entrance_20261012_105730-0500.mp4'; Expect = $false; Label = 'a segment name in another container' },
+        @{ Name = 'Front_Entrance_20261012_105730+0300.mkv.tmp'; Expect = $false; Label = 'a segment name with a .tmp suffix' },
+        @{ Name = 'Workshop_20261012_105730+0300.mkv'; Expect = $false; Label = 'another camera''s segment' },
+        @{ Name = 'Front_Entrance_2026101_105730+0300.mkv'; Expect = $false; Label = 'a malformed timestamp' },
+        @{ Name = 'Front_Entrance_20261012_105730+0300.mkv.txt'; Expect = $false; Label = 'a segment name with a second extension' },
+        @{ Name = 'notes.txt'; Expect = $false; Label = 'a foreign file' },
+        @{ Name = 'desktop.ini'; Expect = $false; Label = 'a hidden system file' }
+    )
+
     $ok = $true
+    foreach ($case in $roots) {
+        $problem = Get-CamArchiveRootProblem -Root $case.Root
+        $actual = $(if ($problem) { 'refused' } else { '' })
+        $verdict = $(if ($problem) { $problem } else { 'allowed' })
+        $status = $(if ($actual -eq $case.Expect) { 'PASS' } else { 'FAIL' })
+        if ($status -eq 'FAIL') { $ok = $false }
+        Add-CamTestResult -Check "prune root: $($case.Label)" -Status $status -Detail $verdict
+    }
+    foreach ($case in $names) {
+        $actual = Test-CamSegmentName -Name $case.Name -SafeName 'Front_Entrance' -Config $Config
+        $status = $(if ($actual -eq $case.Expect) { 'PASS' } else { 'FAIL' })
+        if ($status -eq 'FAIL') { $ok = $false }
+        Add-CamTestResult -Check "prune name: $($case.Label)" -Status $status `
+            -Detail ("{0} in Front_Entrance: {1}" -f $case.Name, $(if ($actual) { 'a segment' } else { 'never deleted' }))
+    }
     foreach ($case in $cases) {
         $actual = Test-CamPathInside -Root $root -Path $case.Path
         if ($actual -ne $case.Expect) {
@@ -1229,6 +1270,11 @@ function Show-CamPruneDryRun {
     $log = Join-Path -Path $WorkDir -ChildPath 'prune-dryrun.log'
     $result = Invoke-CamPrune -Config $Config -SupervisorLog $log -DryRun
 
+    $ownership = 'the root holds the ownership marker'
+    if ($result.RootRefusal) { $ownership = $result.RootRefusal }
+    elseif (-not $result.Marker) { $ownership = 'no ownership marker yet; the root qualifies, so the next supervisor start writes one' }
+    Add-CamTestResult -Check 'prune ownership' -Status $(if ($result.RootRefusal) { 'FAIL' } else { 'PASS' }) -Detail $ownership
+
     Add-CamTestResult -Check 'prune watermark' -Status 'INFO' `
         -Detail ("free {0} GB, reserve {1} GB, deletes until {2} GB" -f `
             (Format-CamNumber -Value $result.FreeGBBefore), (Format-CamNumber -Value $result.ReserveGB), (Format-CamNumber -Value $result.TargetGB))
@@ -1246,9 +1292,13 @@ function Show-CamPruneDryRun {
         $detail = $result.Message
     }
     Add-CamTestResult -Check 'prune dry run' -Status $status -Detail $detail
+    if ($result.StopLine) { Add-CamTestResult -Check '  stop point' -Status 'INFO' -Detail $result.StopLine }
 
     foreach ($rejected in @($result.Rejected)) {
         Add-CamTestResult -Check '  guard refused' -Status 'INFO' -Detail $rejected
+    }
+    foreach ($foreign in @($result.Foreign)) {
+        Add-CamTestResult -Check '  never deleted' -Status 'INFO' -Detail $foreign
     }
 
     return (-not $result.Blocked)
@@ -1796,7 +1846,9 @@ function Remove-CamEmptySegment {
         The matroska header is still in ffmpeg's write buffer at that point, so
         the file on disk holds no footage and no reader can open it. Anything
         with content starts with a complete header and stays readable through a
-        hard kill, which is why only an exactly empty file qualifies.
+        hard kill, which is why only an exactly empty file qualifies - and only
+        one that passes the same root and file gates as the pruner, so an empty
+        file the recorder did not write is never touched.
     #>
     param(
         [Parameter(Mandatory = $true)]$Entry,
@@ -1808,9 +1860,19 @@ function Remove-CamEmptySegment {
 
     $empty = @(Get-ChildItem -LiteralPath $Entry.Dir -File -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Length -eq 0 })
+    if ($empty.Count -eq 0) { return }
 
+    # The same two gates as the pruner: the root first, then every file.
+    $refusal = Get-CamPruneRootRefusal -Config $Config
+    if ($refusal) {
+        Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes `
+            -Message ("left {0} empty file(s) in {1} alone: pruning is disabled - {2}" -f $empty.Count, $Entry.Dir, $refusal)
+        return
+    }
+
+    $foreign = 0
     foreach ($file in $empty) {
-        if (-not (Test-CamPathInside -Root ([string]$Config.RootPath) -Path $file.FullName)) { continue }
+        if (Get-CamPruneRefusal -File $file -Config $Config) { $foreign++; continue }
         try {
             Remove-Item -LiteralPath $file.FullName -Force
             Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes `
@@ -1820,6 +1882,10 @@ function Remove-CamEmptySegment {
             Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes `
                 -Message ("could not remove empty segment {0}: {1}" -f $file.Name, $_.Exception.Message)
         }
+    }
+    if ($foreign -gt 0) {
+        Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes `
+            -Message ("{0} empty foreign file(s) left alone in {1}: not recorder segments" -f $foreign, $Entry.Dir)
     }
 }
 
@@ -2591,8 +2657,20 @@ function Invoke-CamPrune {
           3. While free space is below ReserveGB, delete globally oldest first
              until it reaches ReserveGB + PruneHysteresisGB. The hysteresis is
              what stops the pruner firing again on the next cycle.
-          4. Nothing outside the archive root, ever: every candidate passes
-             Test-CamPathInside and no reparse point is followed.
+          4. Only the recorder's own segments, only in its own archive: the
+             root must pass Get-CamPruneRootRefusal (a safe root holding the
+             ownership marker), and every file must pass Get-CamPruneRefusal
+             (no reparse point, inside the root, a segment name for its
+             folder). Anything else is left alone and counted, never deleted.
+             A refused root disables pruning, alerts once, and recording
+             continues.
+          6. Before the first deletion of a run that could delete, the clock
+             and the archive must agree (Get-CamPruneClockProblem); if they do
+             not, the whole run is refused. The age cutoff comes from the same
+             clock reading that passed.
+          7. Every deletion is strictly older than the newest segment of its own
+             folder, and every run that gets past the gates ends with one
+             'prune stop:' line saying where each rule stopped and why.
           5. When nothing can be deleted, say so loudly and keep recording. An
              NVR that stops recording because the disk is full has failed twice.
 
@@ -2624,10 +2702,41 @@ function Invoke-CamPrune {
         Blocked      = $false
         Protected    = @()
         Rejected     = @()
+        Foreign      = @()
         Deletions    = @()
+        RootRefusal  = ''
+        ClockRefusal = ''
+        StopLine     = ''
+        Marker       = (Test-CamArchiveMarker -Config $Config)
         Message      = ''
     }
     $result.FreeGBAfter = $result.FreeGBBefore
+
+    $result.RootRefusal = Get-CamPruneRootRefusal -Config $Config -DryRun:$DryRun
+    if ($result.RootRefusal) {
+        $result.Blocked = $true
+        $result.Message = "PRUNING DISABLED: {0}. Nothing is deleted until this is fixed, so the disk will fill. Recording continues." -f $result.RootRefusal
+        if (-not $DryRun) {
+            # Once per distinct reason for the life of the supervisor: the
+            # status file carries it from then on, every cycle.
+            if (-not $State -or [string]$State.RefusalAlerted -ne $result.Message) {
+                Write-CamLog -Path $SupervisorLog -Message $result.Message -MaxBytes $maxBytes
+                Write-CamHost -Message $result.Message -Colour 'Red'
+                if ($State) {
+                    [void](Send-CamAlert -Title 'pruning is disabled - the disk will fill' -Message $result.RootRefusal `
+                        -EventId 120 -EntryType 'Error' -LogPath $SupervisorLog -LogMaxBytes $maxBytes)
+                    $State.RefusalAlerted = $result.Message
+                }
+            }
+            if ($State) {
+                $State.LastRunAt = [DateTime]::Now
+                $State.Blocked = $true
+                $State.LastMessage = $result.Message
+            }
+        }
+        return $result
+    }
+    if ($State) { $State.RefusalAlerted = '' }
 
     $dirs = Get-CamSegmentDirectories -Root $root
     foreach ($skipped in $dirs.Skipped) {
@@ -2636,29 +2745,51 @@ function Invoke-CamPrune {
     }
 
     $candidates = @()
+    $unprotected = @()
+    $newest = @()
+    $segmentsSeen = @()
     foreach ($dir in $dirs.Directories) {
         $files = @(Get-ChildItem -LiteralPath $dir.FullName -File -Force -ErrorAction SilentlyContinue)
         if ($files.Count -eq 0) { continue }
 
-        $current = $null
+        $segments = @()
+        $foreign = 0
         foreach ($file in $files) {
+            $refusal = Get-CamPruneRefusal -File $file -Config $Config
+            if ($refusal -eq '') { $segments += $file; continue }
+            if ($refusal -eq 'foreign') { $foreign++; continue }
+            $result.Rejected += ("{0} ({1})" -f $file.FullName, $refusal)
+            Write-CamLog -Path $SupervisorLog -Message ("prune guard: refusing to delete {0}: {1}" -f $file.FullName, $refusal) -MaxBytes $maxBytes
+        }
+        if ($foreign -gt 0) {
+            $line = "{0} foreign file(s) left alone in {1}" -f $foreign, $dir.FullName
+            $result.Foreign += $line
+            Write-CamLog -Path $SupervisorLog -Message ("prune: " + $line) -MaxBytes $maxBytes
+        }
+        if ($segments.Count -eq 0) { continue }
+        $segmentsSeen += $segments
+
+        # The newest SEGMENT, not the newest file: a foreign file written
+        # later must not take the protection off the one ffmpeg holds open.
+        $current = $null
+        foreach ($file in $segments) {
             if ($null -eq $current -or $file.CreationTimeUtc -gt $current.CreationTimeUtc) { $current = $file }
         }
-        if ($current) { $result.Protected += $current.FullName }
+        $result.Protected += $current.FullName
+        $newest += $current
 
-        foreach ($file in $files) {
-            if ($current -and $file.FullName -eq $current.FullName) { continue }
-            if (($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-                $result.Rejected += ("{0} (reparse point)" -f $file.FullName)
-                Write-CamLog -Path $SupervisorLog -Message ("prune guard: refusing to delete reparse point {0}" -f $file.FullName) -MaxBytes $maxBytes
-                continue
-            }
-            if (-not (Test-CamPathInside -Root $root -Path $file.FullName)) {
-                $result.Rejected += ("{0} (outside the archive root)" -f $file.FullName)
-                Write-CamLog -Path $SupervisorLog -Message ("prune guard: refusing to delete {0}, which is outside {1}" -f $file.FullName, $root) -MaxBytes $maxBytes
-                continue
-            }
-            $candidates += $file
+        $kept = 0
+        foreach ($file in $segments) {
+            if ($file.FullName -eq $current.FullName) { continue }
+            $unprotected += $file
+            # Strictly older than the newest of its own folder, by the same
+            # time the order and the age rule use.
+            if ($file.LastWriteTime -lt $current.LastWriteTime) { $candidates += $file }
+            else { $kept++ }
+        }
+        if ($kept -gt 0) {
+            Write-CamLog -Path $SupervisorLog -MaxBytes $maxBytes `
+                -Message ("prune: {0} segment(s) in {1} kept: not older than its newest segment {2}" -f $kept, $dir.FullName, $current.Name)
         }
     }
 
@@ -2666,6 +2797,45 @@ function Invoke-CamPrune {
     # emptying whichever camera happens to be scanned first.
     $candidates = @($candidates | Sort-Object -Property LastWriteTime)
     $result.Candidates = $candidates.Count
+
+    $retentionDays = $null
+    if ($null -ne $Config.MaxRetentionDays -and [string]$Config.MaxRetentionDays -ne '') {
+        $retentionDays = [double]$Config.MaxRetentionDays
+    }
+    $ageRule = ($retentionDays -and $retentionDays -gt 0)
+    $free = Get-CamFreeSpaceGB -Path $root
+    $watermark = ($free -lt $reserveGB)
+
+    # One reading of the clock for the whole run. It is checked against the
+    # archive before anything that could delete, and the age rule's cutoff is
+    # computed only from a reading that passed.
+    $now = Get-CamWallClock
+    if ($unprotected.Count -gt 0 -and ($ageRule -or $watermark)) {
+        $result.ClockRefusal = Get-CamPruneClockProblem -Candidates $unprotected -Newest $newest -Segments $segmentsSeen -Now $now -Config $Config
+    }
+    if ($result.ClockRefusal) {
+        $result.Blocked = $true
+        $result.Message = "PRUNE REFUSED: {0}. Nothing deleted this run; recording continues." -f $result.ClockRefusal
+        $result.StopLine = 'prune stop: refused before the first deletion - ' + $result.ClockRefusal
+        if (-not $DryRun) {
+            # Logged when the refusal starts, not every cycle it lasts.
+            if (-not $State -or -not $State.ClockRefused) {
+                Write-CamLog -Path $SupervisorLog -Message $result.Message -MaxBytes $maxBytes
+                Write-CamHost -Message $result.Message -Colour 'Red'
+            }
+            if ($State) {
+                $State.ClockRefused = $true
+                $State.LastRunAt = [DateTime]::Now
+                $State.Blocked = $true
+                $State.LastMessage = $result.Message
+            }
+        }
+        return $result
+    }
+    if ($State -and $State.ClockRefused) {
+        $State.ClockRefused = $false
+        Write-CamLog -Path $SupervisorLog -Message 'prune: the clock and the archive agree again, pruning resumes' -MaxBytes $maxBytes
+    }
 
     $deleteOne = {
         param($file, $reason)
@@ -2696,25 +2866,39 @@ function Invoke-CamPrune {
     }
 
     $consumed = @{}
+    $stamp = { param($time) $time.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) }
 
     # (2) age rule
-    $retentionDays = $null
-    if ($null -ne $Config.MaxRetentionDays -and [string]$Config.MaxRetentionDays -ne '') {
-        $retentionDays = [double]$Config.MaxRetentionDays
-    }
-    if ($retentionDays -and $retentionDays -gt 0) {
-        $cutoff = [DateTime]::Now.AddDays(-$retentionDays)
+    $ageStop = 'age rule off'
+    if ($ageRule) {
+        $cutoff = $now.AddDays(-$retentionDays)
+        $ageDeleted = 0
+        $firstKept = $null
         foreach ($file in $candidates) {
-            if ($file.LastWriteTime -ge $cutoff) { continue }
+            # Oldest first, so the first file inside the cutoff ends the rule.
+            if ($file.LastWriteTime -ge $cutoff) { $firstKept = $file; break }
             $consumed[$file.FullName] = $true
-            [void](& $deleteOne $file ("older than MaxRetentionDays=$retentionDays"))
+            if (& $deleteOne $file ("older than MaxRetentionDays=$retentionDays")) { $ageDeleted++ }
+        }
+        if ($firstKept) {
+            $ageStop = "age rule reached its cutoff {0} after {1} deletion(s), stopping at {2} (written {3})" -f `
+                (& $stamp $cutoff), $ageDeleted, $firstKept.Name, (& $stamp $firstKept.LastWriteTime)
+        }
+        else {
+            $ageStop = "age rule: {0} deletion(s), every candidate was older than the cutoff {1} - nothing deletable left" -f $ageDeleted, (& $stamp $cutoff)
         }
     }
 
-    # (3) watermark
-    $free = Get-CamFreeSpaceGB -Path $root
-    if ($free -lt $reserveGB) {
+    # (3) watermark, from the free space the age rule left
+    if ($result.Deleted -gt 0) {
+        if ($DryRun) { $free = $free + ($result.FreedBytes / 1GB) }
+        else { $free = Get-CamFreeSpaceGB -Path $root }
+        $watermark = ($free -lt $reserveGB)
+    }
+    $waterStop = "watermark not needed: free {0} GB is at or above the {1} GB reserve" -f (Format-CamNumber -Value $free), (Format-CamNumber -Value $reserveGB)
+    if ($watermark) {
         $index = 0
+        $waterDeleted = 0
         while ($free -lt $targetGB) {
             if ($index -ge $candidates.Count) {
                 $result.Blocked = $true
@@ -2727,6 +2911,7 @@ function Invoke-CamPrune {
             $deleted = & $deleteOne $file ("free {0} GB below reserve {1} GB, target {2} GB" -f `
                 (Format-CamNumber -Value $free), (Format-CamNumber -Value $reserveGB), (Format-CamNumber -Value $targetGB))
             if (-not $deleted) { continue }
+            $waterDeleted++
             if ($DryRun) {
                 # Nothing was actually freed, so re-reading free space would loop
                 # forever. Estimate instead.
@@ -2736,7 +2921,19 @@ function Invoke-CamPrune {
                 $free = Get-CamFreeSpaceGB -Path $root
             }
         }
+        if ($result.Blocked) {
+            $waterStop = "watermark: nothing deletable left after {0} deletion(s), free {1} GB is still below the {2} GB reserve" -f `
+                $waterDeleted, (Format-CamNumber -Value $free), (Format-CamNumber -Value $reserveGB)
+        }
+        else {
+            $waterStop = "watermark reached its target {0} GB after {1} deletion(s), free {2} GB" -f `
+                (Format-CamNumber -Value $targetGB), $waterDeleted, (Format-CamNumber -Value $free)
+            if ($index -lt $candidates.Count) { $waterStop += (", stopping at {0}" -f $candidates[$index].Name) }
+        }
     }
+
+    $result.StopLine = "prune stop: {0}; {1}" -f $ageStop, $waterStop
+    Write-CamLog -Path $SupervisorLog -Message $result.StopLine -MaxBytes $maxBytes
 
     $result.FreeGBAfter = Get-CamFreeSpaceGB -Path $root
     if ($DryRun) { $result.FreeGBAfter = $free }
@@ -3146,7 +3343,24 @@ function Invoke-CamSupervisor {
     $children = @{}
     $cameras = @()
     $archive = $null
-    $pruneState = @{ LastRunAt = $null; DeletedTotal = 0; FreedBytes = 0; Blocked = $false; LastMessage = '' }
+    $pruneState = @{ LastRunAt = $null; DeletedTotal = 0; FreedBytes = 0; Blocked = $false; LastMessage = ''; RefusalAlerted = ''; ClockRefused = $false }
+
+    # The pruner deletes nothing under a root this recorder has not claimed.
+    # Claiming happens here, once per start, and can never stop recording:
+    # a root that cannot be claimed only leaves pruning disabled, which the
+    # first prune cycle reports and alerts on.
+    try {
+        $owner = Initialize-CamArchiveOwner -Config $Config
+        if ($owner.Created) {
+            Write-CamLog -Path $supervisorLog -Message ("claimed {0} as this recorder's archive: wrote {1}" -f $Config.RootPath, $owner.Path) -MaxBytes $maxBytes
+        }
+        elseif (-not $owner.Owned) {
+            Write-CamLog -Path $supervisorLog -Message ("WARNING: did not claim {0} as this recorder's archive, so pruning stays disabled: {1}" -f $Config.RootPath, $owner.Problem) -MaxBytes $maxBytes
+        }
+    }
+    catch {
+        Write-CamLog -Path $supervisorLog -Message ("WARNING: could not claim {0} as this recorder's archive, so pruning stays disabled: {1}" -f $Config.RootPath, $_.Exception.Message) -MaxBytes $maxBytes
+    }
 
     # The restreamer is a supervisor child like any other: one thing to
     # autostart, one place that logs, the same backoff discipline. Every
