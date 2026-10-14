@@ -40,6 +40,22 @@
 .PARAMETER Dashboard
     Limits the action to the viewer panes, their mpv and the health strip.
 
+.PARAMETER Install
+    Installs everything that makes the system start by itself: the MediaMTX
+    config, then the recorder's, the dashboard's and the UI's logon tasks.
+    Every prerequisite is checked first and every problem is printed at once;
+    a missing one stops it before anything changes, except camui.exe, which
+    only skips the UI. A component already in place is left alone, so a
+    second run changes nothing. Starts nothing - -Start does that. Exits 0
+    only when every component is in place. Add -WhatIf to see the plan.
+
+.PARAMETER Uninstall
+    Removes what -Install installed: the three logon tasks, their launchers
+    and the MediaMTX config. Keeps the logs, the archive, cameras.json,
+    recorder.config.json and the credentials, stops nothing and leaves the
+    event source alone. A second run is a clean no-op. Add -WhatIf to see
+    what it would remove.
+
 .PARAMETER InstallDashboardAutostart
     Registers a logon task that opens the dashboard, and leaves the
     recorder's own task completely alone. Idempotent, unelevated.
@@ -59,6 +75,9 @@
     keeps running.
 
 .EXAMPLE
+    .\cam.ps1 -Install -WhatIf
+    .\cam.ps1 -Install
+    .\cam.ps1 -Uninstall
     .\cam.ps1
     .\cam.ps1 -Stop
     .\cam.ps1 -Stop -Dashboard
@@ -70,7 +89,9 @@
 # parameter sets and no mandatory parameter in any of them, PowerShell cannot
 # pick one from no arguments at all and fails with "parameter set cannot be
 # resolved" instead. Measured on 2026-10-12 - .\cam.ps1 had never worked.
-[CmdletBinding(DefaultParameterSetName = 'Status')]
+# SupportsShouldProcess is for -Install and -Uninstall; the dispatch refuses
+# -WhatIf on every other action rather than half-honour it.
+[CmdletBinding(DefaultParameterSetName = 'Status', SupportsShouldProcess = $true)]
 param(
     [Parameter(ParameterSetName = 'Status')]
     [switch]$Status,
@@ -80,6 +101,12 @@ param(
 
     [Parameter(ParameterSetName = 'Stop')]
     [switch]$Stop,
+
+    [Parameter(ParameterSetName = 'Install')]
+    [switch]$Install,
+
+    [Parameter(ParameterSetName = 'Uninstall')]
+    [switch]$Uninstall,
 
     [Parameter(ParameterSetName = 'InstallDashboardAutostart')]
     [switch]$InstallDashboardAutostart,
@@ -118,6 +145,7 @@ $DashboardScript = Join-Path -Path $ScriptDir -ChildPath 'mpv.cam.autolayout.aut
 # from here; this script only reads its state and runs it. The dashboard's is
 # registered and removed here.
 $RecorderTaskName = 'IPCCTV-Recorder'
+$RecorderStubPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'start-recorder.ps1'
 $DashboardTaskName = 'IPCCTV-Dashboard'
 $DashboardStubPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'start-dashboard.ps1'
 $DashboardStubLogPath = Join-Path -Path (Get-CamAutostartDir) -ChildPath 'autostart-dashboard.log'
@@ -142,7 +170,15 @@ $UiStubPollSeconds = 5
 $WantRecorder = $Recorder -or -not ($Recorder -or $Dashboard)
 $WantDashboard = $Dashboard -or -not ($Recorder -or $Dashboard)
 
-$Config = Get-CamConfig
+# -Install reports a recorder.config.json that does not load as one of its
+# prerequisites, beside every other problem, rather than dying on it alone.
+$ConfigProblem = $null
+try { $Config = Get-CamConfig }
+catch {
+    if ($PSCmdlet.ParameterSetName -ne 'Install') { throw }
+    $Config = $null
+    $ConfigProblem = $_.Exception.Message
+}
 
 
 function Write-CamSection {
@@ -162,7 +198,7 @@ function Get-CamLogonTaskReport {
         [pscustomobject]@{
             Name      = $RecorderTaskName
             What      = 'the 24/7 recorder'
-            Launcher  = (Join-Path -Path (Get-CamAutostartDir) -ChildPath 'start-recorder.ps1')
+            Launcher  = $RecorderStubPath
             InstallBy = '.\cam.recorder.ps1 -InstallAutostart'
         },
         [pscustomobject]@{
@@ -398,11 +434,14 @@ function Show-CamStatus {
         Write-Host ("  {0,-17} {1,-15} {2}" -f $task.Name, $task.State, $task.What) -ForegroundColor $colour
         if ($task.Registered) {
             Write-Host ("  {0,-17} launcher {1}{2}" -f '', $task.Launcher,
-                $(if ($task.LauncherExists) { '' } else { '  MISSING - reinstall the task' })) -ForegroundColor DarkGray
+                $(if ($task.LauncherExists) { '' } else { '  MISSING - .\cam.ps1 -Install rewrites it' })) -ForegroundColor DarkGray
         }
         else {
             Write-Host ("  {0,-17} install it with {1}" -f '', $task.InstallBy) -ForegroundColor DarkGray
         }
+    }
+    if (@($State.LogonTasks | Where-Object { -not $_.Registered -or -not $_.LauncherExists }).Count -gt 0) {
+        Write-Host '  .\cam.ps1 -Install installs every one that is missing, and leaves the rest alone' -ForegroundColor Cyan
     }
 
     Write-CamSection 'processes'
@@ -885,6 +924,377 @@ function Invoke-CamRemoveUi {
 }
 
 
+# ---------------------------------------------------------------------------
+# -Install and -Uninstall: every component in one command each
+#
+# These orchestrate the granular switches, they do not reimplement them: each
+# component's install and remove IS that switch, so the two paths cannot
+# drift. What is added here is the preflight, the "already in place" test
+# that makes a second run change nothing, and one result per component.
+# ---------------------------------------------------------------------------
+
+function Get-CamDashboardMpvPath {
+    <#
+        The mpv the dashboard runs, read from the dashboard script's own
+        $MpvPath assignment so there is one place that names it. $null when
+        that assignment is not a plain string.
+    #>
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($DashboardScript, [ref]$null, [ref]$null)
+    $assignment = $ast.Find({
+            param($node)
+            $node -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and
+            $node.Left.VariablePath.UserPath -eq 'MpvPath'
+        }, $false)
+    if (-not $assignment) { return $null }
+    $value = $assignment.Right.Expression
+    if ($value -is [System.Management.Automation.Language.StringConstantExpressionAst]) { return $value.Value }
+    return $null
+}
+
+
+function Get-CamInstallPreflight {
+    <#
+        Every prerequisite of every component, checked without changing
+        anything. One row per check: whether it holds, what was found, the
+        fix, and the component that needs it. Hard is false only for the UI,
+        which is optional - a missing camui.exe skips the UI and nothing else.
+
+        The credential file is tested for existence and never opened.
+    #>
+    $rows = New-Object System.Collections.ArrayList
+    function Add-Row([string]$Name, [string]$Component, [bool]$Ok, [string]$Detail, [string]$Fix) {
+        [void]$rows.Add([pscustomobject]@{
+                Name = $Name; Component = $Component; Hard = ($Component -ne 'ui')
+                Ok = $Ok; Detail = $Detail; Fix = $Fix
+            })
+    }
+
+    $configPath = Join-Path -Path $ScriptDir -ChildPath 'recorder.config.json'
+    if ($ConfigProblem) {
+        Add-Row 'recorder.config.json' 'all' $false ("does not load: {0}" -f $ConfigProblem) `
+            'fix the value it names; every key is described in docs/configuration.md'
+    }
+    else {
+        Add-Row 'recorder.config.json' 'all' $true $(if (Test-Path -LiteralPath $configPath) { "loads: $configPath" } else { 'not present, so every default applies' }) ''
+    }
+
+    $camerasPath = Join-Path -Path $ScriptDir -ChildPath 'cameras.json'
+    try {
+        $cameras = Get-CamList -Path $camerasPath
+        if ($cameras.Count -eq 0) { throw 'it lists no camera' }
+        [void](Get-CamRelayPathMap -Cameras $cameras)
+        Add-Row 'cameras.json' 'all' $true ("{0} camera(s) in {1}" -f $cameras.Count, $camerasPath) ''
+    }
+    catch {
+        Add-Row 'cameras.json' 'all' $false ("{0}: {1}" -f $camerasPath, $_.Exception.Message) `
+            'create or correct it - the schema is in docs/install.md'
+    }
+
+    $credentialPath = Join-Path -Path $ScriptDir -ChildPath 'camera_creds.xml'
+    Add-Row 'camera credentials' 'all' (Test-Path -LiteralPath $credentialPath) $credentialPath `
+        'run .\mpv.cam.autolayout.autorestart.ps1 once: it asks for the camera login and saves it encrypted (docs/install.md)'
+
+    if ($Config) {
+        $ffmpeg = [string]$Config.FfmpegPath
+        Add-Row 'ffmpeg' 'recorder' (Test-Path -LiteralPath $ffmpeg) $ffmpeg `
+            'install ffmpeg there, or set FfmpegPath in recorder.config.json'
+
+        $mediamtx = [string]$Config.RestreamerExePath
+        Add-Row 'MediaMTX' 'restreamer' (Test-Path -LiteralPath $mediamtx) $mediamtx `
+            'extract mediamtx.exe from a mediamtx_<version>_windows_amd64.zip release there, or set RestreamerExePath'
+
+        $relayConfig = [string]$Config.RestreamerConfigPath
+        Add-Row 'MediaMTX config path' 'restreamer' ($relayConfig -notmatch '^\\\\wsl') $relayConfig `
+            'set RestreamerConfigPath to a local NTFS path such as C:\mediamtx\mediamtx.yml - MediaMTX cannot watch a file on the WSL share'
+    }
+    else {
+        Add-Row 'ffmpeg, MediaMTX' 'recorder' $false 'cannot be checked until recorder.config.json loads, because it names their paths' `
+            'fix recorder.config.json first'
+    }
+
+    $mpv = Get-CamDashboardMpvPath
+    Add-Row 'mpv' 'dashboard' ($mpv -and (Test-Path -LiteralPath $mpv)) $(if ($mpv) { $mpv } else { "no `$MpvPath in $DashboardScript" }) `
+        'install mpv there, or change $MpvPath at the top of mpv.cam.autolayout.autorestart.ps1'
+
+    $wt = Get-Command -Name 'wt.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    Add-Row 'Windows Terminal' 'all' ([bool]$wt) $(if ($wt) { $wt.Source } else { 'wt.exe is not on PATH' }) `
+        'install Windows Terminal from the Microsoft Store; the NVR and the dashboard open in it'
+
+    $scheduler = [bool](Get-Command -Name 'Register-ScheduledTask' -ErrorAction SilentlyContinue)
+    Add-Row 'ScheduledTasks module' 'all' $scheduler $(if ($scheduler) { 'available' } else { 'not available' }) `
+        'needs Windows 8 or later'
+
+    Add-Row 'camui.exe' 'ui' (Test-Path -LiteralPath $UiExePath) $UiExePath `
+        'cross-compile it with ui/build.sh (docs/go-toolchain.md is the one-time Go install), then run -Install again'
+
+    return $rows.ToArray()
+}
+
+
+function Get-CamInstallComponent {
+    <#
+        The components, in install order. Each one is a granular switch plus
+        a read-only test of whether it is already in place:
+
+            Test     returns Current (in place and starting the right thing),
+                     Present (something to remove) and Detail
+            Install  the granular install switch
+            Remove   the granular remove switch
+            Change   what installing it writes, for -WhatIf
+            Undo     what removing it deletes, for -WhatIf
+    #>
+    $relayConfig = $(if ($Config) { [string]$Config.RestreamerConfigPath } else { '' })
+
+    return @(
+        [pscustomobject]@{
+            Name    = 'restreamer config'
+            Key     = 'restreamer'
+            Change  = "write $relayConfig from cameras.json"
+            Undo    = "delete $relayConfig"
+            Test    = {
+                $path = [string]$Config.RestreamerConfigPath
+                if (-not (Test-Path -LiteralPath $path)) {
+                    return [pscustomobject]@{ Current = $false; Present = $false; Detail = "no MediaMTX config at $path" }
+                }
+                try {
+                    $check = Test-CamRelayConfigCurrent -Config $Config -PathMap (Get-CamRelayPathMap -Cameras (Get-CamList)) -ConfigPath $path
+                    return [pscustomobject]@{ Current = $check.Current; Present = $true; Detail = $check.Detail }
+                }
+                catch { return [pscustomobject]@{ Current = $false; Present = $true; Detail = $_.Exception.Message } }
+            }
+            Install = { & $RecorderScript -InstallRestreamer }
+            Remove  = { & $RecorderScript -RemoveRestreamer }
+        },
+        [pscustomobject]@{
+            Name    = 'recorder logon task'
+            Key     = 'recorder'
+            Change  = "register the task '$RecorderTaskName' and write its launcher $RecorderStubPath"
+            Undo    = "unregister the task '$RecorderTaskName' and delete its launcher $RecorderStubPath"
+            Test    = { Test-CamLogonTaskInstalled -TaskName $RecorderTaskName -StubPath $RecorderStubPath -Target $RecorderScript }
+            Install = { & $RecorderScript -InstallAutostart }
+            Remove  = { & $RecorderScript -RemoveAutostart }
+        },
+        [pscustomobject]@{
+            Name    = 'dashboard logon task'
+            Key     = 'dashboard'
+            Change  = "register the task '$DashboardTaskName' and write its launcher $DashboardStubPath"
+            Undo    = "unregister the task '$DashboardTaskName' and delete its launcher $DashboardStubPath"
+            Test    = { Test-CamLogonTaskInstalled -TaskName $DashboardTaskName -StubPath $DashboardStubPath -Target (Join-Path -Path $ScriptDir -ChildPath 'cam.ps1') }
+            Install = { Invoke-CamInstallDashboardAutostart }
+            Remove  = { Invoke-CamRemoveDashboardAutostart }
+        },
+        [pscustomobject]@{
+            Name    = 'UI logon task'
+            Key     = 'ui'
+            Change  = "register the task '$UiTaskName' and write its launcher $UiStubPath"
+            Undo    = "unregister the task '$UiTaskName' and delete its launcher $UiStubPath"
+            Test    = { Test-CamLogonTaskInstalled -TaskName $UiTaskName -StubPath $UiStubPath -Target $UiExePath }
+            Install = { Invoke-CamInstallUi }
+            Remove  = { Invoke-CamRemoveUi }
+        }
+    )
+}
+
+
+function Test-CamElevated {
+    return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+
+function Test-CamEventSourceRegistered {
+    return (Test-CamAlertEventSource -Source (Get-CamAlertEventSource))
+}
+
+
+function Invoke-CamInstallEventSourceStep {
+    & $RecorderScript -InstallEventSource
+}
+
+
+function Write-CamComponentResult {
+    <# The per-component table both -Install and -Uninstall end with. #>
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Result)
+
+    foreach ($row in $Result) {
+        $colour = 'Green'
+        if ($row.Status -in @('failed', 'skipped')) { $colour = 'Red' }
+        elseif ($row.Status -like 'would *') { $colour = 'Cyan' }
+        Write-Host ("  {0,-22} {1,-18} {2}" -f $row.Name, $row.Status, $row.Detail) -ForegroundColor $colour
+    }
+}
+
+
+function Invoke-CamInstallAll {
+    <#
+        -Install: preflight, then every component in order, then one result
+        per component. Returns the exit code: 0 only when every component is
+        in place, 1 when any failed or was skipped, or when the preflight
+        stopped it.
+
+        Components are independent, so a failure in one does not stop the
+        next. Each install is verified by running the component's test again
+        afterwards; the granular switch saying it worked is not the evidence.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
+
+    Write-CamSection 'install: prerequisites'
+    $checks = @(Get-CamInstallPreflight)
+    foreach ($check in $checks) {
+        if ($check.Ok) {
+            Write-Host ("  ok       {0,-22} {1}" -f $check.Name, $check.Detail)
+            continue
+        }
+        $label = $(if ($check.Hard) { 'MISSING' } else { 'missing' })
+        $colour = $(if ($check.Hard) { 'Red' } else { 'Yellow' })
+        Write-Host ("  {0,-8} {1,-22} {2}" -f $label, $check.Name, $check.Detail) -ForegroundColor $colour
+        Write-Host ("  {0,-8} {1,-22} fix: {2}" -f '', '', $check.Fix) -ForegroundColor $colour
+    }
+
+    $blocking = @($checks | Where-Object { -not $_.Ok -and $_.Hard })
+    if ($blocking.Count -gt 0) {
+        Write-Host ''
+        Write-Host ("{0} prerequisite(s) missing. Nothing was installed or changed. Fix them and run -Install again." -f $blocking.Count) -ForegroundColor Red
+        return 1
+    }
+
+    $results = New-Object System.Collections.ArrayList
+    foreach ($component in @(Get-CamInstallComponent)) {
+        $missing = @($checks | Where-Object { -not $_.Ok -and $_.Component -eq $component.Key })
+        if ($missing.Count -gt 0) {
+            [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'skipped'
+                    Detail = ('{0} is missing: {1}' -f $missing[0].Name, $missing[0].Fix) })
+            continue
+        }
+
+        try {
+            $before = & $component.Test
+            if ($before.Current) {
+                [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'already installed'; Detail = $before.Detail })
+                continue
+            }
+            if (-not $PSCmdlet.ShouldProcess($component.Change, ('install the ' + $component.Name))) {
+                if ($WhatIfPreference) {
+                    [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'would install'; Detail = $before.Detail })
+                }
+                else {
+                    [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'skipped'; Detail = 'declined at the prompt' })
+                }
+                continue
+            }
+            [void](& $component.Install)
+            $after = & $component.Test
+            if ($after.Current) {
+                [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'installed'; Detail = $after.Detail })
+            }
+            else {
+                [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'failed'; Detail = ('still not in place: ' + $after.Detail) })
+            }
+        }
+        catch {
+            [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'failed'; Detail = $_.Exception.Message })
+        }
+    }
+
+    Write-CamSection 'install: result'
+    Write-CamComponentResult -Result $results.ToArray()
+
+    # Optional, and never part of the exit code: without it every alert still
+    # reaches the Application log under the fallback source.
+    Write-Host ''
+    if (Test-CamEventSourceRegistered) {
+        Write-Host '  event source           already registered' -ForegroundColor Green
+    }
+    elseif (-not (Test-CamElevated)) {
+        Write-Host '  OPTIONAL  the IPCCTV event source needs an elevated session once. From an elevated PowerShell here:' -ForegroundColor DarkGray
+        Write-Host '              .\cam.recorder.ps1 -InstallEventSource' -ForegroundColor DarkGray
+        Write-Host '            Alerts reach the Application log without it.' -ForegroundColor DarkGray
+    }
+    elseif ($PSCmdlet.ShouldProcess('the IPCCTV Application-log event source', 'register')) {
+        try { Invoke-CamInstallEventSourceStep }
+        catch { Write-Host ("  event source           not registered: {0}. It is optional." -f $_.Exception.Message) -ForegroundColor Yellow }
+    }
+
+    $bad = @($results | Where-Object { $_.Status -in @('failed', 'skipped') })
+    Write-Host ''
+    if ($bad.Count -gt 0) {
+        Write-Host ("{0} component(s) not in place: {1}" -f $bad.Count, (($bad | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Red
+        return 1
+    }
+    if ($WhatIfPreference) {
+        Write-Host 'That is the plan. Nothing was changed.' -ForegroundColor Cyan
+    }
+    else {
+        Write-Host 'Everything is installed. Nothing was started: .\cam.ps1 -Start does that now, and logon does it from here on.' -ForegroundColor Cyan
+    }
+    return 0
+}
+
+
+function Invoke-CamUninstallAll {
+    <#
+        -Uninstall: removes every component, in the reverse of install order,
+        and verifies each removal by testing again. Returns 0 unless a removal
+        failed. A component with nothing left of it is reported as not
+        installed, which is what makes a second run a clean no-op.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
+
+    $components = @(Get-CamInstallComponent)
+    [array]::Reverse($components)
+
+    $results = New-Object System.Collections.ArrayList
+    foreach ($component in $components) {
+        try {
+            $before = & $component.Test
+            if (-not $before.Present) {
+                [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'not installed'; Detail = $before.Detail })
+                continue
+            }
+            if (-not $PSCmdlet.ShouldProcess($component.Undo, ('remove the ' + $component.Name))) {
+                $status = $(if ($WhatIfPreference) { 'would remove' } else { 'kept' })
+                [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = $status; Detail = $before.Detail })
+                continue
+            }
+            [void](& $component.Remove)
+            $after = & $component.Test
+            if ($after.Present) {
+                [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'failed'; Detail = ('still there: ' + $after.Detail) })
+            }
+            else {
+                [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'removed'; Detail = '' })
+            }
+        }
+        catch {
+            [void]$results.Add([pscustomobject]@{ Name = $component.Name; Status = 'failed'; Detail = $_.Exception.Message })
+        }
+    }
+
+    Write-CamSection 'uninstall: result'
+    Write-CamComponentResult -Result $results.ToArray()
+    Write-Host ''
+    Write-Host ("  kept      the logs in {0}, the archive, cameras.json, recorder.config.json and the credentials" -f (Get-CamAutostartDir)) -ForegroundColor DarkGray
+    Write-Host '  running   nothing was stopped. .\cam.ps1 -Stop stops the recorder and the dashboard; it leaves the UI' -ForegroundColor DarkGray
+    Write-Host '            running on purpose, and -Status prints the pid serving it.' -ForegroundColor DarkGray
+    if (Test-CamEventSourceRegistered) {
+        Write-Host '  alerts    the IPCCTV event source is left registered. Removing it needs an elevated session:' -ForegroundColor DarkGray
+        Write-Host '              Remove-EventLog -Source IPCCTV' -ForegroundColor DarkGray
+    }
+
+    $failed = @($results | Where-Object { $_.Status -eq 'failed' })
+    Write-Host ''
+    if ($failed.Count -gt 0) {
+        Write-Host ("{0} component(s) could not be removed: {1}" -f $failed.Count, (($failed | ForEach-Object { $_.Name }) -join ', ')) -ForegroundColor Red
+        return 1
+    }
+    if ($WhatIfPreference) { Write-Host 'That is the plan. Nothing was changed.' -ForegroundColor Cyan }
+    return 0
+}
+
+
 function Get-CamReturnedCode {
     <#
         The exit code one of the Invoke-Cam* functions returned.
@@ -904,7 +1314,13 @@ function Get-CamReturnedCode {
 }
 
 
+if ($PSBoundParameters.ContainsKey('WhatIf') -and $PSCmdlet.ParameterSetName -notin @('Install', 'Uninstall')) {
+    throw '-WhatIf previews -Install and -Uninstall only.'
+}
+
 switch ($PSCmdlet.ParameterSetName) {
+    'Install' { exit (Get-CamReturnedCode -Returned (Invoke-CamInstallAll)) }
+    'Uninstall' { exit (Get-CamReturnedCode -Returned (Invoke-CamUninstallAll)) }
     'Stop' { exit (Get-CamReturnedCode -Returned (Invoke-CamStopAll)) }
     'Start' { exit (Get-CamReturnedCode -Returned (Invoke-CamStartAll)) }
     'InstallDashboardAutostart' { exit (Invoke-CamInstallDashboardAutostart) }

@@ -664,15 +664,28 @@ function Invoke-CamTestScript {
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [string[]]$Arguments = @(),
-        [int]$TimeoutSeconds = 300
+        [int]$TimeoutSeconds = 300,
+        # Variables the child sees in place of this process's, such as a
+        # sandbox LOCALAPPDATA. Restored here once the child has started.
+        [hashtable]$Environment = @{}
     )
 
     $outFile = Join-Path -Path $env:TEMP -ChildPath ('cam-test-out-' + [Guid]::NewGuid().ToString('n').Substring(0, 8) + '.txt')
     $errFile = "$outFile.err"
     $argumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Path) + $Arguments
 
-    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentList -PassThru `
-        -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    $saved = @{}
+    foreach ($key in $Environment.Keys) {
+        $saved[$key] = [Environment]::GetEnvironmentVariable($key)
+        [Environment]::SetEnvironmentVariable($key, $Environment[$key])
+    }
+    try {
+        $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $argumentList -PassThru `
+            -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    }
+    finally {
+        foreach ($key in $saved.Keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key]) }
+    }
     [void]$process.Handle
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         try { $process.Kill() } catch { }
@@ -1060,10 +1073,12 @@ function Wait-CamTestProcessExit {
 
 function Get-CamTestRecorderFunctions {
     <#
-        The named functions of cam.recorder.ps1 as one scriptblock, for the
-        caller to dot-source into its own scope:
+        The named functions of cam.recorder.ps1 - or of -Script, such as
+        cam.ps1 - as one scriptblock, for the caller to dot-source into its
+        own scope:
 
             . (Get-CamTestRecorderFunctions -Name 'Invoke-CamPrune', 'Write-CamHost')
+            . (Get-CamTestRecorderFunctions -Script 'cam.ps1' -Name 'Invoke-CamInstallAll')
 
         Taken from the parsed file rather than by dot-sourcing the script,
         which would run its entry point. Named, never all: the recorder has
@@ -1073,9 +1088,12 @@ function Get-CamTestRecorderFunctions {
         product's for every call the loaded functions make, because PowerShell
         resolves commands through the caller's scopes.
     #>
-    param([Parameter(Mandatory = $true)][string[]]$Name)
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Name,
+        [string]$Script = 'cam.recorder.ps1'
+    )
 
-    $path = Join-Path -Path (Get-CamTestRepo) -ChildPath 'cam.recorder.ps1'
+    $path = Join-Path -Path (Get-CamTestRepo) -ChildPath $Script
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$null)
     $found = @{}
     foreach ($definition in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
@@ -1084,7 +1102,7 @@ function Get-CamTestRecorderFunctions {
 
     $text = New-Object System.Text.StringBuilder
     foreach ($wanted in $Name) {
-        if (-not $found.ContainsKey($wanted)) { throw "cam.recorder.ps1 defines no function '$wanted'." }
+        if (-not $found.ContainsKey($wanted)) { throw "$Script defines no function '$wanted'." }
         [void]$text.AppendLine($found[$wanted])
     }
     return [scriptblock]::Create($text.ToString())
@@ -1338,4 +1356,139 @@ function New-CamTestSegment {
     [System.IO.File]::WriteAllBytes($path, $content)
     Set-CamTestFileAge -Path $path -Time $Time
     return $path
+}
+
+
+# ---------------------------------------------------------------------------
+# -Install / -Uninstall
+# ---------------------------------------------------------------------------
+
+function Get-CamTestLogonTaskSnapshot {
+    <#
+        Every registered task whose name starts with IPCCTV-, one line each:
+        path, name, state and a sha256 of its exported XML. Two snapshots that
+        compare equal mean no such task was added, removed or re-registered.
+    #>
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $lines = foreach ($task in @(Get-ScheduledTask -TaskName 'IPCCTV-*' -ErrorAction SilentlyContinue)) {
+            $xml = Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath
+            $hash = [System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($xml))).Replace('-', '')
+            '{0}{1} {2} {3}' -f $task.TaskPath, $task.TaskName, $task.State, $hash.Substring(0, 16)
+        }
+    }
+    finally { $sha.Dispose() }
+    return @($lines | Sort-Object)
+}
+
+
+function Get-CamTestLauncherManifest {
+    <#
+        Get-CamTestFileManifest of a launcher folder, with every log reduced
+        to its presence: a running camui appends to camui.log, so its hash
+        changes without anything here having touched it. Empty when the
+        folder does not exist.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) { return @{} }
+    $manifest = Get-CamTestFileManifest -Path $Path
+    foreach ($key in @($manifest.Keys)) {
+        if ($key -match '\.log(\.prev)?$') { $manifest[$key] = 'log' }
+    }
+    return $manifest
+}
+
+
+function New-CamTestInstallSandbox {
+    <#
+        A New-CamTestSandbox that cam.ps1 -Install can run in. It adds cam.ps1
+        and the dashboard script, a LOCALAPPDATA of its own for the launchers,
+        a MediaMTX config path inside the sandbox, and a stand-in file for
+        every binary the preflight looks for - ffmpeg, MediaMTX, mpv and
+        camui.exe - so that each one can be taken away by a check.
+
+        -TaskPrefix rewrites the three logon task names in the sandbox's copy
+        of cam.ps1 and cam.recorder.ps1, so a sandbox that really installs
+        cannot touch the Operator's IPCCTV-* tasks. It throws if any real name
+        is left in either file. Without it the sandbox keeps the real names and
+        must only ever be run with -WhatIf.
+
+        -MediaMtxPath points RestreamerExePath at a real binary, for a sandbox
+        whose -InstallRestreamer will run it with --version.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [string]$TaskPrefix,
+        [string]$MediaMtxPath
+    )
+
+    $cameras = @([pscustomobject]@{ Name = 'Front Entrance'; IP = '10.254.254.254'; Quality = 'stream1'; Record = $false })
+    $dir = Join-Path -Path $env:TEMP -ChildPath ("cam-tests\" + $Name)
+    $bin = Join-Path -Path $dir -ChildPath 'bin'
+    $mediamtx = $(if ($MediaMtxPath) { $MediaMtxPath } else { Join-Path -Path $bin -ChildPath 'mediamtx.exe' })
+    $sandbox = New-CamTestSandbox -Name $Name -Cameras $cameras -Config @{
+        FfmpegPath           = (Join-Path -Path $bin -ChildPath 'ffmpeg.exe')
+        RestreamerExePath    = $mediamtx
+        RestreamerConfigPath = (Join-Path -Path $dir -ChildPath 'mediamtx\mediamtx.yml')
+    }
+
+    $repo = Get-CamTestRepo
+    foreach ($file in @('cam.ps1', 'mpv.cam.autolayout.autorestart.ps1')) {
+        Copy-Item -LiteralPath (Join-Path -Path $repo -ChildPath $file) -Destination $dir -Force
+    }
+    [void](New-Item -ItemType Directory -Path $bin -Force)
+    foreach ($file in @('ffmpeg.exe', 'mediamtx.exe', 'mpv.com')) {
+        [System.IO.File]::WriteAllText((Join-Path -Path $bin -ChildPath $file), 'stand-in')
+    }
+    [System.IO.File]::WriteAllText((Join-Path -Path $dir -ChildPath 'camui.exe'), 'stand-in')
+
+    $dashboard = Join-Path -Path $dir -ChildPath 'mpv.cam.autolayout.autorestart.ps1'
+    $text = [System.IO.File]::ReadAllText($dashboard)
+    $mpv = Join-Path -Path $bin -ChildPath 'mpv.com'
+    $text = [regex]::Replace($text, '(?m)^\$MpvPath = "[^"]*"', ('$MpvPath = "{0}"' -f $mpv))
+    if (-not $text.Contains($mpv)) { throw 'could not point the sandbox dashboard at its stand-in mpv' }
+    [System.IO.File]::WriteAllText($dashboard, $text)
+
+    $tasks = [ordered]@{ Recorder = 'IPCCTV-Recorder'; Dashboard = 'IPCCTV-Dashboard'; Ui = 'IPCCTV-Ui' }
+    if ($TaskPrefix) {
+        foreach ($file in @('cam.ps1', 'cam.recorder.ps1')) {
+            $path = Join-Path -Path $dir -ChildPath $file
+            $text = [System.IO.File]::ReadAllText($path)
+            foreach ($key in @($tasks.Keys)) {
+                $text = $text.Replace(("= '{0}'" -f $tasks[$key]), ("= '{0}{1}'" -f $TaskPrefix, $key))
+            }
+            if ($text -match "'IPCCTV-(Recorder|Dashboard|Ui)'") { throw "the sandbox $file still names a real task: $($Matches[0])" }
+            [System.IO.File]::WriteAllText($path, $text)
+        }
+        foreach ($key in @($tasks.Keys)) { $tasks[$key] = $TaskPrefix + $key }
+    }
+
+    $localAppData = Join-Path -Path $dir -ChildPath 'localappdata'
+    [void](New-Item -ItemType Directory -Path $localAppData -Force)
+    Add-Member -InputObject $sandbox -NotePropertyName 'Cam' -NotePropertyValue (Join-Path -Path $dir -ChildPath 'cam.ps1')
+    Add-Member -InputObject $sandbox -NotePropertyName 'Bin' -NotePropertyValue $bin
+    Add-Member -InputObject $sandbox -NotePropertyName 'Dashboard' -NotePropertyValue $dashboard
+    Add-Member -InputObject $sandbox -NotePropertyName 'LocalAppData' -NotePropertyValue $localAppData
+    Add-Member -InputObject $sandbox -NotePropertyName 'LauncherDir' -NotePropertyValue (Join-Path -Path $localAppData -ChildPath 'IPCCTV')
+    Add-Member -InputObject $sandbox -NotePropertyName 'TaskNames' -NotePropertyValue $tasks
+    return $sandbox
+}
+
+
+function Get-CamTestComponentStatus {
+    <#
+        The status column of one row of the table -Install and -Uninstall end
+        with, or $null when there is no row for that component.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text,
+        [Parameter(Mandatory = $true)][string]$Component
+    )
+
+    $pattern = '(?m)^  ' + [regex]::Escape($Component) +
+        '\s+(already installed|would install|not installed|would remove|installed|skipped|failed|removed|kept)(\s|$)'
+    $match = [regex]::Match($Text, $pattern)
+    if (-not $match.Success) { return $null }
+    return $match.Groups[1].Value
 }

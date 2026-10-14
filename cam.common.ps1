@@ -4819,6 +4819,90 @@ function Remove-CamLauncherStub {
 }
 
 
+function Get-CamLogonTaskAction {
+    <#
+        What a logon task runs for one launcher stub: powershell.exe, hidden,
+        with the stub as its -File. Register-CamLogonTask registers exactly
+        this and Test-CamLogonTaskInstalled expects exactly this, so the two
+        cannot disagree about what a correctly installed task looks like.
+    #>
+    param([Parameter(Mandatory = $true)][string]$StubPath)
+
+    return [pscustomobject]@{
+        Execute   = (Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe')
+        Arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $StubPath)
+    }
+}
+
+
+function Get-CamLauncherStubTarget {
+    <#
+        The path a generated launcher starts - the $Target line of a script
+        launcher, the $Exe line of the UI's - or $null when there is no stub
+        or no such line. Reads the file only.
+    #>
+    param([Parameter(Mandatory = $true)][string]$StubPath)
+
+    if (-not (Test-Path -LiteralPath $StubPath)) { return $null }
+    $text = [System.IO.File]::ReadAllText($StubPath)
+    $match = [regex]::Match($text, '(?m)^\$(?:Target|Exe)\s*=\s*''((?:[^'']|'''')*)''\s*$')
+    if (-not $match.Success) { return $null }
+    return $match.Groups[1].Value.Replace("''", "'")
+}
+
+
+function Test-CamLogonTaskInstalled {
+    <#
+        Whether one logon task is in place and starts what it should, without
+        changing anything. Current means all four hold: the task is
+        registered, it runs exactly the action Register-CamLogonTask gives it,
+        its launcher exists, and the launcher starts Target - so a task left
+        pointing at a repository that has since moved is not current. Present
+        means there is something to remove: the task, the launcher, or both.
+
+        It does not compare the launcher's text with what today's template
+        would write. A launcher from an older version of these scripts still
+        counts as current; the granular install switch, or -Uninstall then
+        -Install, rewrites it.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [Parameter(Mandatory = $true)][string]$StubPath,
+        [Parameter(Mandatory = $true)][string]$Target
+    )
+
+    $task = Get-CamLogonTask -TaskName $TaskName
+    $stubExists = Test-Path -LiteralPath $StubPath
+    $result = [pscustomobject]@{ Current = $false; Present = ([bool]$task -or $stubExists); Detail = '' }
+
+    if (-not $task) {
+        $result.Detail = $(if ($stubExists) { "no task named '$TaskName', but its launcher $StubPath is there" } else { "no task named '$TaskName'" })
+        return $result
+    }
+
+    $expected = Get-CamLogonTaskAction -StubPath $StubPath
+    $actions = @($task.Actions)
+    if ($actions.Count -ne 1 -or $actions[0].Execute -ne $expected.Execute -or $actions[0].Arguments -ne $expected.Arguments) {
+        $result.Detail = ("the task '{0}' runs '{1}', not the launcher {2}" -f $TaskName,
+            ((@($actions | ForEach-Object { '{0} {1}' -f $_.Execute, $_.Arguments })) -join '; '), $StubPath)
+        return $result
+    }
+    if (-not $stubExists) {
+        $result.Detail = "the task '$TaskName' is registered but its launcher $StubPath is missing"
+        return $result
+    }
+    $actual = Get-CamLauncherStubTarget -StubPath $StubPath
+    if ($actual -ne $Target) {
+        $result.Detail = ("the launcher {0} starts '{1}', not {2}" -f $StubPath, $actual, $Target)
+        return $result
+    }
+
+    $result.Current = $true
+    $result.Detail = ("task '{0}' ({1}) -> {2} -> {3}" -f $TaskName, [string]$task.State, $StubPath, $Target)
+    return $result
+}
+
+
 function Register-CamLogonTask {
     <#
         Registers a Scheduled Task that runs one launcher stub at logon as the
@@ -4846,8 +4930,9 @@ function Register-CamLogonTask {
         throw 'The ScheduledTasks module is not available on this machine, so the task cannot be registered. Windows 8 or later provides it.'
     }
 
-    $powershell = Join-Path -Path $env:SystemRoot -ChildPath 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}"' -f $StubPath)
+    $taskAction = Get-CamLogonTaskAction -StubPath $StubPath
+    $powershell = $taskAction.Execute
+    $arguments = $taskAction.Arguments
     $account = Get-CamLogonTaskAccount
     $existing = Get-CamLogonTask -TaskName $TaskName
 
