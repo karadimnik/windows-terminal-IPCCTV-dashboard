@@ -1245,3 +1245,22 @@ The Operator approved all four. Documentation only; no code touched.
       scoped to reporting and identification. Decide whether to close that blind spot.
 
 - [x] **[83]** DROPPED by the Operator 2026-10-14. A date-partitioned layout (`<Cam>\<YYYY-MM-DD>\...`) was proposed so old days could be deleted safely, then withdrawn: it adds no deletion safety once the pruner only touches recording-container files whose names match the recorder's own scheme, and it would cost a midnight failure mode - ffmpeg's segment muxer does not create a missing date folder (verified: "Failed to open segment", exit -2; `-strftime_mkdir` has no effect), so the supervisor would have to pre-create tomorrow's folder or recording dies at midnight - plus changes to seven readers. The archive stays one folder per camera. Safety comes from the [24] hardening instead: container-only allowlist, name pattern, root guard, ownership marker, and an oldest-versus-newest sanity check before any deletion.
+
+- [ ] **[84]** **REGRESSION in [81], hit in production 2026-10-14 20:03.** An orderly `cam.ps1 -Stop -Recorder`
+      followed by `-Start -Recorder` failed three times and left nothing recording for 5 min 34 s
+      (last segment closed 20:03:17, next began 20:08:51). Two defects, both in the start path's
+      "clear a dead NVR" branch (`Start-CamNvrWindow`, `cam.common.ps1`), the path flagged as "reasoned
+      and code-verified, untested at runtime" when [81] merged:
+      (a) `Stop-CamNvr` terminates the warden, so the warden's `finally` never runs and its published
+      record `_state\window-cam.nvr.json` is left behind. The record names the NVR window by handle,
+      and that handle is the Operator's own shared Windows Terminal window (`nk`, 0x1190726, hosting
+      his tabs), which is alive. The presence reader only checks that the window exists, so a dead
+      warden's record reports the NVR window as PRESENT.
+      (b) The wait loop after the clear re-checks the remembered handle with `IsTerminalWindow` and
+      expects it to close. A window shared with the Operator's tabs never closes, so the start throws
+      "Nothing is recording, but 1 window(s) ... are still there" after 10 s, every time.
+      Recovered by hand: stale record backed up and removed, then `-Start -Recorder` succeeded.
+      Fix: a record is valid only while the warden it names is alive (and the job exists); `Stop-CamNvr`
+      removes the record it killed; the post-clear wait must not wait for a window that is not the NVR's
+      own. Prove with a sandbox reproduction of exactly this sequence (shared window, foreign tab active,
+      warden terminated) driving the real start-path decision, never the live NVR.
