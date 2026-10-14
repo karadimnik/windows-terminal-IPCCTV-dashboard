@@ -2673,6 +2673,13 @@ function Invoke-CamPrune {
              'prune stop:' line saying where each rule stopped and why.
           5. When nothing can be deleted, say so loudly and keep recording. An
              NVR that stops recording because the disk is full has failed twice.
+             Entering that state alerts once (event id 121); the next alert
+             needs a run that was not blocked in between.
+          8. The age rule has a circuit breaker (Get-CamAgePruneBreach): a run
+             whose expired set is more than MaxAgePruneFraction of the archive,
+             by count or by bytes, deletes nothing by age, logs and alerts once
+             per episode (event id 122), and carries on. Never the watermark:
+             a full disk must keep pruning or recording stops.
 
         The loop is bounded by the candidate list, so an undeletable file is
         skipped rather than retried, and an archive that cannot be shrunk logs
@@ -2706,6 +2713,7 @@ function Invoke-CamPrune {
         Deletions    = @()
         RootRefusal  = ''
         ClockRefusal = ''
+        AgeBreaker   = ''
         StopLine     = ''
         Marker       = (Test-CamArchiveMarker -Config $Config)
         Message      = ''
@@ -2872,6 +2880,24 @@ function Invoke-CamPrune {
     $ageStop = 'age rule off'
     if ($ageRule) {
         $cutoff = $now.AddDays(-$retentionDays)
+        $expired = @($candidates | Where-Object { $_.LastWriteTime -lt $cutoff })
+        $result.AgeBreaker = Get-CamAgePruneBreach -Expired $expired -Segments $segmentsSeen -Limit ([double]$Config.MaxAgePruneFraction)
+    }
+    if ($result.AgeBreaker) {
+        $ageStop = 'age rule HELD by the circuit breaker, nothing deleted by age: ' + $result.AgeBreaker
+        # Logged and alerted when the episode starts, not every cycle it lasts.
+        if (-not $DryRun -and (-not $State -or -not $State.AgeBreakerTripped)) {
+            $line = "PRUNE AGE RULE HELD by the circuit breaker: {0}. Nothing is deleted by age this run; the free-space watermark still runs and recording continues. If MaxRetentionDays is mistyped, correct it; if it is meant, lower it in steps or raise MaxAgePruneFraction (1.0 switches the brake off)." -f $result.AgeBreaker
+            Write-CamLog -Path $SupervisorLog -Message $line -MaxBytes $maxBytes
+            Write-CamHost -Message $line -Colour 'Red'
+            if ($State) {
+                [void](Send-CamAlert -Title 'the age rule was held - MaxRetentionDays would delete most of the archive' -Message $line `
+                    -EventId 122 -EntryType 'Error' -LogPath $SupervisorLog -LogMaxBytes $maxBytes)
+                $State.AgeBreakerTripped = $true
+            }
+        }
+    }
+    elseif ($ageRule) {
         $ageDeleted = 0
         $firstKept = $null
         foreach ($file in $candidates) {
@@ -2887,6 +2913,11 @@ function Invoke-CamPrune {
         else {
             $ageStop = "age rule: {0} deletion(s), every candidate was older than the cutoff {1} - nothing deletable left" -f $ageDeleted, (& $stamp $cutoff)
         }
+    }
+
+    if (-not $result.AgeBreaker -and $State -and $State.AgeBreakerTripped -and -not $DryRun) {
+        $State.AgeBreakerTripped = $false
+        Write-CamLog -Path $SupervisorLog -Message 'prune: the age rule is within MaxAgePruneFraction again, the circuit breaker is reset' -MaxBytes $maxBytes
     }
 
     # (3) watermark, from the free space the age rule left
@@ -2943,6 +2974,12 @@ function Invoke-CamPrune {
             (Format-CamNumber -Value $result.FreeGBAfter), (Format-CamNumber -Value $reserveGB), $result.Candidates, $result.Failed, @($result.Protected).Count
         Write-CamLog -Path $SupervisorLog -Message $result.Message -MaxBytes $maxBytes
         Write-CamHost -Message $result.Message -Colour 'Red'
+        # Once on entering the state, not every PruneIntervalSeconds it lasts.
+        if ($State -and -not $State.BlockedAlerted) {
+            [void](Send-CamAlert -Title 'pruning is blocked - the disk is filling' -Message $result.Message `
+                -EventId 121 -EntryType 'Error' -LogPath $SupervisorLog -LogMaxBytes $maxBytes)
+            $State.BlockedAlerted = $true
+        }
     }
     elseif ($result.Blocked) {
         $result.Message = "would be BLOCKED: free {0} GB is below the {1} GB reserve and only {2} segment(s) could be deleted, {3} protected as in-progress" -f `
@@ -2964,6 +3001,7 @@ function Invoke-CamPrune {
         $State.DeletedTotal = $State.DeletedTotal + $result.Deleted
         $State.FreedBytes = $State.FreedBytes + $result.FreedBytes
         $State.Blocked = $result.Blocked
+        if (-not $result.Blocked) { $State.BlockedAlerted = $false }
         if ($result.Message) { $State.LastMessage = $result.Message }
     }
 
@@ -3343,7 +3381,7 @@ function Invoke-CamSupervisor {
     $children = @{}
     $cameras = @()
     $archive = $null
-    $pruneState = @{ LastRunAt = $null; DeletedTotal = 0; FreedBytes = 0; Blocked = $false; LastMessage = ''; RefusalAlerted = ''; ClockRefused = $false }
+    $pruneState = @{ LastRunAt = $null; DeletedTotal = 0; FreedBytes = 0; Blocked = $false; LastMessage = ''; RefusalAlerted = ''; ClockRefused = $false; BlockedAlerted = $false; AgeBreakerTripped = $false }
 
     # The pruner deletes nothing under a root this recorder has not claimed.
     # Claiming happens here, once per start, and can never stop recording:

@@ -189,6 +189,11 @@ function Get-CamConfigDefault {
         PruneHysteresisGB    = 5
         PruneIntervalSeconds = 300
         MaxRetentionDays     = $null
+        # The age rule's circuit breaker: a run whose MaxRetentionDays would
+        # delete more than this share of the archive - by segment count or by
+        # bytes - deletes nothing by age. 1.0 switches the brake off. The
+        # free-space watermark is never held back by it.
+        MaxAgePruneFraction  = 0.5
 
         # Dashboard layout. The strip the dashboard reserves along the bottom
         # of the screen for cam.health.ps1:
@@ -360,6 +365,13 @@ function Get-CamConfig {
     if ([string]::IsNullOrWhiteSpace([string]$config.RootPath)) {
         throw 'RootPath must not be empty.'
     }
+    $fraction = 0.0
+    $parsed = [double]::TryParse([string]$config.MaxAgePruneFraction, [System.Globalization.NumberStyles]::Float,
+        [System.Globalization.CultureInfo]::InvariantCulture, [ref]$fraction)
+    if (-not $parsed -or -not ($fraction -ge 0.01 -and $fraction -le 1.0)) {
+        throw "MaxAgePruneFraction must be a number from 0.01 to 1.0 - the largest share of the archive one age-rule run may delete, 1.0 to switch the brake off - got '$($config.MaxAgePruneFraction)'."
+    }
+    $config.MaxAgePruneFraction = $fraction
 
     return $config
 }
@@ -1721,12 +1733,16 @@ function Get-CamAlertEventIdList {
           110  one camera has stopped recording
           120  pruning is disabled: RootPath is unsafe or not the recorder's
                own archive, so the disk will fill
+          121  pruning is blocked: free space is below ReserveGB and nothing
+               deletable is left, so the disk is filling
+          122  the age rule's circuit breaker held a run that would have
+               deleted more than MaxAgePruneFraction of the archive
 
         103 is its own ID rather than another 100 because the log is where the
         Operator reads back what happened, and "somebody closed the window" and
         "the supervisor died" need different answers from him.
     #>
-    return @(100, 101, 102, 103, 110, 120)
+    return @(100, 101, 102, 103, 110, 120, 121, 122)
 }
 
 
@@ -2005,6 +2021,35 @@ function Get-CamPruneClockProblem {
             (& $stamp $Now), [int64]$lag, $newestFile.FullName, (& $stamp $newestFile.LastWriteTime), [int64]$bound)
     }
     return ''
+}
+
+
+function Get-CamAgePruneBreach {
+    <#
+        Why the age rule must not run this time, or '' when it may. $Expired
+        are the files it would delete - past every other gate - and $Segments
+        every segment the file gate accepted, which is the archive the share
+        is taken of. A share above $Limit by count OR by bytes is a breach:
+        a retention that suddenly reaches that far back is far more likely a
+        mistyped MaxRetentionDays than an intended one.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Expired,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Segments,
+        [Parameter(Mandatory = $true)][double]$Limit
+    )
+
+    if ($Expired.Count -eq 0) { return '' }
+    $expiredBytes = [double](@($Expired | Measure-Object -Property Length -Sum).Sum)
+    $totalBytes = [double](@($Segments | Measure-Object -Property Length -Sum).Sum)
+    $countShare = $Expired.Count / $Segments.Count
+    $byteShare = $(if ($totalBytes -gt 0) { $expiredBytes / $totalBytes } else { 0.0 })
+    if ($countShare -le $Limit -and $byteShare -le $Limit) { return '' }
+
+    return ("the age rule would delete {0} of {1} segments ({2}%) and {3} of {4} GB ({5}%) of the bytes in the archive, more than MaxAgePruneFraction {6} allows" -f `
+        $Expired.Count, $Segments.Count, (Format-CamNumber -Value ($countShare * 100) -Format '0.0'),
+        (Format-CamNumber -Value ($expiredBytes / 1GB)), (Format-CamNumber -Value ($totalBytes / 1GB)),
+        (Format-CamNumber -Value ($byteShare * 100) -Format '0.0'), (Format-CamNumber -Value $Limit -Format '0.##'))
 }
 
 

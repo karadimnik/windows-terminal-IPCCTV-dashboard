@@ -1257,6 +1257,25 @@ function Remove-CamTestTree {
 }
 
 
+function New-CamTestAlertRecorder {
+    <#
+        A list for a check's Send-CamAlert stub to record into. The stub itself
+        has to be defined in the check's own scope to replace the product's, so
+        each check writes the one line that does it:
+
+            function Send-CamAlert { param($Title, $Message, $EventId, $EntryType, $LogPath, $LogMaxBytes) Add-CamTestAlertCall -List $recordedAlerts -Title $Title -Message $Message -EventId $EventId -EntryType $EntryType }
+    #>
+    return , (New-Object System.Collections.ArrayList)
+}
+
+function Add-CamTestAlertCall {
+    <# Records one Send-CamAlert call and answers the way the product's does. #>
+    param($List, $Title, $Message, $EventId, $EntryType)
+    [void]$List.Add([pscustomobject]@{ Title = [string]$Title; Message = [string]$Message; EventId = [int]$EventId; EntryType = [string]$EntryType })
+    return @{ Title = $Title; Message = $Message; Channels = 'recorded by the test stub, not shown' }
+}
+
+
 function New-CamTestPruneRoot {
     <#
         An empty archive root at %TEMP%\cam-tests\<Name>\archive with a config
