@@ -27,7 +27,7 @@ If the repository arrived as a downloaded `.zip`, Windows marks every file in it
 
 ## The steps
 
-Clone or download the repository to a dedicated folder, then work through this order. Steps 1 to 3 give you the dashboard, steps 4 to 8 add recording, and steps 9 to 11 add the browser UI.
+Clone or download the repository to a dedicated folder, then work through this order. Steps 1 to 5 prepare the cameras and the recorder, step 6 builds the UI, step 7 installs everything that starts at logon - [Install and uninstall](../README.md#install-and-uninstall) in the README says what it does - and step 8 starts it.
 
 ```powershell
 # 1. Launch the dashboard once. It prompts for the camera credentials, writes
@@ -43,31 +43,14 @@ copy recorder.config.example.json recorder.config.json
 
 # 4. Pre-flight the recorder. Close the dashboard first: this probes the
 #    cameras, and they allow only two sessions each. Leave it closed until
-#    step 7, which brings it back up in the right order; or reopen it by
+#    step 8, which brings it back up in the right order; or reopen it by
 #    hand with the step 2 command if you want it now.
 .\cam.recorder.ps1 -SelfTest
 
-# 5. Generate the relay config from cameras.json. No credential is written
-#    to it. Not using MediaMTX? Then skip this AND set RestreamerEnabled to
-#    false in recorder.config.json - left true with no relay to start, the
-#    supervisor retries it on a backoff and logs the failure every time,
-#    and each camera spends RelayReadyWaitSeconds (15 s) on its first start
-#    waiting for a relay path that will never serve.
-.\cam.recorder.ps1 -InstallRestreamer
-
-# 6. Opt cameras in. Nothing records until you do this.
+# 5. Opt cameras in. Nothing records until you do this.
 .\cam.recorder.ps1 -Enable all
 
-# 7. Start recording. The supervisor also starts and owns MediaMTX.
-.\cam.recorder.ps1 -Nvr
-
-# 8. Optional: have them start themselves at every logon instead. Two
-#    separate tasks on purpose - the recorder is headless, the grid needs an
-#    interactive desktop - and each switch touches only its own.
-.\cam.recorder.ps1 -InstallAutostart
-.\cam.ps1 -InstallDashboardAutostart
-
-# 9. Build the control UI. A bash command, so run it from WSL or any machine
+# 6. Build the control UI. A bash command, so run it from WSL or any machine
 #    with bash and Go 1.27 or newer - the Go in Debian/Ubuntu's apt is far
 #    older and will not build it; docs/go-toolchain.md installs a current one.
 #    camui.exe is gitignored, so it does not arrive with the repository. The
@@ -77,18 +60,28 @@ copy recorder.config.example.json recorder.config.json
 #    folder. Built anywhere else, copy it here.
 #      ui/build.sh
 
-# 10. Install the UI's logon task, then start it without waiting for a logon.
-.\cam.ps1 -InstallUi
-Start-ScheduledTask -TaskName IPCCTV-Ui
+# 7. Install: the relay config generated from cameras.json (no credential is
+#    written to it) and the three logon tasks - recorder, dashboard and UI.
+#    -WhatIf first shows every prerequisite and the plan and changes nothing.
+#    It starts nothing.
+.\cam.ps1 -Install -WhatIf
+.\cam.ps1 -Install
 
-# 11. Open the UI in a browser ON WINDOWS - http://127.0.0.1:8787/. A curl
-#     from inside WSL cannot reach it: WSL's loopback is its own, not the
-#     Windows one, so it fails to connect and the UI looks down when it is
-#     serving perfectly. Then check everything in one view.
+# 8. Start everything now rather than at the next logon: the recorder - its
+#    supervisor also starts and owns MediaMTX - then the dashboard. Then open
+#    the UI in a browser ON WINDOWS - http://127.0.0.1:8787/ - once its task
+#    has run (Start-ScheduledTask -TaskName IPCCTV-Ui does it now). A curl
+#    from inside WSL cannot reach it: WSL's loopback is its own, not the
+#    Windows one, so it fails to connect and the UI looks down when it is
+#    serving perfectly. Then check everything in one view.
+.\cam.ps1 -Start
+Start-ScheduledTask -TaskName IPCCTV-Ui
 .\cam.ps1 -Status
 ```
 
 `cameras.json`, `recorder.config.json` and `camera_creds.xml` are local to your machine and are not tracked by git.
+
+**Not using MediaMTX?** `-Install` treats it as a prerequisite. Without it, install the pieces with the granular switches instead - `.\cam.recorder.ps1 -InstallAutostart`, `.\cam.ps1 -InstallDashboardAutostart` and `.\cam.ps1 -InstallUi` - and set `RestreamerEnabled` to false in `recorder.config.json`. Left true with no relay to start, the supervisor retries it on a backoff and logs the failure every time, and each camera spends `RelayReadyWaitSeconds` (15 s) on its first start waiting for a relay path that will never serve.
 
 ## cameras.json
 

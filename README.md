@@ -7,7 +7,7 @@ A PowerShell toolkit that turns a Windows desktop into a camera wall and a 24/7 
 - **Just the monitor** - `.\cam.ps1 -Start -Dashboard`.
 - **Just the recorder** - `.\cam.ps1 -Start -Recorder`. Never `-Run` from an ordinary terminal: that console is adopted as a tab in the window you already have, and closing that window killed the supervisor four times on 2026-10-12.
 - **Everything** - `.\cam.ps1 -Start`. `-Stop` and `-Status` take the same `-Recorder` / `-Dashboard` scoping, and unscoped means all of it.
-- **Best way to start everything** - the three logon tasks `IPCCTV-Recorder`, `IPCCTV-Dashboard` and `IPCCTV-Ui`, which is what logging on already does. Not the UI, which cannot start itself; `cam.ps1 -Start` is the manual equivalent.
+- **Best way to start everything** - log on: `.\cam.ps1 -Install` puts three logon tasks in place, one each for the recorder, the dashboard and the UI - see [Install and uninstall](#install-and-uninstall). Not the UI, which cannot start itself; `cam.ps1 -Start` is the manual equivalent.
 - **The UI** - two processes serving <http://127.0.0.1:8787/>, started on demand or by its logon task, and deliberately left running by `cam.ps1 -Stop` so there is always something to start things from.
 - **Closing a terminal window** - each tier is a Win32 job with `KILL_ON_JOB_CLOSE` whose only handle is held by a warden outside the window, so closing the window sweeps every member and grandchild. The UI's two processes survive by design, and a hand-started `-Run` supervisor is outside all of it.
 
@@ -15,11 +15,9 @@ A PowerShell toolkit that turns a Windows desktop into a camera wall and a 24/7 
 
 ## It is running - where do I look?
 
-**<http://127.0.0.1:8787/>** - the control UI. Open it in a browser **on Windows**. Everything starts
-itself at logon, so the normal state is that you touch nothing and this URL is all you need.
+**<http://127.0.0.1:8787/>** - the control UI. Open it in a browser **on Windows**. Everything starts itself at logon, so the normal state is that you touch nothing and this URL is all you need.
 
-A `curl` to that address **from inside WSL cannot reach it** - WSL's loopback is its own, not the
-Windows one, so the connection is refused and a perfectly healthy UI looks down.
+A `curl` to that address **from inside WSL cannot reach it** - WSL's loopback is its own, not the Windows one, so the connection is refused and a perfectly healthy UI looks down.
 
 ### The three screens
 
@@ -29,8 +27,7 @@ Windows one, so the connection is refused and a perfectly healthy UI looks down.
 
 ### The three commands
 
-Everything the UI does is also a command, because the UI performs every action by calling the scripts.
-These three are the ones worth knowing:
+Everything the UI does is also a command, because the UI performs every action by calling the scripts. These three are the ones worth knowing:
 
 ```powershell
 .\cam.ps1 -Status   # what is running: processes, the relay, the three logon tasks. Not disk.
@@ -38,21 +35,19 @@ These three are the ones worth knowing:
 .\cam.ps1 -Stop     # stops everything and verifies it, orphans included. Leaves the UI running.
 ```
 
-For the disk figures - the rate footage is accruing at, free space and the days of headroom left - use
-`.\cam.recorder.ps1 -Status` or read the health strip. `cam.ps1 -Status` reports processes and
-services, not disk. Every other command is in [Reference](#reference).
+For the disk figures - the rate footage is accruing at, free space and the days of headroom left - use `.\cam.recorder.ps1 -Status` or read the health strip. `cam.ps1 -Status` reports processes and services, not disk. Every other command is in [Reference](#reference).
 
-Installing on a new machine is [docs/install.md](docs/install.md). Most readers never need it.
+Installing on a new machine is one command - [Install and uninstall](#install-and-uninstall).
 
 ## Something is wrong
 
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
 | **Nothing is recording and nothing is coming back.** | The NVR window was closed. The window titled `cam.nvr` **is** the NVR: closing it stops the supervisor, MediaMTX, every `ffmpeg` and the viewers, and **nothing restarts them**. You get one alert, event id 103. | `.\cam.ps1 -Start` |
-| **The strip says the supervisor is stale or missing.** | `status.json` is older than three status intervals, which means the supervisor is not running. | `.\cam.ps1 -Start`, or `.\cam.recorder.ps1 -Nvr` for the recorder alone, then read `_logs\recorder.log` for why it stopped. Do **not** start it with `-Run` from an ordinary terminal: that is the foreground supervisor, its console is adopted as a tab in the terminal window you already have, and closing that window kills it with no cleanup and orphaned children - it happened four times here on 2026-10-12. |
+| **The strip says the supervisor is stale or missing.** | `status.json` is older than three status intervals, which means the supervisor is not running. | `.\cam.ps1 -Start`, or `.\cam.recorder.ps1 -Nvr` for the recorder alone, then read `_logs\recorder.log` for why it stopped. Do **not** start it with `-Run` from an ordinary terminal - see [Autostart](#autostart) for why. |
 | **The supervisor crashed and came back by itself.** | Not a fault. The NVR pane is a host that restarts it, alerting as it goes (id 100) and again once it is recording (id 101), up to five times in thirty minutes. | Nothing. Out of budget it alerts once more (id 102) and stays down rather than looping all night; then `.\cam.ps1 -Start` after reading the log. |
 | **One camera has gone quiet.** | It has written nothing for `CameraDownAlertMinutes`, so it alerted under id 110 and has a `DownSince` in `status.json`. It is judged on file progress alone: a camera that cannot be reached has its `ffmpeg` restarted every backoff period, so the process being alive says nothing. | Check the camera and the network. The supervisor keeps retrying on its own. |
-| **The UI will not open.** | Either you are asking from inside WSL (see above), or `camui.exe` was never built - `-InstallUi` refuses to install a task that cannot work and tells you to run `ui/build.sh`. | Open it in a Windows browser, or ask from Windows PowerShell. `.\cam.ps1 -Status` prints whether anything is serving `127.0.0.1:8787` and which pid owns the port. If the task ran and nothing is serving, `%LOCALAPPDATA%\IPCCTV\autostart-ui.log` says how far the launcher got and `camui.log` beside it holds camui's own output. |
+| **The UI will not open.** | Either you are asking from inside WSL (see above), or `camui.exe` was never built, so `-Install` skipped the UI - see [Install and uninstall](#install-and-uninstall). | Open it in a Windows browser, or ask from Windows PowerShell. `.\cam.ps1 -Status` prints whether anything is serving `127.0.0.1:8787` and which pid owns the port. If the task ran and nothing is serving, `%LOCALAPPDATA%\IPCCTV\autostart-ui.log` says how far the launcher got and `camui.log` beside it holds camui's own output. |
 | **`cam.ps1 -Stop` was silent.** | On purpose. An orderly stop is not a fault, so it raises no toast and writes no event. | Nothing. It still prints the component counts before and after and exits non-zero if anything survived. |
 | **Everything records to direct inputs and the relay never engages.** | Both camera slots are already taken, so MediaMTX has no third one to pull with - limitation 2. | Restart the dashboard or the recorder; whichever restarts picks the relay up. |
 | **Terminal flashes and closes immediately.** | `$MpvPath` points at `mpv.exe`. | Point it at `mpv.com`, the command-line executable. |
@@ -60,16 +55,11 @@ Installing on a new machine is [docs/install.md](docs/install.md). Most readers 
 | **`-SelfTest` reports a concurrency of 1 and the cameras look broken.** | The dashboard is open and holding a slot. | Close it, or run `-SelfTest -Offline`, which skips every camera-facing check. |
 | **MediaMTX exits immediately with `ReadDirectoryChanges: Incorrect function`.** | `RestreamerConfigPath` is on the WSL share, which does not implement it. | Point it at a local NTFS path such as `C:\mediamtx\mediamtx.yml`. |
 | **Autostart did nothing at logon.** | Usually the repository's path was not reachable yet - limitation 10. | Read `%LOCALAPPDATA%\IPCCTV\autostart.log`, and confirm the task with `schtasks /query /tn IPCCTV-Recorder /fo list`. |
-| **The script exits immediately after asking for config.** | Normal on a first run. | Edit `cameras.json` and run it again. |
 | **The camera password needs changing.** | - | Delete `camera_creds.xml` and run the dashboard again for a fresh prompt. Tapo cameras keep a separate RTSP account from the TP-Link cloud login; changing the cloud password does nothing here. |
 
 ### The alerts
 
-An unexpected stop alerts on three channels, and an orderly `cam.ps1 -Stop` raises none of them: a
-**Windows toast** (WinRT under the Windows PowerShell AUMID - unelevated, does not steal focus, stays
-in the Action Center), an **Application-log entry** prefixed `IPCCTV: `, and **`StopKind` plus
-`LastUnexpectedStop` in `status.json`**, the latter carrying the timestamp, the reason and the pid,
-and carried across restarts so the NVR being back up does not erase the fact that it went down.
+An unexpected stop alerts on three channels, and an orderly `cam.ps1 -Stop` raises none of them: a **Windows toast** (WinRT under the Windows PowerShell AUMID - unelevated, does not steal focus, stays in the Action Center), an **Application-log entry** prefixed `IPCCTV: `, and **`StopKind` plus `LastUnexpectedStop` in `status.json`**, the latter carrying the timestamp, the reason and the pid, and carried across restarts so the NVR being back up does not erase the fact that it went down.
 
 | id | Level | What it means |
 | --- | --- | --- |
@@ -82,11 +72,7 @@ and carried across restarts so the NVR being back up does not erase the fact tha
 | `121` | Error | pruning is blocked: free space is below `ReserveGB` and nothing deletable is left, so the disk is filling. Once per episode; recording continues |
 | `122` | Error | the age rule's circuit breaker held a run that would have deleted more than `MaxAgePruneFraction` of the archive. Once per episode; the free-space rule still runs |
 
-Registering a custom event source writes to `HKLM` and needs elevation, so by default the entries go
-out under the always-registered `Application` source and need no elevation anywhere.
-`.\cam.recorder.ps1 -InstallEventSource`, run elevated once, registers the `IPCCTV` source instead,
-with `EventCreate.exe` as the message resource, which is what makes `.Message` render. Everything works without it; that is what the prefix is for. Reading
-them back:
+Registering a custom event source writes to `HKLM` and needs elevation, so by default the entries go out under the always-registered `Application` source. `.\cam.recorder.ps1 -InstallEventSource`, run elevated once ([Install and uninstall](#install-and-uninstall)), registers the `IPCCTV` source instead, with `EventCreate.exe` as the message resource so `.Message` renders. Everything works without it; that is what the prefix is for. Reading them back:
 
 ```powershell
 Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 100,101,102,103,110,120,121,122 } |
@@ -95,15 +81,39 @@ Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 100,101,102,103,1
   Where-Object { $_.Text -like 'IPCCTV: *' }
 ```
 
-That filters on the `IPCCTV: ` prefix rather than on a provider **on purpose**: the entries arrive
-under `Application` by default and under `IPCCTV` once `-InstallEventSource` has been run, so pinning
-`ProviderName = 'Application'` in the filter would quietly return nothing after the install. The
-prefix is on every message either way, which is what it is for, and the `ProviderName` column then
-tells you which source answered. Numbers alone are not enough to filter on: ids as low as 100 are not
-ours exclusively in a log every application writes to. The `Properties[0].Value` fallback is needed
-because a source with no message resource leaves `.Message` empty. With no matching events at all,
-`Get-WinEvent` reports "No events were found that match the specified selection criteria", which is
-the quiet answer rather than a fault.
+That filters on the `IPCCTV: ` prefix, not on a provider, **on purpose**: the entries arrive under `Application` until `-InstallEventSource` has been run and under `IPCCTV` after, so pinning `ProviderName = 'Application'` would quietly return nothing after the install; the `ProviderName` column tells you which answered. The ids alone are not ours exclusively in a log every application writes to, and the `Properties[0].Value` fallback covers a source with no message resource, which leaves `.Message` empty. With no matching events `Get-WinEvent` reports "No events were found that match the specified selection criteria" - the quiet answer, not a fault.
+
+## Install and uninstall
+
+One command installs everything that makes the system start by itself, and one removes it. First, once - the prerequisites (Windows Terminal, `mpv`, `ffmpeg`, MediaMTX) are in [docs/install.md](docs/install.md), with the execution policy and the `cameras.json` schema:
+
+1. Run `.\mpv.cam.autolayout.autorestart.ps1`. It asks for the camera login, saves it encrypted as `camera_creds.xml`, writes a `cameras.json` template and exits. Fill in your cameras.
+2. Build the UI with `ui/build.sh`, from WSL ([docs/go-toolchain.md](docs/go-toolchain.md)). Skip it and `-Install` installs everything else and reports the UI as skipped.
+
+```powershell
+.\cam.ps1 -Install -WhatIf   # the plan: every prerequisite, then each component. Changes nothing.
+.\cam.ps1 -Install           # install
+.\cam.ps1 -Start             # -Install starts nothing: this starts the recorder and dashboard now
+.\cam.ps1 -Uninstall         # remove it again
+```
+
+**`-Install`** checks every prerequisite first and lists every problem at once with its fix; any of them stops it before it changes anything, except a missing `camui.exe`, which only skips the UI. Then, in order: the MediaMTX config generated from `cameras.json`, and the logon tasks `IPCCTV-Recorder` (the NVR window), `IPCCTV-Dashboard` (the viewer grid) and `IPCCTV-Ui`. Each reports installed, already installed, skipped or failed, one failing does not stop the rest, and it exits 0 only when all four are in place. Anything already in place is left alone, so a second run changes nothing; after updating the scripts, `-Uninstall` then `-Install` rewrites the launchers. No elevation.
+
+**`-Uninstall`** removes the three tasks, their launchers in `%LOCALAPPDATA%\IPCCTV\` and the generated MediaMTX config. It keeps the logs, the archive, `cameras.json`, `recorder.config.json` and the credentials, and it stops nothing: `.\cam.ps1 -Stop` does that, and leaves the UI running on purpose. A second run is a clean no-op.
+
+**Optional, elevated, once:** `.\cam.recorder.ps1 -InstallEventSource` registers the `IPCCTV` event source for [the alerts](#the-alerts). `-Install` does it itself when run elevated and prints this line when not; alerting works without it. `Remove-EventLog -Source IPCCTV`, elevated, removes it.
+
+### The granular switches
+
+`-Install` and `-Uninstall` are made of these. They exist for scripts and recovery: each installs or removes one component and touches nothing else. All are unelevated except the event source, idempotent, a clean no-op when there is nothing to do, and every removal keeps its launcher's log.
+
+| Command | What it does |
+| --- | --- |
+| `.\cam.recorder.ps1 -InstallRestreamer` / `-RemoveRestreamer` | Generates the MediaMTX config from `cameras.json`, one path per camera and no credential, and checks the binary is in place; or deletes it, and recording and viewing continue on the direct camera inputs. |
+| `.\cam.recorder.ps1 -InstallAutostart` / `-RemoveAutostart` | Registers or removes `IPCCTV-Recorder` and its launcher. A supervisor already running keeps running. |
+| `.\cam.ps1 -InstallDashboardAutostart` / `-RemoveDashboardAutostart` | Registers or removes `IPCCTV-Dashboard` and its launcher. A dashboard that is open stays open. |
+| `.\cam.ps1 -InstallUi` / `-RemoveUi` | Registers or removes `IPCCTV-Ui` and its launcher. It refuses to install when `camui.exe` has not been built, and it does not start the UI - it prints `Start-ScheduledTask -TaskName IPCCTV-Ui`, which does. A `camui` that is running stays running, and the removal prints the pid serving it. |
+| `.\cam.recorder.ps1 -InstallEventSource` | Registers the `IPCCTV` Application-log event source. Needs an elevated session, once, and is optional. |
 
 ## How it works
 
@@ -179,7 +189,7 @@ The strip at the bottom of the screen is a Windows Terminal window that the dash
 
 Nothing else has to change: the launcher passes that file if it exists, and `-Status` reports the address it found and where it read it from. Every request then needs the token, which can arrive once as `?token=...` and is moved into an HttpOnly cookie so it stops appearing in the address bar, in history and in any `Referer`. The scripts **do** read the token - `Get-CamUiRuntimeState` opens `camui.config.json` and looks at `CAMUI_TOKEN` to answer the one question `-Status` asks of it - but they never print it, log it or pass it on: `-Status` reports only whether one is configured. The token is never taken from a flag, because a command line is readable by every process on the machine.
 
-**How it runs.** `-InstallUi` registers `IPCCTV-Ui`, a logon task that runs a generated launcher at `%LOCALAPPDATA%\IPCCTV\start-ui.ps1`. The launcher waits for `camui.exe` to be reachable, exactly as the recorder's launcher waits for the scripts, then starts it in a console of its **own** with no window. That last part is not cosmetic: a console created with a window is handed to Windows Terminal as a tab in the window that already exists, and closing that window would take the UI with it. It starts nothing at all if the address is already being served, so a second start cannot fight the first one for the port, and it exits non-zero if nothing is serving afterwards, which hands the retry to the task's restart policy.
+**How it runs.** The `IPCCTV-Ui` logon task runs a generated launcher at `%LOCALAPPDATA%\IPCCTV\start-ui.ps1`. The launcher waits for `camui.exe` to be reachable, exactly as the recorder's launcher waits for the scripts, then starts it in a console of its **own** with no window. That last part is not cosmetic: a console created with a window is handed to Windows Terminal as a tab in the window that already exists, and closing that window would take the UI with it. It starts nothing at all if the address is already being served, so a second start cannot fight the first one for the port, and it exits non-zero if nothing is serving afterwards, which hands the retry to the task's restart policy.
 
 camui logs to stdout only, so a thin `powershell.exe` holds the pipe and appends it to `%LOCALAPPDATA%\IPCCTV\camui.log`. **The roll happens in the launcher, not in a running UI:** at every start it checks that file, and if it is past 10 MB it renames it to `camui.log.prev` - replacing any previous `.prev` - and starts a fresh one. A UI that stays up for weeks therefore keeps appending to one file past 10 MB, with a line per request and nothing to bound it; stopping and starting it is what rolls the log. The launcher's own log is `autostart-ui.log` beside it, and that one has no rotation at all - it gets a handful of lines per start, so it grows slowly, but it grows forever. Delete either by hand when it is in the way; nothing reads them back.
 
@@ -187,13 +197,13 @@ The binary is never copied anywhere, so a rebuild takes effect the next time the
 
 ### Autostart
 
-There are **three** logon tasks, one per part, and each install switch touches only its own: `IPCCTV-Recorder` from `.\cam.recorder.ps1 -InstallAutostart`, `IPCCTV-Dashboard` from `.\cam.ps1 -InstallDashboardAutostart`, and `IPCCTV-Ui` from `.\cam.ps1 -InstallUi`. They are separate because their lifetimes are: the recorder is a headless service, the grid is a desktop artifact that needs an interactive session, and the UI is a local server that should outlive both. `cam.ps1 -Status` lists all three with their state and the launcher each one points at.
+There are **three** logon tasks, one per part, all put in place by [`-Install`](#install-and-uninstall). They are separate because their lifetimes are: the recorder is a headless service, the grid is a desktop artifact that needs an interactive session, and the UI is a local server that should outlive both. `cam.ps1 -Status` lists all three with their state and the launcher each one points at.
 
 Each runs at logon as you, with an interactive, limited token. No elevation, no prompt. Reinstalling replaces the registration rather than adding a second one. The recorder's task has no execution time limit, because the default three day limit would otherwise kill a 24/7 supervisor on day three; it ignores a second instance, and it restarts up to three times at one minute intervals if it fails.
 
 **The task opens the NVR window rather than running the supervisor directly, and that is not cosmetic.** Windows 11 hands every console created with a window to the default terminal application, which here is Windows Terminal, and with `windowingBehavior` set to `useExisting` the console arrives as a **tab in whichever terminal window already exists** - the Operator's. `-WindowStyle Hidden` does not prevent it, because the window belongs to Windows Terminal rather than to `powershell.exe`. Closing that window sent `CTRL_CLOSE_EVENT` to the supervisor, which PowerShell answers by terminating without running any `finally` block: no shutdown line in the log, and every ffmpeg plus MediaMTX left orphaned and still writing. It happened four times on 2026-10-12. Launching the supervisor as a pane in a window of its own removes the adoption, and the job object `cam.nvr` makes closing that window stop everything in it.
 
-The task does not point at `cam.recorder.ps1` directly. It points at a small generated launcher at `%LOCALAPPDATA%\IPCCTV\start-recorder.ps1`, which waits for the recorder's path to become reachable, logs what it saw to `%LOCALAPPDATA%\IPCCTV\autostart.log`, and then forwards to `cam.recorder.ps1 -Nvr`. That indirection exists because a repository kept inside WSL is reached over `\\wsl.localhost`, which does not resolve until WSL's file server is running, and a Scheduled Task has no way to wait for a path. The launcher holds no copy of the scripts, so it cannot drift from the repository. `-RemoveAutostart` deletes the launcher along with the task, keeping only the log.
+No task points at the repository directly. Each runs a small generated launcher in `%LOCALAPPDATA%\IPCCTV\` - the recorder's is `start-recorder.ps1`, which logs to `autostart.log` there and then forwards to `cam.recorder.ps1 -Nvr` - that waits for the repository's path to become reachable first. A repository kept inside WSL is reached over `\\wsl.localhost`, which does not resolve until WSL's file server is running, and a Scheduled Task has no way to wait for a path. The launchers hold no copy of the scripts, so they cannot drift from the repository.
 
 ### When something stops unexpectedly
 
@@ -216,15 +226,9 @@ Expected or not is read from what the supervisor recorded, never from an exit co
 
 To prevent quoting and bracket parsing errors when passing complex `mpv` arguments into Windows Terminal splits, the dashboard generates each pane's PowerShell command and converts it to a Base64 `-EncodedCommand` string before execution. The recorder and the health strip share `cam.common.ps1`, which owns configuration loading, the camera list, redaction, the status file readers and the layout algorithm, so the three scripts can never disagree about what they are looking at.
 
-## Installing from scratch
-
-[docs/install.md](docs/install.md) - prerequisites, the execution policy, eleven steps, and the
-`cameras.json` schema. Most readers never need it: the system autostarts at logon.
-
 ## Reference
 
 * **Configuration** - [docs/configuration.md](docs/configuration.md). Four keys are editable from the UI's Settings screen: `SegmentSeconds`, `ReserveGB`, `PruneHysteresisGB` and `MaxRetentionDays`. The rest is tuning nobody should need. Add, remove or modify cameras by editing `cameras.json`, or from the same screen.
-* **Installation** - [docs/install.md](docs/install.md).
 * **The Go toolchain** for building the UI - [docs/go-toolchain.md](docs/go-toolchain.md).
 * **Development notes** - [docs/development.md](docs/development.md). Harness invocation and the dashboard's diagnostic switches.
 
@@ -239,10 +243,7 @@ The control surface. It starts, stops and reports every part of the system, incl
 | `-Stop` | Stops everything and verifies that it did, orphans from a previous crash included. A no-op when nothing is running, safe to run twice, and silent on the alerting channels by design. It does not stop the control UI. |
 | `-Start -Recorder` / `-Stop -Recorder` | The recorder, its NVR window and MediaMTX only. |
 | `-Start -Dashboard` / `-Stop -Dashboard` | The viewer panes, their `mpv` and the health strip only. |
-| `-InstallDashboardAutostart` | Registers the `IPCCTV-Dashboard` logon task that opens the viewer grid. Unelevated, idempotent, and it never touches the other two tasks. |
-| `-RemoveDashboardAutostart` | Removes that task and its launcher, keeping the log. A clean no-op when they are not there, and a dashboard that is open stays open. |
-| `-InstallUi` | Registers the `IPCCTV-Ui` logon task that starts `camui.exe`. Unelevated, idempotent, and it never touches the other two tasks. It refuses to install when `camui.exe` has not been built, and it does not start the UI - it prints the one command that does. |
-| `-RemoveUi` | Removes that task and its launcher, keeping the logs. A clean no-op when they are not there. A `camui` that is running stays running, and the removal prints the pid that is serving so you can stop it if you want to. |
+| `-Install` / `-Uninstall` | Installs or removes everything that starts at logon - [Install and uninstall](#install-and-uninstall), with the granular switches behind them. Add `-WhatIf` to see the plan. |
 
 Nothing here is identified by image name or window title. Every process is classified by the work it owns, and the recording supervisor and its children sit on a keep list that every stop honours.
 
@@ -255,12 +256,8 @@ Nothing here is identified by image name or window title. Every process is class
 | `-Disable <name\|all>` | Sets `Record` to false. That child stops and is not restarted. |
 | `-List` | Every camera with its `Record` state and stream quality. |
 | `-Nvr` | Opens the NVR: one Windows Terminal window of its own, titled `cam.nvr`, running the supervisor as its only pane with the log on screen. Closing that window stops the supervisor, MediaMTX, every ffmpeg and the viewers. Closing any other terminal does nothing. |
-| `-Run` | Supervises one `ffmpeg` per enabled camera, writes `status.json`, prunes the archive, and starts and owns MediaMTX. This is the long-running process, in the **foreground**. Use `-Nvr` instead unless you specifically want it in the console you are in: a `-Run` started in an ordinary terminal has its console adopted as a tab in whichever terminal window already exists, and closing that window kills it with no cleanup and orphaned children. |
+| `-Run` | Supervises one `ffmpeg` per enabled camera, writes `status.json`, prunes the archive, and starts and owns MediaMTX. This is the long-running process, in the **foreground**. Use `-Nvr` instead unless you specifically want it in the console you are in, which then owns it - see [Autostart](#autostart). |
 | `-Stop` | Asks a running supervisor to shut down, waits for it, and reports any `ffmpeg` or MediaMTX left behind. |
-| `-InstallRestreamer` | Generates the MediaMTX config from `cameras.json`, one path per camera, and checks the binary is in place. |
-| `-RemoveRestreamer` | Deletes that generated config. Recording and viewing continue on the direct camera inputs. |
-| `-InstallAutostart` / `-RemoveAutostart` | Registers or unregisters the logon Scheduled Task. Unelevated and idempotent; the removal deletes the launcher it created and is a clean no-op when nothing is installed. |
-| `-InstallEventSource` | Registers the custom `IPCCTV` Application-log event source. Needs an elevated session, once, and is optional - alerting works without it. |
 | `-SelfTest [-Offline] [-MaxConcurrency <n>]` | Pre-flight report: tools, per-camera RTSP probe, measured connection limit, crash-safety proof, disk projection. `-Offline` skips every check that touches a camera. |
 
 ### The dashboard: `mpv.cam.autolayout.autorestart.ps1`
@@ -280,7 +277,7 @@ Nothing here is identified by image name or window title. Every process is class
 
 ### The control UI: `camui.exe`
 
-Install it with `.\cam.ps1 -InstallUi` and let the logon task run it - that is the normal way. These are for building it and for the rare direct run.
+`-Install` puts its logon task in place, and letting that run it is the normal way. These are for building it and for the rare direct run.
 
 | Command | What it does |
 | --- | --- |
@@ -297,7 +294,7 @@ The binary has to sit beside the scripts: with no `-script-dir` it looks for `ca
 
 | Command | What it does |
 | --- | --- |
-| `.\tests\cam.tests.ps1` | Runs all **fifteen** checks that touch no camera: `parse`, `cameralist`, `inputs`, `viewer`, `selftest`, `layout`, `strip`, `sections`, `autostart`, `crashsafe`, `windowclose`, `windowid`, `leak`, `uileak`, `procs`. Safe with the dashboard open. Exit code 0 means nothing failed. |
+| `.\tests\cam.tests.ps1` | Runs every check that touches no camera - `-Checks` lists their names. Safe with the dashboard open. Exit code 0 means nothing failed. |
 | `-Checks <names>` | Run only these. |
 | `-Live -Checks relay` | Adds the relay lifecycle proof, which starts MediaMTX and `ffmpeg` against the real cameras in a sandbox. It is the only check `-Live` unlocks. |
 

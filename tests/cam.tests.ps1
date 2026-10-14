@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -2936,6 +2936,528 @@ function Invoke-CamCheckPruneLive {
 }
 
 
+# ---------------------------------------------------------------------------
+# cam.ps1 -Install and -Uninstall
+# ---------------------------------------------------------------------------
+
+$script:CamInstallOrder = @('restreamer config', 'recorder logon task', 'dashboard logon task', 'UI logon task')
+
+
+function New-CamTestInstallStub {
+    <#
+        Stand-ins for what Get-CamInstallComponent returns: the same fields,
+        with each granular switch replaced by a flip of $State[key] and a line
+        in $Calls. $Fail maps a key to 'install', 'remove' or 'noop' - noop
+        is an install that returns without installing anything.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$State,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.ArrayList]$Calls,
+        [hashtable]$Fail = @{}
+    )
+
+    $keys = @('restreamer', 'recorder', 'dashboard', 'ui')
+    $list = @()
+    for ($i = 0; $i -lt $keys.Count; $i++) {
+        $key = $keys[$i]
+        $list += [pscustomobject]@{
+            Name    = $script:CamInstallOrder[$i]
+            Key     = $key
+            Change  = "stub install of $key"
+            Undo    = "stub removal of $key"
+            Test    = { [pscustomobject]@{ Current = [bool]$State[$key]; Present = [bool]$State[$key]; Detail = "stub $key" } }.GetNewClosure()
+            Install = {
+                [void]$Calls.Add("install $key")
+                if ($Fail[$key] -eq 'install') { throw "stub $key install failed" }
+                if ($Fail[$key] -ne 'noop') { $State[$key] = $true }
+            }.GetNewClosure()
+            Remove  = {
+                [void]$Calls.Add("remove $key")
+                if ($Fail[$key] -eq 'remove') { throw "stub $key removal failed" }
+                $State[$key] = $false
+            }.GetNewClosure()
+        }
+    }
+    return $list
+}
+
+
+function Invoke-CamCheckInstallSteps {
+    <#
+        The -Install and -Uninstall orchestration with every component step
+        stubbed: the real Invoke-CamInstallAll and Invoke-CamUninstallAll from
+        cam.ps1, run in this scope against stand-ins for the preflight, the
+        components, the elevation test and the event-source step. Nothing
+        outside this scope is touched.
+    #>
+    param($Run)
+
+    . (Get-CamTestRecorderFunctions -Script 'cam.ps1' -Name 'Invoke-CamInstallAll', 'Invoke-CamUninstallAll', 'Write-CamComponentResult', 'Write-CamSection')
+
+    $calls = New-Object System.Collections.ArrayList
+    $stubPreflight = @()
+    $stubComponents = @()
+    $stubElevated = $false
+    $eventFails = $false
+    function Get-CamInstallPreflight { return $stubPreflight }
+    function Get-CamInstallComponent { return $stubComponents }
+    function Test-CamElevated { return $stubElevated }
+    function Test-CamEventSourceRegistered { return $false }
+    function Invoke-CamInstallEventSourceStep { [void]$calls.Add('event source'); if ($eventFails) { throw 'stub event source failed' } }
+
+    $okRow = { param($name, $component) [pscustomobject]@{ Name = $name; Component = $component; Hard = ($component -ne 'ui'); Ok = $true; Detail = 'stub'; Fix = '' } }
+    $badRow = { param($name, $component, $fix) [pscustomobject]@{ Name = $name; Component = $component; Hard = ($component -ne 'ui'); Ok = $false; Detail = 'stub missing'; Fix = $fix } }
+
+    $evidence = @()
+    $ok = $true
+    $run1 = {
+        param([scriptblock]$Action)
+        $calls.Clear()
+        $output = @(& $Action 6>&1)
+        $codes = @($output | Where-Object { $_ -is [int] })
+        [pscustomobject]@{
+            Code  = $(if ($codes.Count) { $codes[-1] } else { $null })
+            Text  = (@($output | Where-Object { $_ -isnot [int] } | ForEach-Object { [string]$_ }) -join "`n")
+            Calls = @($calls)
+        }
+    }
+    $statusOf = { param($result) @($script:CamInstallOrder | ForEach-Object { Get-CamTestComponentStatus -Text $result.Text -Component $_ }) -join ',' }
+    $expect = {
+        param([string]$Label, $Result, [int]$Code, [string]$Statuses, [string]$CallList, [string[]]$Contains = @())
+        $got = & $statusOf $Result
+        $line = ("{0}: exit {1}, statuses {2}, calls [{3}]" -f $Label, $Result.Code, $got, ($Result.Calls -join ', '))
+        $bad = @()
+        if ($Result.Code -ne $Code) { $bad += "exit $($Result.Code), wanted $Code" }
+        if ($got -ne $Statuses) { $bad += "statuses $got, wanted $Statuses" }
+        if (($Result.Calls -join ',') -ne $CallList) { $bad += "calls [$($Result.Calls -join ',')], wanted [$CallList]" }
+        foreach ($needle in $Contains) { if (-not $Result.Text.Contains($needle)) { $bad += "output lacks '$needle'" } }
+        if ($bad.Count) { $script:installStepsOk = $false; return ("FAIL " + $line + ' - ' + ($bad -join '; ')) }
+        return $line
+    }
+    $script:installStepsOk = $true
+    $allOk = @((& $okRow 'cameras.json' 'all'), (& $okRow 'ffmpeg' 'recorder'), (& $okRow 'camui.exe' 'ui'))
+    $installs = 'install restreamer,install recorder,install dashboard,install ui'
+
+    # Fresh machine, unelevated.
+    $state = @{}
+    $stubPreflight = $allOk
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls
+    $r = & $run1 { Invoke-CamInstallAll }
+    $evidence += & $expect 'all succeed' $r 0 'installed,installed,installed,installed' $installs @('OPTIONAL', '.\cam.recorder.ps1 -InstallEventSource')
+
+    # The same state again: nothing to do, nothing done.
+    $r = & $run1 { Invoke-CamInstallAll }
+    $evidence += & $expect 'second run' $r 0 'already installed,already installed,already installed,already installed' ''
+
+    # One component throws; the rest are still attempted.
+    $state = @{}
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls -Fail @{ recorder = 'install' }
+    $r = & $run1 { Invoke-CamInstallAll }
+    $evidence += & $expect 'recorder fails' $r 1 'installed,failed,installed,installed' $installs @('stub recorder install failed', 'not in place: recorder logon task')
+
+    # An install that reports nothing wrong but leaves the component absent.
+    $state = @{}
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls -Fail @{ dashboard = 'noop' }
+    $r = & $run1 { Invoke-CamInstallAll }
+    $evidence += & $expect 'silent no-op install' $r 1 'installed,installed,failed,installed' $installs @('still not in place')
+
+    # camui.exe not built: the UI alone is skipped, with the reason.
+    $state = @{}
+    $stubPreflight = @((& $okRow 'cameras.json' 'all'), (& $badRow 'camui.exe' 'ui' 'cross-compile it with ui/build.sh'))
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls
+    $r = & $run1 { Invoke-CamInstallAll }
+    $evidence += & $expect 'UI binary missing' $r 1 'installed,installed,installed,skipped' 'install restreamer,install recorder,install dashboard' @('camui.exe is missing: cross-compile it with ui/build.sh')
+
+    # Hard prerequisites missing: every one listed, no component touched.
+    $state = @{}
+    $stubPreflight = @((& $badRow 'cameras.json' 'all' 'create it'), (& $badRow 'ffmpeg' 'recorder' 'install ffmpeg'), (& $badRow 'camui.exe' 'ui' 'build it'))
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls
+    $r = & $run1 { Invoke-CamInstallAll }
+    $evidence += & $expect 'preflight blocks' $r 1 ',,,' '' @('fix: create it', 'fix: install ffmpeg', 'fix: build it', 'Nothing was installed or changed')
+    if ($r.Text.Contains('install: result')) { $script:installStepsOk = $false; $evidence += 'FAIL preflight blocks: it went on to the components' }
+
+    # Elevated: the event source is registered as the last step, and its
+    # failure is reported without changing the exit code.
+    $stubPreflight = $allOk
+    $stubElevated = $true
+    $state = @{}
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls
+    $r = & $run1 { Invoke-CamInstallAll }
+    $evidence += & $expect 'elevated' $r 0 'installed,installed,installed,installed' ($installs + ',event source')
+    $eventFails = $true
+    $state = @{}
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls
+    $r = & $run1 { Invoke-CamInstallAll }
+    $evidence += & $expect 'elevated, event source fails' $r 0 'installed,installed,installed,installed' ($installs + ',event source') @('It is optional')
+    $stubElevated = $false
+    $eventFails = $false
+
+    # -WhatIf: the plan, and no step run.
+    $state = @{}
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls
+    $r = & $run1 { Invoke-CamInstallAll -WhatIf }
+    $evidence += & $expect 'install -WhatIf' $r 0 'would install,would install,would install,would install' '' @('Nothing was changed')
+
+    # Uninstall, in reverse order, then again as a no-op.
+    $state = @{ restreamer = $true; recorder = $true; dashboard = $true; ui = $true }
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls
+    $r = & $run1 { Invoke-CamUninstallAll -WhatIf }
+    $evidence += & $expect 'uninstall -WhatIf' $r 0 'would remove,would remove,would remove,would remove' ''
+    $removes = 'remove ui,remove dashboard,remove recorder,remove restreamer'
+    $r = & $run1 { Invoke-CamUninstallAll }
+    $evidence += & $expect 'uninstall' $r 0 'removed,removed,removed,removed' $removes @('nothing was stopped', '.\cam.ps1 -Stop')
+    $r = & $run1 { Invoke-CamUninstallAll }
+    $evidence += & $expect 'uninstall again' $r 0 'not installed,not installed,not installed,not installed' ''
+    $state = @{ restreamer = $true; recorder = $true; dashboard = $true; ui = $true }
+    $stubComponents = New-CamTestInstallStub -State $state -Calls $calls -Fail @{ dashboard = 'remove' }
+    $r = & $run1 { Invoke-CamUninstallAll }
+    $evidence += & $expect 'uninstall, dashboard fails' $r 1 'removed,removed,failed,removed' $removes @('stub dashboard removal failed')
+
+    Add-CamTestResult -Run $Run -Check 'installsteps' -Status $(if ($script:installStepsOk) { 'PASS' } else { 'FAIL' }) `
+        -Message 'the -Install/-Uninstall orchestration with stubbed components: order, results, exit codes, second runs, preflight, elevation, -WhatIf' `
+        -Evidence $evidence
+}
+
+
+function Invoke-CamCheckInstallPlan {
+    <#
+        cam.ps1 -Install -WhatIf and -Uninstall -WhatIf as real processes:
+        first the repository's own copy against this machine, then a sandbox
+        whose launchers would all be new, so every component is planned. The
+        IPCCTV-* tasks and both launcher folders must be identical afterwards.
+    #>
+    param($Run)
+
+    if (-not (Get-Command -Name 'Get-ScheduledTask' -ErrorAction SilentlyContinue)) {
+        Add-CamTestResult -Run $Run -Check 'installplan' -Status 'SKIP' -Message 'the ScheduledTasks module is not available on this machine'
+        return
+    }
+
+    $evidence = @()
+    $ok = $true
+    $liveLaunchers = Get-CamAutostartDir
+    $sandbox = New-CamTestInstallSandbox -Name 'installplan'
+    $tasksBefore = Get-CamTestLogonTaskSnapshot
+    $liveBefore = Get-CamTestLauncherManifest -Path $liveLaunchers
+    $sandboxBefore = Get-CamTestFileManifest -Path $sandbox.Dir
+    $evidence += ("before: {0} IPCCTV-* task(s), {1} file(s) in {2}" -f $tasksBefore.Count, $liveBefore.Count, $liveLaunchers)
+
+    # Every component has a row in the result table, in the order given.
+    $order = {
+        param([string]$Text, [string[]]$Names)
+        $start = $Text.IndexOf('install: result ===')
+        if ($start -lt 0) { return $false }
+        $at = @($Names | ForEach-Object { $Text.IndexOf(('  ' + $_ + ' '), $start) })
+        if ($at[0] -lt 0) { return $false }
+        for ($i = 1; $i -lt $at.Count; $i++) { if ($at[$i] -le $at[$i - 1]) { return $false } }
+        return $true
+    }
+    $reverse = @($script:CamInstallOrder)
+    [array]::Reverse($reverse)
+
+    try {
+        $runs = @(
+            @{ Label = 'repository -Install -WhatIf'; Path = (Join-Path -Path (Get-CamTestRepo) -ChildPath 'cam.ps1'); Args = @('-Install', '-WhatIf'); Env = @{}; Names = $script:CamInstallOrder },
+            @{ Label = 'repository -Uninstall -WhatIf'; Path = (Join-Path -Path (Get-CamTestRepo) -ChildPath 'cam.ps1'); Args = @('-Uninstall', '-WhatIf'); Env = @{}; Names = $reverse },
+            @{ Label = 'sandbox -Install -WhatIf'; Path = $sandbox.Cam; Args = @('-Install', '-WhatIf'); Env = @{ LOCALAPPDATA = $sandbox.LocalAppData }; Names = $script:CamInstallOrder; Want = 'would install' },
+            @{ Label = 'sandbox -Uninstall -WhatIf'; Path = $sandbox.Cam; Args = @('-Uninstall', '-WhatIf'); Env = @{ LOCALAPPDATA = $sandbox.LocalAppData }; Names = $reverse }
+        )
+        foreach ($case in $runs) {
+            $result = Invoke-CamTestScript -Path $case.Path -Arguments $case.Args -Environment $case.Env
+            $text = $result.Output + $result.Error
+            $statuses = @($case.Names | ForEach-Object { Get-CamTestComponentStatus -Text $text -Component $_ })
+            $whatIfLines = @($result.Lines | Where-Object { $_ -like 'What if:*' }).Count
+            $evidence += ("{0}: exit {1}, {2}, {3} 'What if' line(s)" -f $case.Label, $result.ExitCode, ($statuses -join ', '), $whatIfLines)
+            $inOrder = & $order $text $case.Names
+            if (-not $inOrder) { $ok = $false; $evidence += '  FAIL: the components are not all reported, in order' }
+            $failedOrSkipped = @($statuses | Where-Object { $_ -in @('failed', 'skipped') }).Count
+            if ($result.ExitCode -ne $(if ($failedOrSkipped) { 1 } else { 0 })) { $ok = $false; $evidence += '  FAIL: the exit code does not follow the results' }
+            if ($case.Args[0] -eq '-Install' -and -not $text.Contains('install: prerequisites')) { $ok = $false; $evidence += '  FAIL: no prerequisites section' }
+            if ($case.Want) {
+                if (@($statuses | Where-Object { $_ -ne $case.Want }).Count -or $whatIfLines -ne $case.Names.Count) {
+                    $ok = $false; $evidence += ("  FAIL: wanted every component '{0}' with one 'What if' line each" -f $case.Want)
+                }
+                $evidence += @($result.Lines | Where-Object { $_ -like 'What if:*' } | ForEach-Object { '  ' + $_ })
+            }
+        }
+
+        $tasksAfter = Get-CamTestLogonTaskSnapshot
+        $liveDiff = Compare-CamTestFileManifest -Before $liveBefore -After (Get-CamTestLauncherManifest -Path $liveLaunchers)
+        $sandboxDiff = Compare-CamTestFileManifest -Before $sandboxBefore -After (Get-CamTestFileManifest -Path $sandbox.Dir)
+        $tasksSame = (($tasksBefore -join "`n") -eq ($tasksAfter -join "`n"))
+        $evidence += ("after: tasks identical {0}; {1} changed {2}/{3}/{4} (removed/added/changed); sandbox changed {5}/{6}/{7}" -f $tasksSame, $liveLaunchers,
+            $liveDiff.Removed.Count, $liveDiff.Added.Count, $liveDiff.Changed.Count, $sandboxDiff.Removed.Count, $sandboxDiff.Added.Count, $sandboxDiff.Changed.Count)
+        $evidence += @($tasksAfter | ForEach-Object { '  ' + $_ })
+        if (-not $tasksSame -or ($liveDiff.Removed.Count + $liveDiff.Added.Count + $liveDiff.Changed.Count + $sandboxDiff.Removed.Count + $sandboxDiff.Added.Count + $sandboxDiff.Changed.Count)) {
+            $ok = $false; $evidence += 'FAIL: -WhatIf changed something'
+        }
+        if (Test-Path -LiteralPath $sandbox.LauncherDir) { $ok = $false; $evidence += 'FAIL: the sandbox launcher folder was created' }
+    }
+    finally {
+        if ($ok) { Remove-CamTestTree -Path $sandbox.Dir }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'installplan' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message '-Install -WhatIf and -Uninstall -WhatIf list every component in order and change nothing, here and in a sandbox' `
+        -Evidence $evidence
+}
+
+
+function Invoke-CamCheckInstallPreflight {
+    <#
+        A sandbox missing several prerequisites at once, run with -Install
+        -WhatIf: every missing one must be listed in that one run, with its
+        fix, and nothing may change. A second sandbox has a recorder.config.json
+        that does not load, which must be reported beside the rest rather than
+        ending the script on its own.
+
+        -WhatIf because the sandbox keeps the real task names, and a preflight
+        that wrongly passed would otherwise re-register the Operator's tasks.
+        That a failed preflight stops a real -Install before any component is
+        proven with stubs by installsteps.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $tasksBefore = Get-CamTestLogonTaskSnapshot
+    $sandboxes = @()
+    try {
+        $missing = New-CamTestInstallSandbox -Name 'installpreflight'
+        $sandboxes += $missing
+        foreach ($file in @('cameras.json', 'camera_creds.xml', 'camui.exe', 'bin\ffmpeg.exe', 'bin\mediamtx.exe', 'bin\mpv.com')) {
+            Remove-Item -LiteralPath (Join-Path -Path $missing.Dir -ChildPath $file) -Force
+        }
+        $broken = New-CamTestInstallSandbox -Name 'installpreflight-config'
+        $sandboxes += $broken
+        [System.IO.File]::WriteAllText($broken.ConfigPath, '{ "SegmentSeconds": 0 }')
+        Remove-Item -LiteralPath (Join-Path -Path $broken.Dir -ChildPath 'camera_creds.xml') -Force
+
+        $cases = @(
+            @{ Sandbox = $missing; Label = 'six missing'; Want = @('MISSING  cameras.json', 'MISSING  camera credentials', 'MISSING  ffmpeg', 'MISSING  MediaMTX ', 'MISSING  mpv', 'missing  camui.exe') },
+            @{ Sandbox = $broken; Label = 'config does not load, credentials missing'; Want = @('MISSING  recorder.config.json', 'SegmentSeconds must be at least 1', 'MISSING  camera credentials', 'MISSING  ffmpeg, MediaMTX') }
+        )
+        foreach ($case in $cases) {
+            $before = Get-CamTestFileManifest -Path $case.Sandbox.Dir
+            $result = Invoke-CamTestScript -Path $case.Sandbox.Cam -Arguments @('-Install', '-WhatIf') -Environment @{ LOCALAPPDATA = $case.Sandbox.LocalAppData }
+            $text = $result.Output + $result.Error
+            $diff = Compare-CamTestFileManifest -Before $before -After (Get-CamTestFileManifest -Path $case.Sandbox.Dir)
+            $absent = @($case.Want | Where-Object { -not $text.Contains($_) })
+            $evidence += ("{0}: exit {1}, {2} of {3} expected problem line(s) present, files changed {4}" -f $case.Label, $result.ExitCode,
+                ($case.Want.Count - $absent.Count), $case.Want.Count, ($diff.Removed.Count + $diff.Added.Count + $diff.Changed.Count))
+            $evidence += @($result.Lines | Where-Object { $_ -match '^\s+(MISSING|missing)\s' } | ForEach-Object { '  ' + $_.Trim() })
+            if ($result.ExitCode -ne 1 -or $absent.Count -or -not $text.Contains('Nothing was installed or changed') -or $text.Contains('install: result')) {
+                $ok = $false; $evidence += ('  FAIL: wanted exit 1, every problem listed and no component reached; absent: ' + ($absent -join ' | '))
+            }
+            if ($diff.Removed.Count + $diff.Added.Count + $diff.Changed.Count) { $ok = $false; $evidence += '  FAIL: the sandbox changed' }
+        }
+        $tasksSame = ((Get-CamTestLogonTaskSnapshot) -join "`n") -eq ($tasksBefore -join "`n")
+        $evidence += ("IPCCTV-* tasks identical: {0}" -f $tasksSame)
+        if (-not $tasksSame) { $ok = $false }
+    }
+    finally {
+        if ($ok) { foreach ($sandbox in $sandboxes) { Remove-CamTestTree -Path $sandbox.Dir } }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'installpreflight' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'a preflight with several prerequisites missing lists every one in one run and changes nothing' `
+        -Evidence $evidence
+}
+
+
+function Invoke-CamCheckInstallSandbox {
+    <#
+        A real -Install, second -Install, -Uninstall and second -Uninstall in
+        a sandbox, through the real granular switches. It proves what the
+        stubs cannot: that each component's "already in place" test agrees
+        with what its own install switch writes.
+
+        The sandbox's copies of cam.ps1 and cam.recorder.ps1 register
+        CamTestSandbox-Recorder, -Dashboard and -Ui instead of the IPCCTV-*
+        names - New-CamTestInstallSandbox refuses to build one that still
+        names a real task - and its launchers go to its own LOCALAPPDATA. Its
+        one camera is an unroutable address and its camui.exe is a stand-in,
+        so even a task left behind by a crash could start nothing that matters;
+        the finally removes them regardless.
+    #>
+    param($Run)
+
+    $prefix = 'CamTestSandbox-'
+    if (-not (Get-Command -Name 'Register-ScheduledTask' -ErrorAction SilentlyContinue)) {
+        Add-CamTestResult -Run $Run -Check 'installsandbox' -Status 'SKIP' -Message 'the ScheduledTasks module is not available on this machine'
+        return
+    }
+    $realMediaMtx = [string](Get-CamConfig).RestreamerExePath
+    if (-not (Test-Path -LiteralPath $realMediaMtx)) {
+        Add-CamTestResult -Run $Run -Check 'installsandbox' -Status 'SKIP' -Message "-InstallRestreamer runs MediaMTX --version, and there is no MediaMTX at $realMediaMtx"
+        return
+    }
+    if (@(Get-ScheduledTask -TaskName ($prefix + '*') -ErrorAction SilentlyContinue).Count) {
+        Add-CamTestResult -Run $Run -Check 'installsandbox' -Status 'SKIP' -Message "tasks named $prefix* are already registered, left by an earlier run; remove them by hand first"
+        return
+    }
+
+    $evidence = @()
+    $ok = $true
+    $tasksBefore = Get-CamTestLogonTaskSnapshot
+    $sandbox = New-CamTestInstallSandbox -Name 'installsandbox' -TaskPrefix $prefix -MediaMtxPath $realMediaMtx
+    $childEnvironment = @{ LOCALAPPDATA = $sandbox.LocalAppData }
+    $evidence += ("sandbox tasks: {0}" -f (@($sandbox.TaskNames.Values) -join ', '))
+
+    try {
+        $steps = @(
+            @{ Label = '-Install'; Args = @('-Install'); Want = 'installed' },
+            @{ Label = '-Install again'; Args = @('-Install'); Want = 'already installed' },
+            @{ Label = '-Uninstall'; Args = @('-Uninstall'); Want = 'removed' },
+            @{ Label = '-Uninstall again'; Args = @('-Uninstall'); Want = 'not installed' }
+        )
+        foreach ($step in $steps) {
+            $before = Get-CamTestFileManifest -Path $sandbox.Dir
+            $result = Invoke-CamTestScript -Path $sandbox.Cam -Arguments $step.Args -Environment $childEnvironment
+            $text = $result.Output + $result.Error
+            $statuses = @($script:CamInstallOrder | ForEach-Object { Get-CamTestComponentStatus -Text $text -Component $_ })
+            $diff = Compare-CamTestFileManifest -Before $before -After (Get-CamTestFileManifest -Path $sandbox.Dir)
+            $registered = @($sandbox.TaskNames.Values | Where-Object { Get-ScheduledTask -TaskName $_ -ErrorAction SilentlyContinue }).Count
+            $evidence += ("{0}: exit {1}, {2}; {3} sandbox task(s) registered; files removed/added/changed {4}/{5}/{6}" -f $step.Label, $result.ExitCode,
+                ($statuses -join ', '), $registered, $diff.Removed.Count, $diff.Added.Count, $diff.Changed.Count)
+            $wrong = @($statuses | Where-Object { $_ -ne $step.Want })
+            if ($result.ExitCode -ne 0 -or $wrong.Count) {
+                $ok = $false
+                $evidence += ("  FAIL: wanted exit 0 and every component '{0}'" -f $step.Want)
+                $evidence += @($result.Lines | Where-Object { $_ -match 'failed|skipped|MISSING|Exception' } | Select-Object -First 12 | ForEach-Object { '  ' + $_ })
+            }
+            if ($step.Label -like '*again' -and ($diff.Removed.Count + $diff.Added.Count + $diff.Changed.Count)) {
+                $ok = $false; $evidence += '  FAIL: the second run changed files'
+            }
+            $wantRegistered = $(if ($step.Label -like '-Install*') { 3 } else { 0 })
+            if ($registered -ne $wantRegistered) { $ok = $false; $evidence += ("  FAIL: wanted {0} sandbox task(s) registered" -f $wantRegistered) }
+        }
+        $left = @(Get-ChildItem -LiteralPath $sandbox.LauncherDir -Force -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+        $evidence += ("left in the sandbox launcher folder: {0}" -f $(if ($left.Count) { $left -join ', ' } else { 'nothing' }))
+        if (@($left | Where-Object { $_ -like '*.ps1' }).Count) { $ok = $false; $evidence += 'FAIL: a launcher survived -Uninstall' }
+        if (Test-Path -LiteralPath ([string]$sandbox.Config.RestreamerConfigPath)) { $ok = $false; $evidence += 'FAIL: the MediaMTX config survived -Uninstall' }
+        foreach ($kept in @($sandbox.Cameras, $sandbox.ConfigPath, (Join-Path -Path $sandbox.Dir -ChildPath 'camera_creds.xml'))) {
+            if (-not (Test-Path -LiteralPath $kept)) { $ok = $false; $evidence += "FAIL: -Uninstall removed $kept" }
+        }
+    }
+    finally {
+        foreach ($name in @($sandbox.TaskNames.Values)) {
+            if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+                Unregister-ScheduledTask -TaskName $name -Confirm:$false
+                $ok = $false
+                $evidence += "FAIL: had to unregister the sandbox task $name by hand"
+            }
+        }
+        $tasksSame = ((Get-CamTestLogonTaskSnapshot) -join "`n") -eq ($tasksBefore -join "`n")
+        $evidence += ("IPCCTV-* tasks identical: {0}" -f $tasksSame)
+        if (-not $tasksSame) { $ok = $false }
+        if ($ok) { Remove-CamTestTree -Path $sandbox.Dir }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'installsandbox' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'a real -Install, -Install, -Uninstall, -Uninstall in a sandbox with its own task names: installed, already installed, removed, not installed' `
+        -Evidence $evidence
+}
+
+
+function Invoke-CamCheckDocSwitches {
+    <#
+        Every -Switch the documentation names must exist. Two rules, over
+        README.md and docs\*.md:
+
+        - A switch written after one of this repository's scripts, in the same
+          code span or code line, must be a parameter of THAT script, common
+          parameters included - so `.\cam.recorder.ps1 -InstallUi` fails.
+        - Any other -Switch shaped like a PowerShell parameter (-Abc...),
+          anywhere in the text, must be a
+          parameter of one of the scripts or one of the few external
+          PowerShell parameters the docs quote, listed below.
+
+        Lower-case flags belong to camui, bash, ffmpeg and mpv and are not
+        checked. The parameter lists come from Get-Command on each script,
+        which parses it and runs nothing.
+    #>
+    param($Run)
+
+    $repo = Get-CamTestRepo
+    $scripts = [ordered]@{
+        'cam.ps1'                            = 'cam.ps1'
+        'cam.recorder.ps1'                   = 'cam.recorder.ps1'
+        'cam.health.ps1'                     = 'cam.health.ps1'
+        'mpv.cam.autolayout.autorestart.ps1' = 'mpv.cam.autolayout.autorestart.ps1'
+        'cam.tests.ps1'                      = 'tests\cam.tests.ps1'
+    }
+    # Parameters of Windows PowerShell itself and of the cmdlets the docs
+    # quote, not of this repository.
+    $external = @('NoProfile', 'ExecutionPolicy', 'File', 'Command', 'WindowStyle', 'EncodedCommand',
+        'FilterHashtable', 'TaskName', 'Scope', 'Source')
+
+    $declared = @{}
+    $any = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $scripts.Keys) {
+        $declared[$name] = @((Get-Command -Name (Join-Path -Path $repo -ChildPath $scripts[$name])).Parameters.Keys)
+        foreach ($parameter in $declared[$name]) { [void]$any.Add($parameter) }
+    }
+    foreach ($parameter in $external) { [void]$any.Add($parameter) }
+
+    $docs = @(Get-Item -LiteralPath (Join-Path -Path $repo -ChildPath 'README.md')) +
+        @(Get-ChildItem -LiteralPath (Join-Path -Path $repo -ChildPath 'docs') -Filter '*.md')
+    $scriptPattern = '(?<![\w.-])(' + ((@($scripts.Keys) | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')'
+    $switchPattern = '(?<![\w-])-([A-Za-z][A-Za-z0-9]*)'
+    $problems = New-Object System.Collections.ArrayList
+    $attributed = 0
+    $bare = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($doc in $docs) {
+        $text = [System.IO.File]::ReadAllText($doc.FullName)
+        $code = New-Object System.Collections.ArrayList
+        $inFence = $false
+        foreach ($line in ($text -split "`r?`n")) {
+            if ($line.StartsWith('```')) { $inFence = -not $inFence; continue }
+            if ($inFence) { [void]$code.Add($line); continue }
+            foreach ($span in [regex]::Matches($line, '`([^`]+)`')) { [void]$code.Add($span.Groups[1].Value) }
+        }
+
+        foreach ($fragment in $code) {
+            $mentions = @([regex]::Matches($fragment, $scriptPattern))
+            for ($i = 0; $i -lt $mentions.Count; $i++) {
+                $from = $mentions[$i].Index + $mentions[$i].Length
+                $to = $(if ($i + 1 -lt $mentions.Count) { $mentions[$i + 1].Index } else { $fragment.Length })
+                $segment = $fragment.Substring($from, $to - $from)
+                $cut = [regex]::Match($segment, '\s#|\||;')
+                if ($cut.Success) { $segment = $segment.Substring(0, $cut.Index) }
+                foreach ($switch in [regex]::Matches($segment, $switchPattern)) {
+                    $attributed++
+                    if ($declared[$mentions[$i].Value] -notcontains $switch.Groups[1].Value) {
+                        [void]$problems.Add(("{0}: '{1} -{2}' - {1} declares no such parameter" -f $doc.Name, $mentions[$i].Value, $switch.Groups[1].Value))
+                    }
+                }
+            }
+        }
+
+        foreach ($switch in [regex]::Matches($text, '(?<![\w-])-([A-Z][a-z][A-Za-z0-9]*)')) {
+            [void]$bare.Add($switch.Groups[1].Value)
+            if (-not $any.Contains($switch.Groups[1].Value)) {
+                [void]$problems.Add(("{0}: '-{1}' is a parameter of none of {2}" -f $doc.Name, $switch.Groups[1].Value, (@($scripts.Keys) -join ', ')))
+            }
+        }
+    }
+
+    $evidence = @(
+        ("{0} document(s): {1}" -f $docs.Count, (@($docs | ForEach-Object { $_.Name }) -join ', ')),
+        ("{0} switch use(s) attributed to a named script; {1} distinct capitalised switch(es) in all: {2}" -f $attributed, $bare.Count, ((@($bare) | Sort-Object) -join ' '))
+    )
+    foreach ($name in @('cam.ps1', 'cam.recorder.ps1')) {
+        $evidence += ("{0} declares: {1}" -f $name, ((@($declared[$name]) | Sort-Object) -join ' '))
+    }
+    $evidence += @($problems | Sort-Object -Unique | ForEach-Object { 'FAIL ' + $_ })
+
+    Add-CamTestResult -Run $Run -Check 'docswitches' -Status $(if ($problems.Count) { 'FAIL' } else { 'PASS' }) `
+        -Message 'every -Switch README.md and docs\*.md name is a declared parameter of the script it is written after, or of one of them' `
+        -Evidence $evidence
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -2970,6 +3492,11 @@ foreach ($check in $Checks) {
         'pruneconfig' { Invoke-CamCheckPruneConfig -Run $run }
         'pruneowner' { Invoke-CamCheckPruneOwner -Run $run }
         'prunelive'  { Invoke-CamCheckPruneLive  -Run $run }
+        'installsteps' { Invoke-CamCheckInstallSteps -Run $run }
+        'installplan' { Invoke-CamCheckInstallPlan -Run $run }
+        'installpreflight' { Invoke-CamCheckInstallPreflight -Run $run }
+        'installsandbox' { Invoke-CamCheckInstallSandbox -Run $run }
+        'docswitches' { Invoke-CamCheckDocSwitches -Run $run }
     }
 }
 
