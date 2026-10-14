@@ -1246,7 +1246,7 @@ The Operator approved all four. Documentation only; no code touched.
 
 - [x] **[83]** DROPPED by the Operator 2026-10-14. A date-partitioned layout (`<Cam>\<YYYY-MM-DD>\...`) was proposed so old days could be deleted safely, then withdrawn: it adds no deletion safety once the pruner only touches recording-container files whose names match the recorder's own scheme, and it would cost a midnight failure mode - ffmpeg's segment muxer does not create a missing date folder (verified: "Failed to open segment", exit -2; `-strftime_mkdir` has no effect), so the supervisor would have to pre-create tomorrow's folder or recording dies at midnight - plus changes to seven readers. The archive stays one folder per camera. Safety comes from the [24] hardening instead: container-only allowlist, name pattern, root guard, ownership marker, and an oldest-versus-newest sanity check before any deletion.
 
-- [ ] **[84]** **REGRESSION in [81], hit in production 2026-10-14 20:03.** An orderly `cam.ps1 -Stop -Recorder`
+- [x] **[84]** DONE 7b5c1e1 (merged, not yet exercised on the live NVR). **REGRESSION in [81], hit in production 2026-10-14 20:03.** An orderly `cam.ps1 -Stop -Recorder`
       followed by `-Start -Recorder` failed three times and left nothing recording for 5 min 34 s
       (last segment closed 20:03:17, next began 20:08:51). Two defects, both in the start path's
       "clear a dead NVR" branch (`Start-CamNvrWindow`, `cam.common.ps1`), the path flagged as "reasoned
@@ -1264,3 +1264,13 @@ The Operator approved all four. Documentation only; no code touched.
       removes the record it killed; the post-clear wait must not wait for a window that is not the NVR's
       own. Prove with a sandbox reproduction of exactly this sequence (shared window, foreign tab active,
       warden terminated) driving the real start-path decision, never the live NVR.
+
+      Fixed: a window record is valid only while the warden it names is alive and started no later than
+      the record (`Test-CamWindowRecordLive`); the reader deletes a stale record; `Stop-CamNvr` removes the
+      record of the warden it kills; the post-clear wait no longer waits for a window the NVR does not own
+      (`Resolve-CamWindowStart`). Reproduced red then green by the harness check `nvrstart`. NOT yet run
+      against the live NVR: the next orderly restart is its first production run. `Stop-CamDashboard` still
+      leaves `window-cam.dashboard.json` behind - harmless for -Status, not removed.
+      OPEN QUESTION: settings.json has `"windowingBehavior": "useNew"`, not `useExisting` as the code comments
+      say. How the NVR came to be a tab in window `nk` (0x1190726), and whether the other tabs there are the
+      Operator's own, is unverified.
