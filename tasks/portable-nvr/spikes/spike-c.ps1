@@ -23,7 +23,9 @@
     pts != dts on the video packets.
 #>
 $ErrorActionPreference = 'Stop'
-$OrigRepo = '\\wsl.localhost\Ubuntu-20.04\home\user\workspace\windows-terminal-IPCCTV-dashboard'
+# The original repository sits BESIDE this checkout: <workspace>\windows-terminal-IPCCTV-dashboard
+# (this script is <workspace>\windows-terminal-IPCCTV-dashboard-portable\tasks\portable-nvr\spikes\spike-c.ps1)
+$OrigRepo = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..\..\..\windows-terminal-IPCCTV-dashboard')).Path
 $ffprobe = 'C:\ffmpeg\bin\ffprobe.exe'
 $ProbeSeconds = 3
 $TimeoutMs = 15000
