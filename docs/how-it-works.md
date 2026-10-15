@@ -34,10 +34,11 @@ E:\cameras\
                             rotated the same way
 ```
 
-Two details in there are not preferences:
+Three details in there are not preferences:
 
 * **MKV, not MP4.** All six of these cameras emit `pcm_alaw` audio, and MP4 refuses `pcm_alaw` with stream copy. MKV is also the only container here that survives a crash: a file that was being written when the power went out still plays.
 * **The `+0300` suffix.** ffmpeg's `strftime` formatting is local time only and ignores `TZ` on Windows, so without the UTC offset in the name the repeated hour at the end of daylight saving would silently overwrite the first one.
+* **Every interval is measured in UTC.** `DateTime` subtraction ignores the offset, so a supervisor timed on local time loses an hour when daylight saving ends - every timer stalls, `status.json` goes stale and the watchdog goes blind - and gains one when it starts, when the watchdog kills every healthy child and alert 110 fires for every camera. Every timer, age and deadline reads one UTC clock and UTC file times instead. Local time is only ever shown: log stamps, segment names, and the timestamps in `status.json`, which carry their offset (`+03:00`) and are read back as exact instants.
 
 ## Retention
 

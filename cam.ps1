@@ -541,11 +541,11 @@ function Invoke-CamStopAll {
         # through its own shutdown is a truncated segment, and the supervisor
         # closes them in order precisely to avoid that.
         $orphans = @()
-        $deadline = (Get-Date).AddSeconds(20)
+        $deadline = (Get-CamWallClock).AddSeconds(20)
         while ($true) {
             $orphans = @(Get-CamProcessInventory -Config $Config |
                 Where-Object { $_.Role -in @('Supervisor', 'Recorder', 'Relay') })
-            if ($orphans.Count -eq 0 -or (Get-Date) -ge $deadline) { break }
+            if ($orphans.Count -eq 0 -or (Get-CamWallClock) -ge $deadline) { break }
             Start-Sleep -Milliseconds 500
         }
         if ($orphans.Count -gt 0) {
@@ -647,14 +647,14 @@ function Invoke-CamStartAll {
                 # began seconds later. Now that this exit code is acted on, a
                 # false alarm costs as much as the silence it replaced.
                 $waitSeconds = 60
-                $started = Get-Date
+                $started = Get-CamWallClock
                 $deadline = $started.AddSeconds($waitSeconds)
-                while ((Get-Date) -lt $deadline) {
+                while ((Get-CamWallClock) -lt $deadline) {
                     Start-Sleep -Milliseconds 500
                     $state = Get-CamSupervisorState -Config $Config -Snapshot (Get-CamStatusSnapshot -Config $Config)
                     if ($state.Running) { break }
                 }
-                $took = [int]((Get-Date) - $started).TotalSeconds
+                $took = [int]((Get-CamWallClock) - $started).TotalSeconds
                 if ($state.Running) {
                     Write-Host ("  up after {0}s - {1}" -f $took, $state.Reason) -ForegroundColor Green
                 }
@@ -675,9 +675,9 @@ function Invoke-CamStartAll {
             $wanted = (Get-CamRelayPathMap -Cameras (Get-CamList)).Count
             $seconds = [int]$Config.RelayReadyWaitSeconds
             if ($seconds -lt 5) { $seconds = 5 }
-            $deadline = (Get-Date).AddSeconds($seconds)
+            $deadline = (Get-CamWallClock).AddSeconds($seconds)
             $ready = @()
-            while ((Get-Date) -lt $deadline) {
+            while ((Get-CamWallClock) -lt $deadline) {
                 try { $ready = @(Get-CamRelayReadyPaths -Config $Config) } catch { $ready = @() }
                 if ($ready.Count -ge 1) { break }
                 Start-Sleep -Milliseconds ([int]$Config.RelayReadyPollMs)

@@ -420,7 +420,7 @@ function Get-CamStripArchiveRows {
 
     $spanText = 'no footage measured yet'
     if ($oldest -and $newest) {
-        $spanText = ("{0} -> {1} ({2}d)" -f $oldest.ToString('MM-dd HH:mm'), $newest.ToString('MM-dd HH:mm'), `
+        $spanText = ("{0} -> {1} ({2}d)" -f $oldest.ToLocalTime().ToString('MM-dd HH:mm'), $newest.ToLocalTime().ToString('MM-dd HH:mm'), `
             (Format-CamNumber -Value ($newest - $oldest).TotalDays -Format '0.0'))
     }
 

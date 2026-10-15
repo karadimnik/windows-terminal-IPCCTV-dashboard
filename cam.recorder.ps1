@@ -890,12 +890,12 @@ function Test-CamCrashSafety {
     Write-CamHost -Message ("  recording {0}s from {1} at {2}s segments, then taskkill /f" -f $killAfter, $Camera.Name, $segmentSeconds)
 
     $stdErr = Join-Path -Path $WorkDir -ChildPath 'crashtest.err'
-    $started = [DateTime]::Now
+    $started = Get-CamWallClock
     $process = Start-CamProcess -FilePath $Config.FfmpegPath -Arguments $arguments -StdErrPath $stdErr
 
     try {
         $deadline = $started.AddSeconds($killAfter)
-        while ([DateTime]::Now -lt $deadline -and -not $process.HasExited) {
+        while ((Get-CamWallClock) -lt $deadline -and -not $process.HasExited) {
             Start-Sleep -Milliseconds 500
         }
 
@@ -903,7 +903,7 @@ function Test-CamCrashSafety {
             $message = ''
             if (Test-Path -LiteralPath $stdErr) { $message = [System.IO.File]::ReadAllText($stdErr) }
             Add-CamTestResult -Check 'crash safety' -Status 'FAIL' `
-                -Detail ("ffmpeg exited on its own after {0:n0}s: {1}" -f ([DateTime]::Now - $started).TotalSeconds, (($message -split "`r?`n")[0]))
+                -Detail ("ffmpeg exited on its own after {0:n0}s: {1}" -f ((Get-CamWallClock) - $started).TotalSeconds, (($message -split "`r?`n")[0]))
             return 0
         }
 
@@ -914,7 +914,7 @@ function Test-CamCrashSafety {
         if (-not $process.HasExited) { $process.Kill() }
     }
 
-    $elapsed = ([DateTime]::Now - $started).TotalSeconds
+    $elapsed = ((Get-CamWallClock) - $started).TotalSeconds
     $files = @(Get-ChildItem -LiteralPath $cameraDir -File | Sort-Object Name)
 
     if ($files.Count -lt 2) {
@@ -1366,8 +1366,8 @@ function Show-CamArchiveProjection {
 
     Add-CamTestResult -Check 'archive on disk' -Status 'INFO' `
         -Detail ("{0} file(s), {1} GB, oldest {2}, newest {3}" -f $archive.Files, (Format-CamNumber -Value ($archive.Bytes / 1GB)), `
-            $(if ($archive.Oldest) { $archive.Oldest.ToString('yyyy-MM-dd HH:mm') } else { 'none' }), `
-            $(if ($archive.Newest) { $archive.Newest.ToString('yyyy-MM-dd HH:mm') } else { 'none' }))
+            $(if ($archive.Oldest) { $archive.Oldest.ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { 'none' }), `
+            $(if ($archive.Newest) { $archive.Newest.ToLocalTime().ToString('yyyy-MM-dd HH:mm') } else { 'none' }))
 
     if (-not $archive.GBPerDay) {
         Add-CamTestResult -Check 'projection from the archive' -Status 'INFO' `
@@ -1579,7 +1579,7 @@ function New-CamProcessEntry {
         LogSeen      = @{}
         StartedAt    = [DateTime]::MinValue
         Backoff      = 0
-        NextStartAt  = [DateTime]::Now
+        NextStartAt  = Get-CamWallClock
         RestartCount = 0
         # The pid of the most recent child, kept after it exits so -Stop can
         # tell an orphan from a child that shut down with its parent.
@@ -1676,7 +1676,7 @@ function Start-CamChild {
 
     $Entry.Process = $process
     $Entry.LastPid = $process.Id
-    $Entry.StartedAt = [DateTime]::Now
+    $Entry.StartedAt = Get-CamWallClock
     $Entry.TextBuffer = ''
     $Entry.Decoder = [System.Text.Encoding]::UTF8.GetDecoder()
     $Entry.ReadBuffer = New-Object byte[] 8192
@@ -1756,7 +1756,7 @@ function Read-CamChildOutput {
         [switch]$Final
     )
 
-    $now = [DateTime]::Now
+    $now = Get-CamWallClock
 
     while ($Entry.ReadTask) {
         if (-not $Entry.ReadStream) { $Entry.ReadTask = $null; break }
@@ -1789,6 +1789,35 @@ function Read-CamChildOutput {
 
         $Entry.ReadTask = $Entry.ReadStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
     }
+}
+
+
+function Measure-CamCameraDown {
+    <#
+        How long a camera has written nothing, for alert 110: seconds from its
+        last file progress - the newest closed segment's write or the creation
+        of the one ffmpeg holds - to $Now. All three times are UTC.
+
+        The supervisor's own start is the floor: a camera that was already dead
+        before this run cannot be reported as down for longer than there has
+        been anything watching it.
+    #>
+    param(
+        $Scan,
+        [Parameter(Mandatory = $true)][DateTime]$SupervisorStartedAt,
+        [Parameter(Mandatory = $true)][DateTime]$Now
+    )
+
+    $progress = $null
+    if ($Scan) {
+        $progress = $Scan.NewestClosedWrite
+        if ($Scan.CurrentCreated -and ($null -eq $progress -or $Scan.CurrentCreated -gt $progress)) {
+            $progress = $Scan.CurrentCreated
+        }
+    }
+    $reference = $SupervisorStartedAt
+    if ($null -ne $progress -and [DateTime]$progress -gt $reference) { $reference = [DateTime]$progress }
+    return @{ Reference = $reference; Seconds = ($Now - $reference).TotalSeconds }
 }
 
 
@@ -1825,8 +1854,8 @@ function Test-CamChildStalled {
     }
     elseif (Test-Path -LiteralPath $Entry.Dir) {
         $newest = Get-ChildItem -LiteralPath $Entry.Dir -File -ErrorAction SilentlyContinue |
-            Sort-Object -Property LastWriteTime -Descending | Select-Object -First 1
-        if ($newest -and $newest.LastWriteTime -gt $reference) { $reference = $newest.LastWriteTime }
+            Sort-Object -Property LastWriteTimeUtc -Descending | Select-Object -First 1
+        if ($newest -and $newest.LastWriteTimeUtc -gt $reference) { $reference = $newest.LastWriteTimeUtc }
     }
 
     $age = ($Now - $reference).TotalSeconds
@@ -1948,7 +1977,7 @@ function Set-CamChildBackoff {
     }
 
     $Entry.Backoff = $next
-    $Entry.NextStartAt = [DateTime]::Now.AddSeconds($next)
+    $Entry.NextStartAt = (Get-CamWallClock).AddSeconds($next)
     return $next
 }
 
@@ -2042,7 +2071,7 @@ function Start-CamRelayChild {
 
     $Entry.Process = $process
     $Entry.LastPid = $process.Id
-    $Entry.StartedAt = [DateTime]::Now
+    $Entry.StartedAt = Get-CamWallClock
     $Entry.TextBuffer = ''
     $Entry.Decoder = [System.Text.Encoding]::UTF8.GetDecoder()
     $Entry.ReadBuffer = New-Object byte[] 8192
@@ -2068,16 +2097,16 @@ function Start-CamRelayChild {
     $waitSeconds = 20
     try { $waitSeconds = [int]$Config.RelayStartupWaitSeconds } catch { }
     if ($waitSeconds -gt 0 -and $pathMap.Count -gt 0) {
-        $deadline = [DateTime]::Now.AddSeconds($waitSeconds)
+        $deadline = (Get-CamWallClock).AddSeconds($waitSeconds)
         $answered = $false
-        while ([DateTime]::Now -lt $deadline) {
+        while ((Get-CamWallClock) -lt $deadline) {
             if ($process.HasExited) { break }
             if ($null -ne (Get-CamRelayApiJson -Config $Config -Route 'v3/paths/list')) { $answered = $true; break }
             Start-Sleep -Milliseconds 500
         }
         $ready = @()
         if ($answered) { $ready = @(Get-CamRelayReadyPaths -Config $Config) }
-        $waited = ([DateTime]::Now - $Entry.StartedAt).TotalSeconds
+        $waited = ((Get-CamWallClock) - $Entry.StartedAt).TotalSeconds
         $message = "restreamer control API {0} after {1}s, serving {2} of {3} path(s): {4}" -f `
             $(if ($answered) { 'answered' } else { 'did not answer' }), `
             (Format-CamNumber -Value $waited -Format '0.0'), `
@@ -2247,7 +2276,7 @@ function Get-CamDirScan {
 
     $scan = @{
         Path              = $Path
-        ScannedAt         = [DateTime]::Now
+        ScannedAt         = Get-CamWallClock
         Files             = 0
         Bytes             = 0
         Current           = $null
@@ -2281,20 +2310,20 @@ function Get-CamDirScan {
             $scan.CurrentBytes = $length
         }
         else {
-            if ($null -eq $scan.NewestClosedWrite -or $file.LastWriteTime -gt $scan.NewestClosedWrite) {
-                $scan.NewestClosedWrite = $file.LastWriteTime
+            if ($null -eq $scan.NewestClosedWrite -or $file.LastWriteTimeUtc -gt $scan.NewestClosedWrite) {
+                $scan.NewestClosedWrite = $file.LastWriteTimeUtc
             }
         }
         $bytes += $length
-        if ($null -eq $scan.OldestWrite -or $file.LastWriteTime -lt $scan.OldestWrite) { $scan.OldestWrite = $file.LastWriteTime }
-        if ($null -eq $scan.NewestWrite -or $file.LastWriteTime -gt $scan.NewestWrite) { $scan.NewestWrite = $file.LastWriteTime }
+        if ($null -eq $scan.OldestWrite -or $file.LastWriteTimeUtc -lt $scan.OldestWrite) { $scan.OldestWrite = $file.LastWriteTimeUtc }
+        if ($null -eq $scan.NewestWrite -or $file.LastWriteTimeUtc -gt $scan.NewestWrite) { $scan.NewestWrite = $file.LastWriteTimeUtc }
     }
 
     $scan.Files = $files.Count
     $scan.Bytes = $bytes
     if ($current) {
         $scan.Current = $current.Name
-        $scan.CurrentCreated = $current.CreationTime
+        $scan.CurrentCreated = $current.CreationTimeUtc
     }
     return $scan
 }
@@ -2346,7 +2375,7 @@ function Get-CamArchiveScan {
     param([Parameter(Mandatory = $true)][string]$Root)
 
     $scan = @{
-        ScannedAt   = [DateTime]::Now
+        ScannedAt   = Get-CamWallClock
         Files       = 0
         Bytes       = 0
         Oldest      = $null
@@ -2428,7 +2457,7 @@ function Write-CamStatusFile {
         [string]$SupervisorLogPath
     )
 
-    $now = [DateTime]::Now
+    $now = Get-CamWallClock
     $freeGB = Get-CamFreeSpaceGB -Path $Config.RootPath
     $reserveGB = [double]$Config.ReserveGB
 
@@ -2737,7 +2766,7 @@ function Invoke-CamPrune {
                 }
             }
             if ($State) {
-                $State.LastRunAt = [DateTime]::Now
+                $State.LastRunAt = Get-CamWallClock
                 $State.Blocked = $true
                 $State.LastMessage = $result.Message
             }
@@ -2792,7 +2821,7 @@ function Invoke-CamPrune {
             $unprotected += $file
             # Strictly older than the newest of its own folder, by the same
             # time the order and the age rule use.
-            if ($file.LastWriteTime -lt $current.LastWriteTime) { $candidates += $file }
+            if ($file.LastWriteTimeUtc -lt $current.LastWriteTimeUtc) { $candidates += $file }
             else { $kept++ }
         }
         if ($kept -gt 0) {
@@ -2803,7 +2832,7 @@ function Invoke-CamPrune {
 
     # Globally oldest first, so retention is uniform across cameras instead of
     # emptying whichever camera happens to be scanned first.
-    $candidates = @($candidates | Sort-Object -Property LastWriteTime)
+    $candidates = @($candidates | Sort-Object -Property LastWriteTimeUtc)
     $result.Candidates = $candidates.Count
 
     $retentionDays = $null
@@ -2833,7 +2862,7 @@ function Invoke-CamPrune {
             }
             if ($State) {
                 $State.ClockRefused = $true
-                $State.LastRunAt = [DateTime]::Now
+                $State.LastRunAt = Get-CamWallClock
                 $State.Blocked = $true
                 $State.LastMessage = $result.Message
             }
@@ -2874,13 +2903,13 @@ function Invoke-CamPrune {
     }
 
     $consumed = @{}
-    $stamp = { param($time) $time.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) }
+    $stamp = { param($time) $time.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) }
 
     # (2) age rule
     $ageStop = 'age rule off'
     if ($ageRule) {
         $cutoff = $now.AddDays(-$retentionDays)
-        $expired = @($candidates | Where-Object { $_.LastWriteTime -lt $cutoff })
+        $expired = @($candidates | Where-Object { $_.LastWriteTimeUtc -lt $cutoff })
         $result.AgeBreaker = Get-CamAgePruneBreach -Expired $expired -Segments $segmentsSeen -Limit ([double]$Config.MaxAgePruneFraction)
     }
     if ($result.AgeBreaker) {
@@ -2902,13 +2931,13 @@ function Invoke-CamPrune {
         $firstKept = $null
         foreach ($file in $candidates) {
             # Oldest first, so the first file inside the cutoff ends the rule.
-            if ($file.LastWriteTime -ge $cutoff) { $firstKept = $file; break }
+            if ($file.LastWriteTimeUtc -ge $cutoff) { $firstKept = $file; break }
             $consumed[$file.FullName] = $true
             if (& $deleteOne $file ("older than MaxRetentionDays=$retentionDays")) { $ageDeleted++ }
         }
         if ($firstKept) {
             $ageStop = "age rule reached its cutoff {0} after {1} deletion(s), stopping at {2} (written {3})" -f `
-                (& $stamp $cutoff), $ageDeleted, $firstKept.Name, (& $stamp $firstKept.LastWriteTime)
+                (& $stamp $cutoff), $ageDeleted, $firstKept.Name, (& $stamp $firstKept.LastWriteTimeUtc)
         }
         else {
             $ageStop = "age rule: {0} deletion(s), every candidate was older than the cutoff {1} - nothing deletable left" -f $ageDeleted, (& $stamp $cutoff)
@@ -2997,7 +3026,7 @@ function Invoke-CamPrune {
     }
 
     if ($State -and -not $DryRun) {
-        $State.LastRunAt = [DateTime]::Now
+        $State.LastRunAt = Get-CamWallClock
         $State.DeletedTotal = $State.DeletedTotal + $result.Deleted
         $State.FreedBytes = $State.FreedBytes + $result.FreedBytes
         $State.Blocked = $result.Blocked
@@ -3152,9 +3181,9 @@ function Invoke-CamStopSupervisor {
     Write-CamHost -Message ("stop requested; waiting for supervisor pid {0}" -f $supervisorPid) -Colour 'Cyan'
 
     $timeout = [double]$Config.StopTimeoutSeconds
-    $deadline = [DateTime]::Now.AddSeconds($timeout)
+    $deadline = (Get-CamWallClock).AddSeconds($timeout)
     $stopped = $false
-    while ([DateTime]::Now -lt $deadline) {
+    while ((Get-CamWallClock) -lt $deadline) {
         if (-not (Get-Process -Id $supervisorPid -ErrorAction SilentlyContinue)) { $stopped = $true; break }
         Start-Sleep -Milliseconds 500
     }
@@ -3297,7 +3326,7 @@ function Invoke-CamReconcile {
         $entry = New-CamChildFor -Camera $camera -Paths $Paths -ContainerProfile $ContainerProfile
         # No backoff on a fresh enable: the operator should see it recording on
         # the next tick, not after a wait inherited from some earlier failure.
-        $entry.NextStartAt = [DateTime]::Now
+        $entry.NextStartAt = Get-CamWallClock
         $Children[$camera.SafeName] = $entry
 
         if (-not $First) {
@@ -3377,7 +3406,7 @@ function Invoke-CamSupervisor {
                 $jobResult.JobName, $jobResult.Problem) -MaxBytes $maxBytes
     }
 
-    $startedAt = [DateTime]::Now
+    $startedAt = Get-CamWallClock
     $children = @{}
     $cameras = @()
     $archive = $null
@@ -3424,7 +3453,7 @@ function Invoke-CamSupervisor {
 
     try {
         while ($true) {
-            $now = [DateTime]::Now
+            $now = Get-CamWallClock
 
             if (Test-Path -LiteralPath $stopFlag) {
                 $stopRequested = $true
@@ -3434,7 +3463,7 @@ function Invoke-CamSupervisor {
             }
 
             # --- live pickup: cameras.json changed since the last look?
-            if (($now - $lastReconcile).TotalSeconds -ge [double]$Config.ReconcileSeconds) {
+            if (Test-CamIntervalDue -Last $lastReconcile -Seconds ([double]$Config.ReconcileSeconds) -Now $now) {
                 $lastReconcile = $now
 
                 $stamp = $listStamp
@@ -3471,10 +3500,10 @@ function Invoke-CamSupervisor {
                 Invoke-CamRelayTick -Entry $relay -Config $Config -Credential $credential `
                     -SupervisorLog $supervisorLog -Now $now
                 # A relay start waits for its paths, so the clock has moved.
-                $now = [DateTime]::Now
+                $now = Get-CamWallClock
             }
 
-            $statusDue = (($now - $lastStatus).TotalSeconds -ge [double]$Config.StatusIntervalSeconds)
+            $statusDue = Test-CamIntervalDue -Last $lastStatus -Seconds ([double]$Config.StatusIntervalSeconds) -Now $now
 
             # ONE control-API list query per cycle, shared by every child,
             # rather than one probe per camera. Asked on a status tick, and
@@ -3623,7 +3652,7 @@ function Invoke-CamSupervisor {
                         # do not need, and the Operator asked for the spacing.
                         if ($startedThisCycle -gt 0 -and $staggerMs -gt 0) {
                             Start-Sleep -Milliseconds $staggerMs
-                            $now = [DateTime]::Now
+                            $now = Get-CamWallClock
                         }
                         $startedThisCycle = $startedThisCycle + 1
 
@@ -3655,19 +3684,9 @@ function Invoke-CamSupervisor {
                 # and its StartedAt is always recent. Segments either appear or
                 # they do not.
                 foreach ($entry in @($children.Values)) {
-                    $progress = $null
-                    if ($entry.Scan) {
-                        $progress = $entry.Scan.NewestClosedWrite
-                        if ($entry.Scan.CurrentCreated -and ($null -eq $progress -or $entry.Scan.CurrentCreated -gt $progress)) {
-                            $progress = $entry.Scan.CurrentCreated
-                        }
-                    }
-                    # The supervisor's own start is the floor: a camera that was
-                    # already dead before this run cannot be reported as down
-                    # for longer than there has been anything watching it.
-                    $reference = $startedAt
-                    if ($null -ne $progress -and [DateTime]$progress -gt $reference) { $reference = [DateTime]$progress }
-                    $downSeconds = ($now - $reference).TotalSeconds
+                    $down = Measure-CamCameraDown -Scan $entry.Scan -SupervisorStartedAt $startedAt -Now $now
+                    $reference = $down.Reference
+                    $downSeconds = $down.Seconds
 
                     if ($downSeconds -le $downAlertSeconds) {
                         if ($entry.DownSince) {
@@ -3680,7 +3699,7 @@ function Invoke-CamSupervisor {
                     }
 
                     if ($null -eq $entry.DownSince) { $entry.DownSince = $reference }
-                    $due = ($null -eq $entry.DownAlertedAt) -or (($now - $entry.DownAlertedAt).TotalHours -ge $downRepeatHours)
+                    $due = ($null -eq $entry.DownAlertedAt) -or (Test-CamIntervalDue -Last $entry.DownAlertedAt -Seconds ($downRepeatHours * 3600) -Now $now)
                     if (-not $due) { continue }
 
                     $entry.DownAlertedAt = $now
@@ -3691,7 +3710,7 @@ function Invoke-CamSupervisor {
                             -EventId 110 -EntryType 'Warning' -LogPath $supervisorLog -LogMaxBytes $maxBytes)
                 }
 
-                if (($now - $lastArchiveScan).TotalSeconds -ge [double]$Config.ArchiveScanSeconds) {
+                if (Test-CamIntervalDue -Last $lastArchiveScan -Seconds ([double]$Config.ArchiveScanSeconds) -Now $now) {
                     $lastArchiveScan = $now
                     try { $archive = Get-CamArchiveScan -Root $Config.RootPath }
                     catch { Write-CamLog -Path $supervisorLog -Message ("archive scan failed: {0}" -f $_.Exception.Message) -MaxBytes $maxBytes }
@@ -3707,7 +3726,7 @@ function Invoke-CamSupervisor {
                 }
             }
 
-            if (($now - $lastPrune).TotalSeconds -ge [double]$Config.PruneIntervalSeconds) {
+            if (Test-CamIntervalDue -Last $lastPrune -Seconds ([double]$Config.PruneIntervalSeconds) -Now $now) {
                 $lastPrune = $now
                 try { [void](Invoke-CamPrune -Config $Config -SupervisorLog $supervisorLog -State $pruneState) }
                 catch { Write-CamLog -Path $supervisorLog -Message ("prune failed: {0}" -f $_.Exception.Message) -MaxBytes $maxBytes }
@@ -3739,7 +3758,7 @@ function Invoke-CamSupervisor {
 
         if ($stopKind -eq 'unexpected') {
             $lastUnexpectedStop = [pscustomobject]@{
-                At            = Format-CamTimestamp -Value ([DateTime]::Now)
+                At            = Format-CamTimestamp -Value (Get-CamWallClock)
                 Reason        = Get-CamRedacted -Text $reason
                 SupervisorPid = $PID
                 DetectedBy    = 'supervisor'
