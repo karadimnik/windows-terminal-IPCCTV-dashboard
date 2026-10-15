@@ -921,17 +921,21 @@ function Start-CamTestSyntheticCamera {
         # publishers need none. Fake credentials only.
         [string]$ReadUser,
         [string]$ReadPass,
-        [int]$TimeoutSeconds = 20
+        [int]$TimeoutSeconds = 20,
+        # A control API on this loopback port, no login (sandbox only), so a
+        # check can count the sessions on the camera's own paths. 0 = none.
+        [int]$ApiPort = 0
     )
 
     if (-not (Test-CamTestPortFree -Port $Port)) { throw "TCP port $Port is already in use; the synthetic camera needs it free." }
+    if ($ApiPort -and -not (Test-CamTestPortFree -Port $ApiPort)) { throw "TCP port $ApiPort is already in use; the synthetic camera's API needs it free." }
 
     $work = Join-Path -Path $Dir -ChildPath 'synthcam'
     [void](New-Item -ItemType Directory -Path $work -Force)
     $config = Join-Path -Path $work -ChildPath 'mediamtx.yml'
     $log = Join-Path -Path $work -ChildPath 'mediamtx.out'
     $yml = @(
-        'logLevel: info', 'logDestinations: [stdout]', 'api: no', 'metrics: no', 'pprof: no', 'playback: no',
+        'logLevel: info', 'logDestinations: [stdout]', $(if ($ApiPort) { "api: yes`napiAddress: 127.0.0.1:$ApiPort" } else { 'api: no' }), 'metrics: no', 'pprof: no', 'playback: no',
         'rtsp: yes', 'rtspTransports: [tcp]', "rtspAddress: 127.0.0.1:$Port",
         'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'moq: no'
     )
@@ -2234,4 +2238,155 @@ function Copy-CamTestMasterFile {
     if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
     & cmd.exe /c ('wsl.exe -e git -C "{0}" show "master:{1}" > "{2}"' -f $linux, $Name, $Destination) | Out-Null
     return ((Test-Path -LiteralPath $Destination) -and ((Get-Item -LiteralPath $Destination).Length -gt 0))
+}
+
+
+function Test-CamTestUdpPortFree {
+    <# True when nothing on this machine has UDP $Port bound. #>
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveUdpListeners()
+    return (@($listeners | Where-Object { $_.Port -eq $Port }).Count -eq 0)
+}
+
+
+function Get-CamTestBrowser {
+    <#
+        Chrome or Edge as installed, or $null with the reason. A browser with a
+        staged update (new_chrome.exe / new_msedge.exe beside it) is refused:
+        launching it would apply the update to the Operator's real install.
+        Firefox is never used.
+    #>
+    param([Parameter(Mandatory = $true)][ValidateSet('chrome', 'edge')][string]$Browser)
+
+    $candidates = $(if ($Browser -eq 'chrome') { @('C:\Program Files\Google\Chrome\Application\chrome.exe', 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe') }
+        else { @('C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', 'C:\Program Files\Microsoft\Edge\Application\msedge.exe') })
+    $exe = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $exe) { return [pscustomobject]@{ Exe = $null; Version = ''; Reason = "$Browser is not installed" } }
+    $staged = Join-Path -Path (Split-Path -Path $exe -Parent) -ChildPath $(if ($Browser -eq 'chrome') { 'new_chrome.exe' } else { 'new_msedge.exe' })
+    if (Test-Path -LiteralPath $staged) { return [pscustomobject]@{ Exe = $null; Version = ''; Reason = "$Browser has a staged update ($staged); not launched" } }
+    return [pscustomobject]@{ Exe = $exe; Version = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion; Reason = '' }
+}
+
+
+function Start-CamTestBrowser {
+    <#
+        Starts Chrome or Edge on $Url, headed, in a small window, with a
+        throwaway profile folder whose path is unique and sits on the command
+        line: that path is the marker Stop-CamTestBrowser finds the processes
+        by. ShellExecute, so no handle is inherited by this shell. Never
+        touches a browser this run did not start.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('chrome', 'edge')][string]$Browser,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$BaseDir,
+        # Fake capture device and no prompt, which makes Chromium expose decoderImplementation in getStats.
+        [switch]$Capture
+    )
+
+    $found = Get-CamTestBrowser -Browser $Browser
+    if (-not $found.Exe) { throw $found.Reason }
+    Add-Type -ErrorAction SilentlyContinue -Name Pw -Namespace CamTest -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, System.UIntPtr x);
+'@
+    # A sleeping display makes the page hidden and stops rendering; hold it awake for this process only.
+    [void][CamTest.Pw]::SetThreadExecutionState([uint32]2147483651)
+    [CamTest.Pw]::mouse_event(1, 0, 0, 0, [System.UIntPtr]::Zero)
+
+    $profile = Join-Path -Path $BaseDir -ChildPath ('prof-{0}-{1}' -f $Browser, [guid]::NewGuid().ToString('n').Substring(0, 8))
+    [void](New-Item -ItemType Directory -Path $profile -Force)
+    $arguments = '--user-data-dir="{0}" --new-window --no-first-run --no-default-browser-check --window-position=40,40 --window-size=720,520 --autoplay-policy=no-user-gesture-required --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows{2} "{1}"' -f $profile, $Url, $(if ($Capture) { ' --use-fake-ui-for-media-stream --use-fake-device-for-media-stream' } else { '' })
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $found.Exe
+    $info.Arguments = $arguments
+    $info.UseShellExecute = $true
+    $process = [System.Diagnostics.Process]::Start($info)
+    return [pscustomobject]@{ Browser = $Browser; Version = $found.Version; Pid = $process.Id; Profile = $profile; StartedAt = [DateTime]::UtcNow }
+}
+
+
+function Get-CamTestBrowserPids {
+    <# Every process carrying the profile marker on its command line, plus all their descendants. #>
+    param([Parameter(Mandatory = $true)]$Started)
+
+    $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CommandLine)
+    $set = New-Object System.Collections.Generic.HashSet[int]
+    [void]$set.Add([int]$Started.Pid)
+    foreach ($p in $all) { if ($p.CommandLine -and $p.CommandLine.Contains($Started.Profile)) { [void]$set.Add([int]$p.ProcessId) } }
+    do {
+        $n = $set.Count
+        foreach ($p in $all) { if ($set.Contains([int]$p.ParentProcessId)) { [void]$set.Add([int]$p.ProcessId) } }
+    } while ($set.Count -ne $n)
+    return @($set | Sort-Object)
+}
+
+
+function Stop-CamTestBrowser {
+    <# Kills exactly the processes Get-CamTestBrowserPids finds and removes the throwaway profile. Returns what was left, if anything. #>
+    param([Parameter(Mandatory = $true)]$Started)
+
+    foreach ($id in @(Get-CamTestBrowserPids -Started $Started)) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 1500
+    $left = @(Get-CamTestBrowserPids -Started $Started | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    for ($i = 0; $i -lt 8 -and (Test-Path -LiteralPath $Started.Profile); $i++) {
+        Remove-Item -LiteralPath $Started.Profile -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $Started.Profile) { Start-Sleep -Seconds 1 }
+    }
+    return [pscustomobject]@{ Left = $left; ProfileRemoved = -not (Test-Path -LiteralPath $Started.Profile) }
+}
+
+
+function Start-CamTestLiveServer {
+    <#
+        Starts tests\live\server.ps1 (the stand-in for camui) in its own hidden
+        PowerShell and waits for /health. The login's secret travels as a FILE
+        PATH, never as text. Returns the process.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Prefix,
+        [Parameter(Mandatory = $true)][string]$PageFile,
+        [Parameter(Mandatory = $true)][string]$DataDir,
+        [string]$WhepBase = '',
+        [string]$SecretFile = '',
+        [string]$Login = 'right'
+    )
+
+    $script = Join-Path -Path (Join-Path -Path (Get-CamTestRepo) -ChildPath 'tests\live') -ChildPath 'server.ps1'
+    $argumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script, '-Prefix', $Prefix, '-PageFile', $PageFile, '-DataDir', $DataDir, '-Login', $Login)
+    if ($WhepBase) { $argumentList += @('-WhepBase', $WhepBase) }
+    if ($SecretFile) { $argumentList += @('-SecretFile', $SecretFile) }
+    $errFile = Join-Path -Path $DataDir -ChildPath ('server-{0}.err' -f ([uri]$Prefix).Port)
+    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList (Get-CamCommandLine -Arguments $argumentList) -PassThru -WindowStyle Hidden `
+        -RedirectStandardError $errFile -RedirectStandardOutput "$errFile.out"
+    [void]$process.Handle
+    $deadline = [DateTime]::Now.AddSeconds(30)
+    while ([DateTime]::Now -lt $deadline) {
+        if ($process.HasExited) { throw ("the live test server exited: " + [System.IO.File]::ReadAllText($errFile)) }
+        try {
+            $r = [System.Net.HttpWebRequest]::Create($Prefix + 'health'); $r.Proxy = $null; $r.Timeout = 1500
+            $x = $r.GetResponse(); $x.Dispose(); return $process
+        } catch { Start-Sleep -Milliseconds 400 }
+    }
+    try { $process.Kill() } catch { }
+    throw 'the live test server did not answer /health within 30 s'
+}
+
+
+function Read-CamTestLiveStats {
+    <# The page's posted events (one JSON object per line) as objects; unreadable lines skipped. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $events = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $reader = New-Object System.IO.StreamReader($stream)
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ($line.Trim().Length -eq 0) { continue }
+            try { [void]$events.Add((ConvertFrom-Json -InputObject $line)) } catch { }
+        }
+    } finally { $stream.Dispose() }
+    return @($events)
 }

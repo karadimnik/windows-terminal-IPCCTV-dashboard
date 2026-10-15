@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>live view test page</title>
+<style>html,body{margin:0;background:#000;color:#0f0;font:12px Consolas,monospace}video{width:320px;height:200px;background:#111;object-fit:contain}.t{display:inline-block;margin:2px}</style>
+<div id="g"></div>
+<script>
+// Test page for the Stage 1A live-view checks (not part of the product). Query: tiles=<path>,<path>  run=<id>  unmute=<seconds>
+// Every WHEP request goes to THIS origin (/whep/<path>); the server in server.ps1 adds the login, as camui will.
+const q = new URLSearchParams(location.search);
+const RUN = q.get('run') || 'adhoc', PATHS = (q.get('tiles') || '').split(',').filter(Boolean), UNMUTE = parseFloat(q.get('unmute') || '0'), CAP = q.get('cap') === '1';
+const post = o => fetch('/stats?run=' + encodeURIComponent(RUN), { method: 'POST', body: JSON.stringify(o) }).catch(() => {});
+const tiles = PATHS.map(p => {
+  const d = document.createElement('div'); d.className = 't';
+  const v = document.createElement('video'); v.muted = true; v.autoplay = true; v.playsInline = true; d.append(v, document.createTextNode(p));
+  document.getElementById('g').append(d); return { path: p, video: v, pc: null, status: null, error: null };
+});
+const gathered = (pc, ms) => new Promise(res => { if (pc.iceGatheringState === 'complete') return res(); const t = setTimeout(res, ms); pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } }); });
+async function start(t) {
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [] }); t.pc = pc;
+    pc.addTransceiver('video', { direction: 'recvonly' }); pc.addTransceiver('audio', { direction: 'recvonly' });
+    pc.ontrack = e => { if (t.video.srcObject !== e.streams[0]) t.video.srcObject = e.streams[0]; };
+    pc.onconnectionstatechange = () => post({ ev: 'conn', path: t.path, state: pc.connectionState, t: Date.now() });
+    await pc.setLocalDescription(await pc.createOffer()); await gathered(pc, 2000);
+    const r = await fetch('/whep/' + t.path, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+    t.status = r.status;
+    if (r.status !== 201) { t.error = 'HTTP ' + r.status; return; }
+    await pc.setRemoteDescription({ type: 'answer', sdp: await r.text() });
+  } catch (e) { t.error = String(e); }
+}
+async function sample(t) {
+  const o = { path: t.path, status: t.status, error: t.error, muted: t.video.muted, vw: t.video.videoWidth, vh: t.video.videoHeight };
+  if (t.pc) { try { let v, a; (await t.pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'video') v = r; if (r.type === 'inbound-rtp' && r.kind === 'audio') a = r; });
+    if (v) o.v = { framesDecoded: v.framesDecoded, framesReceived: v.framesReceived, framesDropped: v.framesDropped, fps: v.framesPerSecond, impl: v.decoderImplementation, powerEfficient: v.powerEfficientDecoder, w: v.frameWidth, h: v.frameHeight, freezes: v.freezeCount };
+    if (a) o.a = { energy: a.totalAudioEnergy, level: a.audioLevel, samples: a.totalSamplesReceived, packets: a.packetsReceived }; } catch (e) { o.err = String(e); } }
+  return o;
+}
+post({ ev: 'start', t: Date.now(), ua: navigator.userAgent, cap: CAP, tiles: PATHS });
+// cap=1 holds a fake audio capture: Chromium then exposes decoderImplementation in getStats (and offers real interface addresses, so ICE needs the TCP listener)
+(async () => {
+  if (CAP) { try { window.capStream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e) { post({ ev: 'error', msg: 'cap ' + e, t: Date.now() }); } }
+  tiles.forEach((t, i) => setTimeout(() => start(t), i * 200));
+})();
+setInterval(async () => post({ ev: 's', t: Date.now(), vis: document.visibilityState, tiles: await Promise.all(tiles.map(sample)) }), 1000);
+if (UNMUTE > 0) setTimeout(() => { tiles[0].video.muted = false; tiles[0].video.volume = 1; post({ ev: 'unmute', t: Date.now(), path: tiles[0].path }); }, UNMUTE * 1000);
+</script>
