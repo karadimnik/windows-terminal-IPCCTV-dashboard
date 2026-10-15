@@ -51,6 +51,11 @@ type Config struct {
 	// config file or from CAMUI_TOKEN, never from a flag: a command line is
 	// readable by every process on the machine.
 	Token string `json:"token"`
+
+	// AllowedHosts are extra Host header names (port ignored) the request
+	// guard accepts beside localhost, 127.0.0.1, ::1 and the listen host. See
+	// guard.go. Config file only.
+	AllowedHosts []string `json:"allowedHosts"`
 }
 
 // CamerasFile is the camera list the scripts read, beside them.
