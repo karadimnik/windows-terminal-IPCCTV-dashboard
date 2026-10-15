@@ -837,6 +837,10 @@ function Start-CamTestSyntheticCamera {
         [Parameter(Mandatory = $true)][string]$Dir,
         [Parameter(Mandatory = $true)][int]$Port,
         [Parameter(Mandatory = $true)][string[]]$PathName,
+        # Repeats every fifth video timestamp, which makes the recorder's
+        # ffmpeg warn "Non-monotonic DTS" the way these cameras make it warn,
+        # so the per-camera log has something to grow on.
+        [switch]$NonMonotonic,
         [int]$TimeoutSeconds = 20
     )
 
@@ -868,14 +872,15 @@ function Start-CamTestSyntheticCamera {
 
         $ffmpeg = (Get-CamConfigDefault).FfmpegPath
         foreach ($name in $PathName) {
-            $publish = @('-hide_banner', '-loglevel', 'warning', '-nostdin',
+            $publish = @('-hide_banner', '-loglevel', 'error', '-nostdin',
                 '-re', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=15',
                 '-re', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=8000',
                 '-map', '0:v', '-map', '1:a',
                 '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
                 '-g', '15', '-keyint_min', '15', '-sc_threshold', '0',
-                '-c:a', 'pcm_alaw', '-ar', '8000', '-ac', '1',
-                '-f', 'rtsp', '-rtsp_transport', 'tcp', "rtsp://127.0.0.1:$Port/$name")
+                '-c:a', 'pcm_alaw', '-ar', '8000', '-ac', '1')
+            if ($NonMonotonic) { $publish += '-bsf:v', 'setts=ts=if(eq(mod(N\,5)\,4)\,PREV_OUTPTS\,PTS)' }
+            $publish += @('-f', 'rtsp', '-rtsp_transport', 'tcp', "rtsp://127.0.0.1:$Port/$name")
             $publisherLog = Join-Path -Path $work -ChildPath "publish-$name.err"
             # Retried until MediaMTX is listening: a publisher that connects
             # first exits at once, and that is the only race here.
