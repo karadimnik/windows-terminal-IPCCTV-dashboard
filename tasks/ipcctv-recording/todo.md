@@ -1304,7 +1304,7 @@ The Operator approved all four. Documentation only; no code touched.
   every interval by an hour (fall-back 2026-10-25: timers stall 1 h; spring-forward 2027-03-28: the watchdog
   kills every child and alert 110 fires for every camera). B5 soak not run.
 
-- [ ] **[86]** **DEADLINE 2026-10-25 04:00 -> 03:00 (this machine, GTB Standard Time; next 2027-03-28 03:00 -> 04:00).**
+- [x] **[86]** DONE 372f86c, merged locally 2026-10-15 (not pushed; not yet run against the real cameras). **DEADLINE 2026-10-25 04:00 -> 03:00 (this machine, GTB Standard Time; next 2027-03-28 03:00 -> 04:00).**
       DST breaks the supervisor loop because it runs on local `[DateTime]::Now` and local file times, and
       `DateTime` arithmetic ignores the offset. Re-measured 2026-10-15: a real 600 s gap reads +4200 s at
       spring-forward and -3000 s at fall-back; through `ToUniversalTime()` it is 600 s in both. Effects (the
@@ -1324,3 +1324,10 @@ The Operator approved all four. Documentation only; no code touched.
       (T2, the real supervisor through a simulated fall-back and spring-forward and a +/-3600 s clock step) and
       `clocklint` (T3). Status-gap limits are now 3 x interval + 1.5 s. A real transition has not been observed
       live; a step of the UTC clock itself is still not absorbed (docs/limitations.md item 14).
+
+      Verified independently: full harness 40 passed / 0 failed / 1 skipped; grep finds no local-clock arithmetic.
+      STILL INFERRED: live behaviour at 04:00 on 2026-10-25 (the machine clock cannot be moved). KNOWN LIMITS, documented:
+      a +/-3600 s step of the UTC clock itself (not DST) still disturbs the timers (forward: one false child kill and one
+      alert 110; backward: timers frozen until the clock catches up) - a monotonic Stopwatch would absorb it, not built;
+      a warden created inside the repeated hour reads 1 h old so -Status loses the window name for that hour (recording
+      unaffected). One flaky phase seen once by the agent (dstloop step-3600, Access denied on a test file rename).
