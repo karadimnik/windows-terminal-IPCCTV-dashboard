@@ -1354,3 +1354,19 @@ The Operator approved all four. Documentation only; no code touched.
   than a real one. A micro-test showed `Write-CamLog` (old and new) is flat over 45,000 calls, so the cause is unproven
   (a leak elsewhere, or collector drift). Worst case scaled to real log rates is about 2 MB/day. The check reports
   memory but only fails on handles. FOLLOW-UP (cheap, report-only): a 60-minute soak on a QUIET camera.
+
+- [x] **[88]** DONE 2026-10-15 (merged locally, not pushed): the camera password no longer reaches mpv's command line. A
+      viewer pane starts mpv `--idle=once` with a random private IPC pipe and hands it the credentialed URL over
+      `loadfile`, then unsets the pipe so nothing can reconnect to read the `path` back. A failed hand-over never falls
+      back to the command line. Check `viewerpw`: password on 0 of 104 process-listing sweeps, red against the old
+      function. Audit of the remaining exposures: [89], and the ffmpeg direct path below.
+- [ ] **[89]** SECURITY, found by the [88] audit and reproduced 2026-10-15: MediaMTX's control API (`api: yes`, no
+      `authMethod`, loopback) returns a camera's full `rtsp://user:PASSWORD@...` source from `/v3/config/paths/list` and
+      `/v3/config/paths/get/<name>` to ANY local process or Windows account; the routes the product uses
+      (`/v3/paths/*`) do not leak it. No `Access-Control-Allow-Origin` is sent, so an ordinary web page cannot read it
+      (DNS rebinding untested). Decided with the Operator: fix now, before the portable project: enable API
+      authentication with a login the product holds like the camera credential, keep the anonymous RTSP read/publish
+      behaviour, and make sure a failing readiness probe can NOT push viewers or recorders onto direct inputs.
+- [ ] **[90]** The recorder's ffmpeg children put the credentialed URL on their command line on the DIRECT path
+      (relay off, or its path not ready), and `-SelfTest` probes always do. Not fixed; the relay path avoids it.
+      Candidate: refuse direct input for recording when the relay is enabled, or accept as the floor.

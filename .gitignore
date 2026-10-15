@@ -39,3 +39,9 @@ camui.config.json
 
 # Agent working notes for this workspace - local to the machine, never published
 .claude/
+
+# Never commit key or certificate material (a MediaMTX started in the wrong folder writes auto.crt/auto.key)
+*.key
+*.crt
+*.pem
+*.pfx
