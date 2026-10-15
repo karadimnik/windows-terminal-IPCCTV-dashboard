@@ -1341,3 +1341,10 @@ The Operator approved all four. Documentation only; no code touched.
       PCMA mandatory). It is the plan's V3. TO DO: (a) test whether mpv's JSON IPC (`--input-ipc-server`, then
       `loadfile`) keeps the URL off the process command line - an in-architecture fix; (b) interview the Operator
       on the browser direction before any build: scope, which OS, what to keep of the grid and health strip.
+
+- **[87] update 2026-10-15:** the Operator chose the incremental, additive route: grow the web app first (live view
+      in the page), then an OS-independent recorder, then the supervisor; PC, then LAN, then internet; NOTHING removed.
+      Sub-plan written: `tasks/portable-nvr/plan.md` (stages 0-5, rules, decisions D1-D6). The mpv password exposure has
+      its own small in-architecture fix (mpv JSON IPC `loadfile`, verified by experiment) queued as Stage 1b. The soak
+      and 1b wait for the usage limit to reset (2026-10-20 01:00 Bucharest); a WIP soak check is parked on
+      `executor/soak` (untested, not for merging as is).
