@@ -1,0 +1,100 @@
+{
+ "meta": {
+  "run": "A-chrome-probe",
+  "browser": "chrome",
+  "hw": "on",
+  "tiles": "m1",
+  "layout": "single",
+  "probe": true,
+  "warmup_s": 20,
+  "sample_s": 60,
+  "hide_at_s": 0,
+  "profile": "C:\\Users\\user\\AppData\\Local\\Temp\\stage0\\prof-A-chrome-probe-6df595",
+  "root_pid": 93964,
+  "launch_ms": 1792086607715,
+  "window": "0,0,1920,1080",
+  "sample_start_ms": 1792086627742,
+  "sample_end_ms": 1792086695968,
+  "pids_end": 1,
+  "profile_removed": true
+ },
+ "cpu": {
+  "n": 23,
+  "cpu_mean": 75.6,
+  "cpu_max": 125.7,
+  "thread_mean": 34.7,
+  "thread_max": 49.7,
+  "ws_mb": 821.7,
+  "sys_cpu": 96.5,
+  "rig_cpu": 8.5,
+  "procs": 24
+ },
+ "gpu": {
+  "n": 26,
+  "mine": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    5.5,
+    9.5
+   ],
+   "NVIDIA GeForce GTX 1070 Ti|videodecode": [
+    10.1,
+    15.3
+   ]
+  },
+  "all": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    7.5,
+    13.2
+   ],
+   "NVIDIA GeForce GTX 1070 Ti|videodecode": [
+    10.1,
+    15.3
+   ]
+  }
+ },
+ "page": {
+  "tiles": {
+   "m1": {
+    "path": "m1",
+    "res": "2560x1440",
+    "impl": "ExternalDecoder (D3D11VideoDecoder)",
+    "power_eff": true,
+    "fps": 20.0,
+    "dropped": 0,
+    "received": 1320,
+    "decoded": 1319,
+    "freezes": 0,
+    "freeze_s": 0,
+    "lost": 0,
+    "ttff_ms": 1182,
+    "jb_ms": 205.6,
+    "dec_ms": 3.47,
+    "render_dropped": 3,
+    "render_total": 1319,
+    "audio_level_last": 0.038087099826044496,
+    "audio_energy_d": 0.09573
+   }
+  },
+  "vis": [
+   "visible"
+  ],
+  "errors": [],
+  "restarts": 0,
+  "gather_ms": {
+   "m1": 232
+  },
+  "window_s": 66.0
+ },
+ "verdict": "smooth",
+ "latency_s": {
+  "n": 1057,
+  "median": 0.246,
+  "p10": 0.174,
+  "p90": 0.272
+ },
+ "recv_to_callback_ms": {
+  "n": 1057,
+  "median": 243.2,
+  "p90": 319.2
+ }
+}

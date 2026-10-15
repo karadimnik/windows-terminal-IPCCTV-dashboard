@@ -1,0 +1,93 @@
+{
+ "meta": {
+  "run": "A-edge-clean",
+  "browser": "edge",
+  "hw": "on",
+  "tiles": "m1",
+  "layout": "single",
+  "probe": false,
+  "warmup_s": 30,
+  "sample_s": 180,
+  "hide_at_s": 0,
+  "profile": "C:\\Users\\user\\AppData\\Local\\Temp\\stage0\\prof-A-edge-clean-be1d01",
+  "root_pid": 6332,
+  "launch_ms": 1792086700479,
+  "window": "0,0,1920,1080",
+  "sample_start_ms": 1792086730157,
+  "sample_end_ms": 1792086914628,
+  "pids_end": 1,
+  "profile_removed": true
+ },
+ "cpu": {
+  "n": 89,
+  "cpu_mean": 21.4,
+  "cpu_max": 76.8,
+  "thread_mean": 4.9,
+  "thread_max": 38.1,
+  "ws_mb": 518.2,
+  "sys_cpu": 81.6,
+  "rig_cpu": 7.9,
+  "procs": 11
+ },
+ "gpu": {
+  "n": 87,
+  "mine": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    0.5,
+    3.5
+   ],
+   "NVIDIA GeForce GTX 1070 Ti|videodecode": [
+    11.0,
+    13.5
+   ],
+   "NVIDIA GeForce GTX 1070 Ti|copy": [
+    0.0,
+    0.2
+   ]
+  },
+  "all": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    2.4,
+    5.3
+   ],
+   "NVIDIA GeForce GTX 1070 Ti|videodecode": [
+    11.0,
+    13.5
+   ]
+  }
+ },
+ "page": {
+  "tiles": {
+   "m1": {
+    "path": "m1",
+    "res": "2560x1440",
+    "impl": "ExternalDecoder (D3D11VideoDecoder)",
+    "power_eff": true,
+    "fps": 20.0,
+    "dropped": 0,
+    "received": 3641,
+    "decoded": 3637,
+    "freezes": 0,
+    "freeze_s": 0,
+    "lost": 0,
+    "ttff_ms": 2279,
+    "jb_ms": 137.0,
+    "dec_ms": 1.46,
+    "render_dropped": 5,
+    "render_total": 3637,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   }
+  },
+  "vis": [
+   "visible"
+  ],
+  "errors": [],
+  "restarts": 0,
+  "gather_ms": {
+   "m1": 152
+  },
+  "window_s": 182.0
+ },
+ "verdict": "smooth"
+}

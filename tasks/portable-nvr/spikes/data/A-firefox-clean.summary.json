@@ -1,0 +1,65 @@
+{
+ "meta": {
+  "run": "A-firefox-clean",
+  "browser": "firefox",
+  "hw": "on",
+  "tiles": "m1",
+  "layout": "single",
+  "probe": false,
+  "warmup_s": 15,
+  "sample_s": 20,
+  "hide_at_s": 0,
+  "profile": "C:\\Users\\user\\AppData\\Local\\Temp\\stage0\\prof-A-firefox-clean-2f9ae2",
+  "root_pid": 92156,
+  "launch_ms": 1792087009527,
+  "window": "0,0,1920,1080",
+  "sample_start_ms": 1792087025001,
+  "sample_end_ms": 1792087050370,
+  "pids_end": 1,
+  "profile_removed": true
+ },
+ "cpu": {
+  "n": 8,
+  "cpu_mean": 41.3,
+  "cpu_max": 152.1,
+  "thread_mean": 12.7,
+  "thread_max": 39.5,
+  "ws_mb": 779.0,
+  "sys_cpu": 90.5,
+  "rig_cpu": 8.9,
+  "procs": 11
+ },
+ "gpu": {
+  "n": 10,
+  "mine": {},
+  "all": {}
+ },
+ "page": {
+  "tiles": {
+   "m1": {
+    "path": "m1",
+    "res": "NonexNone",
+    "impl": null,
+    "power_eff": null,
+    "fps": 0.0,
+    "dropped": 0,
+    "received": 0,
+    "decoded": 0,
+    "freezes": 0,
+    "freeze_s": 0,
+    "lost": 0,
+    "ttff_ms": null,
+    "render_dropped": 0,
+    "render_total": 0
+   }
+  },
+  "vis": [
+   "visible"
+  ],
+  "errors": [],
+  "restarts": 5,
+  "gather_ms": {},
+  "window_s": 22.2
+ },
+ "verdict": "unusable"
+}
