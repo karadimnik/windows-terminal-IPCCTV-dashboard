@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -3360,6 +3360,654 @@ function Invoke-CamCheckInstallSandbox {
 }
 
 
+function Get-CamTestNumberedLines {
+    <#
+        The numbered lines a log-rotation check wrote ("<tag> <00001> xxx"),
+        in file order, from each of $Path that exists, plus how many
+        "log rotation blocked" notices those files hold.
+    #>
+    param([Parameter(Mandatory = $true)][string[]]$Path)
+
+    $lines = New-Object System.Collections.ArrayList
+    $notices = 0
+    foreach ($file in $Path) {
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        foreach ($text in [System.IO.File]::ReadAllLines($file)) {
+            if ($text -match ' (?<tag>[A-Za-z]+) (?<n>\d{5}) x+$') {
+                [void]$lines.Add([pscustomobject]@{ Tag = $Matches['tag']; N = [int]$Matches['n'] })
+            }
+            elseif ($text -like '*log rotation blocked*') { $notices++ }
+        }
+    }
+    return [pscustomobject]@{ Lines = $lines.ToArray(); Notices = $notices }
+}
+
+
+function Get-CamTestNumberGaps {
+    <#
+        For one tag, the numbers missing between the first surviving line and
+        $Last - the lines lost OTHER than the older generations rotation drops
+        by design - and the range that was dropped before the first survivor.
+    #>
+    param([object[]]$Lines, [string]$Tag, [int]$Last)
+
+    $numbers = @($Lines | Where-Object { $_.Tag -eq $Tag } | ForEach-Object { $_.N })
+    if ($numbers.Count -eq 0) { return [pscustomobject]@{ First = 0; Missing = $Last; Disordered = 0; Dropped = "1-$Last" } }
+    $seen = @{}
+    $disordered = 0
+    for ($i = 0; $i -lt $numbers.Count; $i++) {
+        $seen[$numbers[$i]] = $true
+        if ($i -gt 0 -and $numbers[$i] -le $numbers[$i - 1]) { $disordered++ }
+    }
+    $first = $numbers[0]
+    $missing = @($first..$Last | Where-Object { -not $seen.ContainsKey($_) }).Count
+    return [pscustomobject]@{
+        First      = $first
+        Missing    = $missing
+        Disordered = $disordered
+        Dropped    = $(if ($first -gt 1) { "1-$($first - 1)" } else { 'none' })
+    }
+}
+
+
+function Invoke-CamCheckLogRotate {
+    <#
+        A1: Write-CamLog's rotation at MaxBytes 4096, in-process and across
+        processes.
+
+        - One writer: it rolls exactly on the write that finds the file at or
+          over the limit, never otherwise; <log>.1 is the generation just
+          before <log>; at most two files exist; the numbered lines across
+          both are contiguous, older generations being dropped by design.
+        - Locked: a reader holds the log without delete sharing, as an editor
+          or tail tool does and as Get-Content -Wait does whenever its poll is
+          inside the file. The rename fails. That used to THROW out of
+          Write-CamLog, which ended the supervisor loop and lost the line.
+          Now no write throws, every line lands in the unrotated file, the
+          blocked rotation is logged once for the episode, and the first write
+          after the reader lets go rotates.
+        - A real Get-Content -Wait tailing the log while it rolls.
+        - Two writer processes on one log, as the supervisor and the NVR host
+          share recorder.log: neither throws and no line is lost.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $max = 4096
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\logrotate'
+    if (Test-Path -LiteralPath $dir) { Remove-CamTestTree -Path $dir }
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+    $pad = 'x' * 40
+    $write = {
+        param([string]$Path, [string]$Tag, [int]$N)
+        try { Write-CamLog -Path $Path -Message ("{0} {1:D5} {2}" -f $Tag, $N, $pad) -MaxBytes $max; return '' }
+        catch { return $_.Exception.Message }
+    }
+
+    # --- one writer
+    $log = Join-Path -Path $dir -ChildPath 'seq.log'
+    $count = 300
+    $rolls = 0
+    $wrong = @()
+    $throws = 0
+    $mostFiles = 0
+    for ($i = 1; $i -le $count; $i++) {
+        $before = 0
+        if (Test-Path -LiteralPath $log) { $before = (Get-Item -LiteralPath $log).Length }
+        if (& $write $log 'seq' $i) { $throws++ }
+        $after = (Get-Item -LiteralPath $log).Length
+        $rolled = ($after -lt $before)
+        if ($rolled) { $rolls++ }
+        if ($rolled -ne ($before -ge $max)) { $wrong += ("write {0}: size before {1}, rolled {2}" -f $i, $before, $rolled) }
+        $files = @(Get-ChildItem -LiteralPath $dir -Filter 'seq.log*' -File).Count
+        if ($files -gt $mostFiles) { $mostFiles = $files }
+    }
+    $older = Get-CamTestNumberedLines -Path "$log.1"
+    $newer = Get-CamTestNumberedLines -Path $log
+    $all = @($older.Lines) + @($newer.Lines)
+    $gaps = Get-CamTestNumberGaps -Lines $all -Tag 'seq' -Last $count
+    $seam = "{0} -> {1}" -f @($older.Lines)[-1].N, @($newer.Lines)[0].N
+    $evidence += ("one writer: {0} lines, {1} rolls, {2} write(s) rolled other than exactly at the crossing, {3} throw(s), at most {4} file(s)" -f $count, $rolls, $wrong.Count, $throws, $mostFiles)
+    $evidence += ("  seq.log.1 holds {0}-{1}, seq.log holds {2}-{3} (seam {4}); dropped by design: lines {5} ({6} older generation(s)); missing after the first survivor: {7}" -f `
+        @($older.Lines)[0].N, @($older.Lines)[-1].N, @($newer.Lines)[0].N, @($newer.Lines)[-1].N, $seam, $gaps.Dropped, ($rolls - 1), $gaps.Missing)
+    $evidence += @($wrong | Select-Object -First 3)
+    if ($rolls -lt 3 -or $wrong.Count -or $throws -or $mostFiles -gt 2 -or $gaps.Missing -or $gaps.Disordered -or
+        (@($older.Lines)[-1].N + 1) -ne @($newer.Lines)[0].N -or @($newer.Lines)[-1].N -ne $count) {
+        $ok = $false; $evidence += 'FAIL: rotation did not roll once per crossing into a contiguous previous generation'
+    }
+
+    # --- locked: a reader without delete sharing holds the full log
+    $log = Join-Path -Path $dir -ChildPath 'lock.log'
+    $i = 0
+    while (-not (Test-Path -LiteralPath $log) -or (Get-Item -LiteralPath $log).Length -lt $max) { $i++; [void](& $write $log 'fill' $i) }
+    $reader = [System.IO.File]::Open($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $failures = @()
+    try { for ($n = 1; $n -le 5; $n++) { $problem = & $write $log 'lock' $n; if ($problem) { $failures += ("write {0}: {1}" -f $n, $problem) } } }
+    finally { $reader.Dispose() }
+    $held = Get-CamTestNumberedLines -Path $log
+    $heldLines = @($held.Lines | Where-Object { $_.Tag -eq 'lock' }).Count
+    $heldSize = (Get-Item -LiteralPath $log).Length
+    $rolledWhileHeld = Test-Path -LiteralPath "$log.1"
+    $problem = & $write $log 'lock' 6
+    $afterOld = Get-CamTestNumberedLines -Path "$log.1"
+    $afterNew = Get-CamTestNumberedLines -Path $log
+    $evidence += ("locked (FileShare.ReadWrite reader on a {0}-byte log): {1} of 5 writes threw, {2} of 5 lines in lock.log, grew to {3} bytes, rolled while held={4}, blocked notices {5}" -f `
+        $max, $failures.Count, $heldLines, $heldSize, $rolledWhileHeld, $held.Notices)
+    $evidence += @($failures | Select-Object -First 2)
+    $evidence += ("  reader released, next write: threw={0}, lock.log.1 holds {1} lock line(s) + {2} notice(s), lock.log holds {3}" -f `
+        [bool]$problem, @($afterOld.Lines | Where-Object { $_.Tag -eq 'lock' }).Count, $afterOld.Notices, ((@($afterNew.Lines) | ForEach-Object { "$($_.Tag) $($_.N)" }) -join ', '))
+    if ($failures.Count -or $heldLines -ne 5 -or $rolledWhileHeld -or $held.Notices -ne 1 -or $problem -or
+        @($afterOld.Lines | Where-Object { $_.Tag -eq 'lock' }).Count -ne 5 -or @($afterNew.Lines).Count -ne 1 -or $afterNew.Notices -ne 0) {
+        $ok = $false; $evidence += 'FAIL: a locked log threw, lost a line, rotated while held, logged the episode other than once, or did not rotate once released'
+    }
+
+    # --- a real Get-Content -Wait following the log while it rolls
+    $log = Join-Path -Path $dir -ChildPath 'tail.log'
+    [void](& $write $log 'tail' 1)
+    $tailer = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
+        -ArgumentList @('-NoProfile', '-Command', "Get-Content -LiteralPath '$log' -Wait")
+    [void]$tailer.Handle
+    $count = 3000
+    $failures = 0
+    $firstFailure = ''
+    try {
+        Start-Sleep -Seconds 3
+        for ($i = 2; $i -le $count; $i++) {
+            $problem = & $write $log 'tail' $i
+            if ($problem) { $failures++; if (-not $firstFailure) { $firstFailure = "write ${i}: $problem" } }
+            if ($i % 50 -eq 0) { Start-Sleep -Milliseconds 30 }
+        }
+    }
+    finally {
+        if (-not $tailer.HasExited) { try { $tailer.Kill() } catch { }; [void]$tailer.WaitForExit(10000) }
+    }
+    $tail = Get-CamTestNumberedLines -Path "$log.1", $log
+    $gaps = Get-CamTestNumberGaps -Lines $tail.Lines -Tag 'tail' -Last $count
+    $evidence += ("Get-Content -Wait tailer pid {0} (exited {1}): {2} writes, {3} threw, {4} missing after the first survivor ({5}), {6} blocked notice(s) in the surviving files" -f `
+        $tailer.Id, $tailer.HasExited, $count, $failures, $gaps.Missing, $gaps.First, $tail.Notices)
+    if ($firstFailure) { $evidence += ('  first: ' + $firstFailure) }
+    if ($failures -or $gaps.Missing -or $gaps.Disordered -or -not $tailer.HasExited) { $ok = $false; $evidence += 'FAIL: writing under a Get-Content -Wait reader threw or lost lines' }
+
+    # --- two writer processes on one log
+    $writer = Join-Path -Path $dir -ChildPath 'writer.ps1'
+    [System.IO.File]::WriteAllText($writer, @'
+param([string]$Lib, [string]$Log, [string]$Tag, [int]$Count, [string]$Go, [int]$MaxBytes)
+$ErrorActionPreference = 'Stop'
+. $Lib
+while (-not (Test-Path -LiteralPath $Go)) { Start-Sleep -Milliseconds 10 }
+$errors = 0; $first = ''
+for ($i = 1; $i -le $Count; $i++) {
+    try { Write-CamLog -Path $Log -Message ("{0} {1:D5} {2}" -f $Tag, $i, ('x' * 40)) -MaxBytes $MaxBytes }
+    catch { $errors++; if (-not $first) { $first = "write ${i}: " + $_.Exception.Message } }
+}
+"errors=$errors $first"
+'@)
+    $lib = Join-Path -Path (Get-CamTestRepo) -ChildPath 'cam.common.ps1'
+    foreach ($round in @(@{ Name = 'stress'; Count = 400 }, @{ Name = 'exact'; Count = 40 })) {
+        $log = Join-Path -Path $dir -ChildPath ($round.Name + '.log')
+        $go = Join-Path -Path $dir -ChildPath ($round.Name + '.go')
+        $writers = @()
+        foreach ($tag in @('A', 'B')) {
+            $writers += Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
+                -RedirectStandardOutput (Join-Path $dir "$($round.Name)-$tag.out") `
+                -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$writer`"", '-Lib', "`"$lib`"", '-Log', "`"$log`"",
+                    '-Tag', $tag, '-Count', $round.Count, '-Go', "`"$go`"", '-MaxBytes', $max)
+        }
+        foreach ($process in $writers) { [void]$process.Handle }
+        Start-Sleep -Seconds 3
+        [System.IO.File]::WriteAllText($go, 'go')
+        foreach ($process in $writers) {
+            if (-not $process.WaitForExit(120000)) { try { $process.Kill() } catch { }; $ok = $false; $evidence += "FAIL: writer pid $($process.Id) did not finish" }
+        }
+        $reports = @('A', 'B' | ForEach-Object { ([string](Get-Content -LiteralPath (Join-Path $dir "$($round.Name)-$_.out") -Raw)).Trim() })
+        $lines = Get-CamTestNumberedLines -Path "$log.1", $log
+        $a = Get-CamTestNumberGaps -Lines $lines.Lines -Tag 'A' -Last $round.Count
+        $b = Get-CamTestNumberGaps -Lines $lines.Lines -Tag 'B' -Last $round.Count
+        $files = @(Get-ChildItem -LiteralPath $dir -Filter "$($round.Name).log*" -File).Count
+        $evidence += ("two writers, {0} x {1} lines: A {2}; B {3}; files {4}; surviving A from {5}, B from {6}; missing A {7}, B {8}; out of order A {9}, B {10}" -f `
+            $round.Count, 2, $reports[0], $reports[1], $files, $a.First, $b.First, $a.Missing, $b.Missing, $a.Disordered, $b.Disordered)
+        $bad = ($reports[0] -notlike 'errors=0*' -or $reports[1] -notlike 'errors=0*' -or $files -gt 2 -or $a.Missing -or $b.Missing -or $a.Disordered -or $b.Disordered)
+        # Under 2 x MaxBytes in all, so nothing may be dropped even by design.
+        if ($round.Name -eq 'exact' -and ($a.First -ne 1 -or $b.First -ne 1 -or $files -ne 2)) { $bad = $true }
+        if ($bad) { $ok = $false; $evidence += ("FAIL: concurrent writers ({0}) threw or lost a line" -f $round.Name) }
+    }
+
+    Complete-CamPruneCheck -Run $Run -Check 'logrotate' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $dir; Log = (Join-Path $env:TEMP 'cam-tests\logrotate.none') }) `
+        -Message 'Write-CamLog rolls once per crossing into one previous generation, never throws or loses a line on a locked log, and two writer processes lose nothing'
+}
+
+
+function Get-CamTestSegmentFiles {
+    <# The recorder segments in one camera folder, oldest created first. #>
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$SafeName, [Parameter(Mandatory = $true)]$Config)
+    if (-not (Test-Path -LiteralPath $Dir)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Dir -File -Force | Where-Object { Test-CamSegmentName -Name $_.Name -SafeName $SafeName -Config $Config } |
+        Sort-Object -Property CreationTime)
+}
+
+
+function Get-CamTestSegmentTime {
+    <# The wall-clock start a segment's name records, or $null. #>
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if ($Name -notmatch '_(\d{8}_\d{6})([+-]\d{4})\.') { return $null }
+    return [DateTime]::ParseExact($Matches[1], 'yyyyMMdd_HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+
+function Test-CamTestSandboxLeak {
+    <#
+        Evidence that a synthetic-camera sandbox held only its throwaway
+        credential: the store decrypts to the fake user, and the fake password
+        appears in none of the sandbox's logs or status files.
+    #>
+    param([Parameter(Mandatory = $true)]$Sandbox)
+    $credential = Import-Clixml -Path (Join-Path -Path $Sandbox.Dir -ChildPath 'camera_creds.xml')
+    $hits = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $Sandbox.Root -Recurse -File -Include '*.log', '*.log.1', '*.json')) {
+        if ([System.IO.File]::ReadAllText($file.FullName).Contains($credential.GetNetworkCredential().Password)) { $hits++ }
+    }
+    return [pscustomobject]@{ Ok = ($credential.UserName -eq 'fakeuser' -and $hits -eq 0); Text = ("credential user {0}; fake password found in {1} sandbox log/status file(s)" -f $credential.UserName, $hits) }
+}
+
+
+function Invoke-CamCheckSegments {
+    <#
+        A3: the production segment path, with the real supervisor recording a
+        synthetic camera through the product's own ffmpeg arguments at
+        SegmentSeconds 10.
+
+        - every file the recorder writes passes Test-CamSegmentName;
+        - after the first (partial) segment, each starts on a multiple of 10 s
+          of the wall clock (segment_atclocktime), its name agreeing with its
+          creation time;
+        - each closed segment is H.264 + pcm_alaw, 10 s within a second, and
+          starts at 0 (reset_timestamps);
+        - no zero-byte file is left behind while recording;
+        - a hard kill of the ffmpeg child mid-segment is restarted, the killed
+          segment stays readable; a kill before the segment's first write
+          leaves a zero-byte file, which is removed, while zero-byte foreign
+          files beside it survive.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $name = 'synth1'
+    $sandbox = New-CamTestSynthSandbox -Name 'segments' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = 10; StatusIntervalSeconds = 1; ReconcileSeconds = 2; BackoffStartSeconds = 1; BackoffMaxSeconds = 4 }
+    $config = $sandbox.Config
+    $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
+    $foreign = @('notes.txt', "${name}_20260101_000000+0300.mp4", "${name}_20260101_000010+0300.mkv.tmp")
+
+    $camera = $null
+    $process = $null
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        # Planted after the root is claimed: a foreign entry in an unclaimed
+        # root keeps it unclaimed, and that disables the cleanup under test.
+        [void](New-Item -ItemType Directory -Path $camDir -Force)
+        foreach ($leaf in $foreign) { [System.IO.File]::WriteAllBytes((Join-Path $camDir $leaf), [byte[]]@()) }
+        $evidence += ("synthetic camera: mediamtx pid {0} on 127.0.0.1:{1}, publisher pid {2}; sandbox supervisor pid {3}" -f `
+            $camera.MediaMtx.Id, $port, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id)
+
+        # Record until the first partial segment, four full ones and the open
+        # one exist, watching for an empty file among the closed ones.
+        $emptyClosed = @{}
+        $deadline = [DateTime]::Now.AddSeconds(90)
+        while ([DateTime]::Now -lt $deadline) {
+            $files = Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config
+            for ($i = 0; $i -lt $files.Count - 1; $i++) { if ($files[$i].Length -eq 0) { $emptyClosed[$files[$i].Name] = $true } }
+            if ($files.Count -ge 6) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        $files = Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config
+        $closed = @($files | Select-Object -First ($files.Count - 1))
+        $evidence += ("{0} segment file(s) after {1}s, {2} closed; zero-byte closed segments seen while recording: {3}" -f `
+            $files.Count, [int]([DateTime]::Now - $process.StartTime).TotalSeconds, $closed.Count, $emptyClosed.Count)
+        if ($closed.Count -lt 5 -or $emptyClosed.Count) { $ok = $false; $evidence += 'FAIL: fewer than 4 full closed segments, or an empty closed segment was left' }
+
+        for ($i = 0; $i -lt $closed.Count; $i++) {
+            $file = $closed[$i]
+            $at = Get-CamTestSegmentTime -Name $file.Name
+            $skew = ($file.CreationTime - $at).TotalSeconds
+            $probe = Get-CamTestSegmentProbe -Path $file.FullName -FfprobePath $config.FfprobePath
+            $line = "{0} {1,8} B  created {2}s from its name  {3}  start {4}  duration {5}" -f `
+                $file.Name, $file.Length, (Format-CamNumber -Value $skew -Format '+0.0;-0.0'), ($probe.Codecs -join '+'), (Format-CamNumber -Value $probe.Start -Format '0.000'), (Format-CamNumber -Value $probe.Duration -Format '0.000')
+            $bad = @()
+            if (($probe.Codecs -notcontains 'h264') -or ($probe.Codecs -notcontains 'pcm_alaw')) { $bad += 'codecs' }
+            if ($null -eq $probe.Start -or $probe.Start -gt 0.5) { $bad += 'start not reset' }
+            if ([math]::Abs($skew) -gt 2) { $bad += 'name disagrees with creation time' }
+            if ($i -eq 0) { $line += '  (first: starts when recording did, so neither aligned nor full)' }
+            else {
+                if ($at.Second % 10 -ne 0) { $bad += 'not on a 10 s boundary' }
+                if ($null -eq $probe.Duration -or [math]::Abs($probe.Duration - 10) -gt 1) { $bad += 'duration' }
+            }
+            if ($bad.Count) { $ok = $false; $line += '  FAIL: ' + ($bad -join ', ') }
+            $evidence += $line
+        }
+
+        # Kill 1: mid-segment, with footage already on disk.
+        $deadline = [DateTime]::Now.AddSeconds(15)
+        do {
+            Start-Sleep -Milliseconds 200
+            $current = @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config)[-1]
+            $current.Refresh()
+        } while ([DateTime]::Now -lt $deadline -and -not ((([DateTime]::Now - $current.CreationTime).TotalSeconds -ge 6) -and $current.Length -gt 0))
+        $victim = Get-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name
+        $killed = Stop-CamTestChildHard -ProcessId $victim
+        $restarted = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -Not $victim -TimeoutSeconds 20
+        $current.Refresh()
+        $probe = Get-CamTestSegmentProbe -Path $current.FullName -FfprobePath $config.FfprobePath
+        $evidence += ("kill 1, {0}s into {1}: pid {2} killed={3}, restarted as pid {4}; the killed segment is {5} B, {6}, duration {7}" -f `
+            (Format-CamNumber -Value ([DateTime]::Now - $current.CreationTime).TotalSeconds -Format '0.0'), $current.Name, $victim, $killed, $restarted, $current.Length, ($probe.Codecs -join '+'), $(if ($null -eq $probe.Duration) { 'none (killed mid-write)' } else { $probe.Duration }))
+        if ($victim -le 0 -or -not $killed -or $restarted -le 0 -or $current.Length -le 0 -or $probe.Codecs -notcontains 'h264') {
+            $ok = $false; $evidence += 'FAIL: the child was not restarted, or the segment it was writing is not readable'
+        }
+
+        # Kill 2: the restarted child's first segment, before its first write
+        # reaches disk. ffmpeg writes in 256 KB blocks, so a new segment is
+        # empty for about a second and a half. Sizes are read through a
+        # handle: the directory entry of an open file goes stale on NTFS.
+        $restartedAt = [DateTime]::Now
+        $victim2 = $restarted
+        $empty = $null
+        $emptyBytes = -1
+        $deadline = [DateTime]::Now.AddSeconds(15)
+        while ([DateTime]::Now -lt $deadline -and -not $empty) {
+            $fresh = @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config | Where-Object { $_.CreationTime -gt $current.CreationTime })
+            if ($fresh.Count -and (Get-CamTestLiveLength -Path $fresh[-1].FullName) -eq 0) { $empty = $fresh[-1] } else { Start-Sleep -Milliseconds 50 }
+        }
+        $killed2 = Stop-CamTestChildHard -ProcessId $victim2
+        if ($empty) { $emptyBytes = Get-CamTestLiveLength -Path $empty.FullName }
+        $restarted2 = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -Not $victim2 -TimeoutSeconds 20
+        Start-Sleep -Seconds 2
+        $emptyName = $(if ($empty) { $empty.Name } else { '(no empty segment caught)' })
+        $emptyGone = ($empty -and -not (Test-Path -LiteralPath $empty.FullName))
+        $survivors = @($foreign | Where-Object { Test-Path -LiteralPath (Join-Path $camDir $_) })
+        $removedLines = @(Get-Content -LiteralPath $sandbox.SupervisorLog | Where-Object { $_ -like '*removed empty segment*' -or $_ -like '*empty foreign file*' -or $_ -like '*empty file(s)*' })
+        $evidence += ("kill 2, before the first write: {0} was {1} B when pid {2} was killed ({3}); restarted as pid {4}; removed={5}; zero-byte foreign files surviving {6}/{7}" -f `
+            $emptyName, $emptyBytes, $victim2, $killed2, $restarted2, $emptyGone, $survivors.Count, $foreign.Count)
+        $evidence += @($removedLines | ForEach-Object { '  log: ' + $_ })
+        if (-not $empty -or $emptyBytes -ne 0 -or -not $killed2 -or $restarted2 -le 0 -or -not $emptyGone -or $survivors.Count -ne $foreign.Count) {
+            $ok = $false; $evidence += 'FAIL: the empty segment of a killed child was left behind, or a foreign empty file was removed'
+        }
+
+        # Recording carries on after both kills.
+        $deadline = [DateTime]::Now.AddSeconds(25)
+        $after = @()
+        while ([DateTime]::Now -lt $deadline) {
+            $after = @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config | Where-Object { $_.CreationTime -gt $restartedAt })
+            if ($after.Count -ge 2 -and $after[-2].Length -gt 0) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        $status = (Get-CamTestStatusJson -Sandbox $sandbox).Snapshot
+        $row = @($status.Cameras)[0]
+        $evidence += ("after the kills: {0} new segment(s) ({1}); status State {2}, RestartsLastHour {3}, LastError '{4}'" -f `
+            $after.Count, (@($after | ForEach-Object { "$($_.Name) $($_.Length) B" }) -join ', '), $status.State, $row.RestartsLastHour, $row.LastError)
+        if ($after.Count -lt 2 -or $after[-2].Length -le 0 -or $status.State -ne 'running' -or [int]$row.RestartsLastHour -ne 2) {
+            $ok = $false; $evidence += 'FAIL: recording did not carry on after the kills, or the restarts were not counted'
+        }
+
+        $names = @(Get-ChildItem -LiteralPath $camDir -File | Where-Object { $foreign -notcontains $_.Name })
+        $badNames = @($names | Where-Object { -not (Test-CamSegmentName -Name $_.Name -SafeName $name -Config $config) })
+        $evidence += ("{0} file(s) written by the recorder, {1} failing Test-CamSegmentName {2}" -f $names.Count, $badNames.Count, (@($badNames | ForEach-Object { $_.Name }) -join ', '))
+        if ($badNames.Count) { $ok = $false }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $survivors = @($foreign | Where-Object { Test-Path -LiteralPath (Join-Path $camDir $_) })
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $alerts = 0
+    if (Test-Path -LiteralPath $sandbox.AlertLog) { $alerts = @(Get-Content -LiteralPath $sandbox.AlertLog).Count }
+    $evidence += ("after -Stop: foreign files surviving {0}/{1}; {2}; alerts recorded by the stub {3}" -f $survivors.Count, $foreign.Count, $leak.Text, $alerts)
+    if ($survivors.Count -ne $foreign.Count -or -not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'segments' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\segments.none') }) `
+        -Message 'the real supervisor records clock-aligned, correctly named H.264 + pcm_alaw segments, restarts a killed child and removes only its own empty segment'
+}
+
+
+function Invoke-CamCheckBackoff {
+    <#
+        A4: the restart backoff and its HealthyResetSeconds reset, with the
+        real supervisor and a synthetic camera, scaled down to
+        BackoffStartSeconds 1, BackoffMaxSeconds 8, HealthyResetSeconds 15.
+
+        Five kills in quick succession must be answered with waits of 1, 2,
+        4, 8 and 8 s - doubling, then capped - and each restart must actually
+        take at least that long. A child then left healthy for longer than
+        15 s and killed must wait 1 s again, and the next quick kill 2 s.
+        RestartsLastHour in status.json counts every one.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $name = 'synth1'
+    $sandbox = New-CamTestSynthSandbox -Name 'backoff' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = 10; StatusIntervalSeconds = 1; ReconcileSeconds = 2; BackoffStartSeconds = 1; BackoffMaxSeconds = 8; HealthyResetSeconds = 15 }
+
+    # quick: kill as soon as the restart is seen; healthy: let it run past
+    # HealthyResetSeconds first. Expected is the wait the supervisor must log.
+    $plan = @(
+        @{ Kind = 'quick'; Expected = 1 }, @{ Kind = 'quick'; Expected = 2 }, @{ Kind = 'quick'; Expected = 4 },
+        @{ Kind = 'quick'; Expected = 8 }, @{ Kind = 'quick'; Expected = 8 },
+        @{ Kind = 'healthy'; Expected = 1 }, @{ Kind = 'quick'; Expected = 2 }
+    )
+
+    $camera = $null
+    $process = $null
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        $child = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -TimeoutSeconds 20
+        $startedAt = [DateTime]::Now
+        $evidence += ("synthetic camera mediamtx pid {0}, publisher pid {1}; supervisor pid {2}; first child pid {3}" -f `
+            $camera.MediaMtx.Id, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id, $child)
+
+        $k = 0
+        foreach ($step in $plan) {
+            $k++
+            if ($step.Kind -eq 'healthy') {
+                $wait = 18 - ([DateTime]::Now - $startedAt).TotalSeconds
+                if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]($wait * 1000)) }
+            }
+            $ranFor = ([DateTime]::Now - $startedAt).TotalSeconds
+            $killedAt = [DateTime]::Now
+            $gone = Stop-CamTestChildHard -ProcessId $child
+            $next = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -Not $child -TimeoutSeconds 30
+            $took = ([DateTime]::Now - $killedAt).TotalSeconds
+            $startedAt = [DateTime]::Now
+
+            $line = @(Get-Content -LiteralPath $sandbox.SupervisorLog | Where-Object { $_ -match "for $name; restart #$k in (\d+)s$" }) | Select-Object -Last 1
+            $logged = -1
+            if ($line -match 'after (\d+)s for .+ in (\d+)s$') { $logged = [int]$Matches[2] }
+            $verdict = 'ok'
+            # The supervisor ticks once a second and status.json is read once
+            # a second, so a restart is seen up to about 3 s after its wait.
+            if (-not $gone -or $next -le 0 -or $logged -ne $step.Expected -or $took -lt ($step.Expected - 0.5) -or $took -gt ($step.Expected + 4)) {
+                $ok = $false; $verdict = 'FAIL'
+            }
+            $evidence += ("kill {0} ({1,-7} ran {2,4}s): pid {3} -> {4}; logged wait {5}s, expected {6}s, restart seen after {7}s  {8}" -f `
+                $k, $step.Kind, (Format-CamNumber -Value $ranFor -Format '0.0'), $child, $next, $logged, $step.Expected, (Format-CamNumber -Value $took -Format '0.0'), $verdict)
+            if ($line) { $evidence += ('  log: ' + $line) }
+            if ($next -le 0) { break }
+            $child = $next
+        }
+
+        Start-Sleep -Seconds 2
+        $row = @((Get-CamTestStatusJson -Sandbox $sandbox).Snapshot.Cameras)[0]
+        $evidence += ("status.json: RestartsLastHour {0}, RestartsTotal {1}, Alive {2}, LastError '{3}'" -f $row.RestartsLastHour, $row.RestartsTotal, $row.Alive, $row.LastError)
+        if ([int]$row.RestartsLastHour -ne $plan.Count -or -not $row.Alive) { $ok = $false; $evidence += ("FAIL: RestartsLastHour should be {0} with the child alive" -f $plan.Count) }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $evidence += $leak.Text
+    if (-not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'backoff' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\backoff.none') }) `
+        -Message 'restart waits double from BackoffStartSeconds to BackoffMaxSeconds, reset after HealthyResetSeconds of health, and RestartsLastHour counts them'
+}
+
+
+function Invoke-CamCheckLogRotateLive {
+    <#
+        A2: rotation inside the real supervisor at LogMaxBytes 8192, recording
+        a synthetic camera whose stream makes ffmpeg warn as the real cameras
+        do, with LogRepeatSuppressSeconds 0 so the camera log grows.
+
+        - free: recorder.log and the camera's log both roll while recording
+          continues and status.json keeps updating;
+        - held: a reader holds recorder.log without delete sharing while the
+          supervisor crosses the limit (and a Get-Content -Wait follows the
+          camera log). The supervisor stays up, logs the blocked rotation
+          once, keeps writing; the first write after the reader lets go rolls.
+        - throughout: no gap between segments beyond SegmentSeconds.
+
+        recorder.log is padded through Write-CamLog from this process - a
+        second writer, as the NVR host is - to just under the limit, so the
+        crossing itself is always the supervisor's own write.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $name = 'synth1'
+    $max = 8192
+    $sandbox = New-CamTestSynthSandbox -Name 'logrotatelive' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = 10; StatusIntervalSeconds = 1; ReconcileSeconds = 2; LogMaxBytes = $max; LogRepeatSuppressSeconds = 0; PruneIntervalSeconds = 1; BackoffStartSeconds = 1 }
+    $recLog = $sandbox.SupervisorLog
+    $camLog = Join-Path -Path $sandbox.Root -ChildPath "_logs\$name.log"
+    $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
+
+    $watch = @{ Phase = 'free'; RecSize = 0; CamSize = 0; Rolls = @{}; LastUpdate = $null; MaxStatusGap = 0.0; Died = $false }
+    $sample = {
+        foreach ($pair in @(@('rec', $recLog, 'RecSize'), @('cam', $camLog, 'CamSize'))) {
+            $info = New-Object System.IO.FileInfo($pair[1])
+            if (-not $info.Exists) { continue }
+            if ($info.Length -lt $watch[$pair[2]]) { $key = $watch.Phase + ':' + $pair[0]; $watch.Rolls[$key] = 1 + [int]$watch.Rolls[$key] }
+            $watch[$pair[2]] = $info.Length
+        }
+        $status = Get-CamTestStatusJson -Sandbox $sandbox
+        if ($status) {
+            $updated = [DateTime]::Parse([string]$status.Snapshot.UpdatedAt)
+            if ($watch.LastUpdate -and $updated -gt $watch.LastUpdate) {
+                $gap = ($updated - $watch.LastUpdate).TotalSeconds
+                if ($gap -gt $watch.MaxStatusGap) { $watch.MaxStatusGap = $gap }
+            }
+            if (-not $watch.LastUpdate -or $updated -gt $watch.LastUpdate) { $watch.LastUpdate = $updated }
+        }
+        if ($process.HasExited) { $watch.Died = $true }
+    }
+    $rolls = { param($phase, $what) [int]$watch.Rolls["${phase}:$what"] }
+    $pad = {
+        param([int]$Below)
+        $i = 0
+        while ((New-Object System.IO.FileInfo($recLog)).Length -lt ($max - $Below)) { $i++; Write-CamLog -Path $recLog -Message ("test padding {0:D4} {1}" -f $i, ('.' * 60)) -MaxBytes $max }
+        return $i
+    }
+    $countIn = { param($path, $like) if (Test-Path -LiteralPath $path) { @(Get-Content -LiteralPath $path | Where-Object { $_ -like $like }).Count } else { 0 } }
+
+    $camera = $null
+    $process = $null
+    $reader = $null
+    $tailer = $null
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name -NonMonotonic
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        $evidence += ("synthetic camera mediamtx pid {0}, publisher pid {1} (non-monotonic video); supervisor pid {2}" -f `
+            $camera.MediaMtx.Id, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id)
+
+        # free
+        $padded = & $pad 1500
+        $deadline = [DateTime]::Now.AddSeconds(75)
+        while ([DateTime]::Now -lt $deadline -and -not ((& $rolls 'free' 'rec') -ge 1 -and (& $rolls 'free' 'cam') -ge 2)) { & $sample; Start-Sleep -Milliseconds 250 }
+        $evidence += ("free: {0} padding line(s); recorder.log rolled {1}x, {2}.log rolled {3}x; files now recorder.log {4} B + .1 {5} B, {2}.log {6} B + .1 {7} B; supervisor alive {8}" -f `
+            $padded, (& $rolls 'free' 'rec'), $name, (& $rolls 'free' 'cam'), (Get-Item $recLog).Length, (Get-Item "$recLog.1").Length, (Get-Item $camLog).Length, (Get-Item "$camLog.1").Length, (-not $watch.Died))
+        $evidence += ("  {0}.log.1 starts: {1}" -f $name, ([string](@(Get-Content -LiteralPath "$camLog.1" -TotalCount 1))[0]).Substring(0, 120))
+        if ((& $rolls 'free' 'rec') -lt 1 -or (& $rolls 'free' 'cam') -lt 2 -or $watch.Died) { $ok = $false; $evidence += 'FAIL: a log did not roll inside the running supervisor, or the supervisor died' }
+
+        # held
+        $watch.Phase = 'held'
+        $reader = [System.IO.File]::Open($recLog, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $tailer = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command', "Get-Content -LiteralPath '$camLog' -Wait")
+        [void]$tailer.Handle
+        $padded = & $pad 300
+        $heldUntil = [DateTime]::Now.AddSeconds(20)
+        while ([DateTime]::Now -lt $heldUntil) { & $sample; Start-Sleep -Milliseconds 250 }
+        $heldSize = (Get-Item -LiteralPath $recLog).Length
+        $notices = & $countIn $recLog '*log rotation blocked*'
+        $reader.Dispose()
+        $reader = $null
+        $watch.Phase = 'released'
+        $deadline = [DateTime]::Now.AddSeconds(10)
+        while ([DateTime]::Now -lt $deadline -and (& $rolls 'released' 'rec') -lt 1) { & $sample; Start-Sleep -Milliseconds 250 }
+        $noticeLine = $null
+        if (Test-Path -LiteralPath "$recLog.1") { $noticeLine = @(Get-Content -LiteralPath "$recLog.1" | Where-Object { $_ -like '*log rotation blocked*' }) | Select-Object -First 1 }
+        $echoed = & $countIn $sandbox.ConsoleLog '*log rotation blocked*'
+        $evidence += ("held: FileShare.ReadWrite reader on recorder.log for 20 s ({0} padding line(s) to {1} B below the limit), Get-Content -Wait tailer pid {2} on {3}.log" -f $padded, 300, $tailer.Id, $name)
+        $evidence += ("  recorder.log rolled {0}x while held and grew to {1} B; blocked notices {2}; {3}.log rolled {4}x meanwhile; supervisor alive {5}; notice echoed to the console {6}x" -f `
+            (& $rolls 'held' 'rec'), $heldSize, $notices, $name, (& $rolls 'held' 'cam'), (-not $watch.Died), $echoed)
+        $evidence += ("  released: recorder.log rolled {0}x within 10 s; recorder.log.1 holds: {1}" -f (& $rolls 'released' 'rec'), $noticeLine)
+        if ((& $rolls 'held' 'rec') -ne 0 -or $heldSize -le $max -or $notices -ne 1 -or (& $rolls 'held' 'cam') -lt 1 -or $watch.Died -or (& $rolls 'released' 'rec') -lt 1 -or -not $noticeLine) {
+            $ok = $false; $evidence += 'FAIL: with recorder.log held the supervisor died, rolled anyway, logged other than one notice, or did not roll once released'
+        }
+
+        $evidence += ("status.json: longest gap between updates {0} s (StatusIntervalSeconds 1); last update {1}" -f (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'), $watch.LastUpdate.ToString('HH:mm:ss'))
+        if ($watch.MaxStatusGap -gt 3) { $ok = $false; $evidence += 'FAIL: status.json stopped updating' }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($tailer -and -not $tailer.HasExited) { try { $tailer.Kill() } catch { }; [void]$tailer.WaitForExit(10000) }
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $files = Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config
+    $gaps = @()
+    for ($i = 1; $i -lt $files.Count; $i++) { $gaps += ((Get-CamTestSegmentTime -Name $files[$i].Name) - (Get-CamTestSegmentTime -Name $files[$i - 1].Name)).TotalSeconds }
+    $largest = ($gaps | Measure-Object -Maximum).Maximum
+    $empty = @($files | Select-Object -First ($files.Count - 1) | Where-Object { $_.Length -eq 0 }).Count
+    $restarts = & $countIn $recLog '*restart #*'
+    $evidence += ("segments: {0} across the run, largest start-to-start gap {1} s, {2} empty closed, {3} child restart(s) logged" -f $files.Count, $largest, $empty, $restarts)
+    if ($files.Count -lt 5 -or $largest -gt 12 -or $empty -or $restarts) { $ok = $false; $evidence += 'FAIL: recording had a gap, an empty segment or a restart around a roll' }
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $evidence += $leak.Text
+    if (-not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'logrotatelive' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\logrotatelive.none') }) `
+        -Message 'inside the real supervisor both logs roll while recording continues, and a held recorder.log only delays its rotation'
+}
+
+
 function Invoke-CamCheckDocSwitches {
     <#
         Every -Switch the documentation names must exist. Two rules, over
@@ -3546,6 +4194,10 @@ foreach ($check in $Checks) {
         'installsandbox' { Invoke-CamCheckInstallSandbox -Run $run }
         'docswitches' { Invoke-CamCheckDocSwitches -Run $run }
         'doclinks' { Invoke-CamCheckDocLinks -Run $run }
+        'logrotate' { Invoke-CamCheckLogRotate -Run $run }
+        'segments'  { Invoke-CamCheckSegments  -Run $run }
+        'backoff'   { Invoke-CamCheckBackoff   -Run $run }
+        'logrotatelive' { Invoke-CamCheckLogRotateLive -Run $run }
     }
 }
 
