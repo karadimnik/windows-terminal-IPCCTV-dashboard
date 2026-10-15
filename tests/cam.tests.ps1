@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -4007,6 +4007,149 @@ function Invoke-CamCheckLogRotateLive {
         -Message 'inside the real supervisor both logs roll while recording continues, and a held recorder.log only delays its rotation'
 }
 
+function Invoke-CamCheckStallWatch {
+    <#
+        B1: the stall watchdog, with the real supervisor recording a synthetic
+        camera at SegmentSeconds 6 x StallFactor 2.5 = a 15 s limit.
+
+        The watchdog judges directory-listing TIMESTAMPS only: the later of the
+        child's start, the newest LastWriteTime among the closed files and the
+        CreationTime of the file ffmpeg holds. Never a length, so neither the
+        stale size of an open file nor ffmpeg's 256 KB write blocks reach it.
+
+        - healthy: over 20+ segment rolls the child is never killed, and the
+          age the watchdog computes - sampled here from the same listing -
+          stays below the limit; the closest margin is reported;
+        - stalled: the child is suspended, so it is alive and writes nothing.
+          The watchdog must kill it about 15 s after its last progress, the
+          restart must count in RestartsLastHour, and a new segment must be
+          written. Nothing is left suspended.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $name = 'synth1'
+    $segment = 6
+    $factor = 2.5
+    $limit = $segment * $factor
+    $sandbox = New-CamTestSynthSandbox -Name 'stallwatch' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = $segment; StallFactor = $factor; StatusIntervalSeconds = 1; ReconcileSeconds = 2; BackoffStartSeconds = 1 }
+    $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
+
+    # The watchdog's reference as it computes it, minus the child's start.
+    # UTC, so the check itself cannot be fooled by a DST change.
+    $reference = {
+        $files = @(Get-ChildItem -LiteralPath $camDir -File -Force -ErrorAction SilentlyContinue)
+        if ($files.Count -eq 0) { return $null }
+        $current = $files | Sort-Object -Property CreationTimeUtc -Descending | Select-Object -First 1
+        $latest = $current.CreationTimeUtc
+        foreach ($file in $files) { if ($file.FullName -ne $current.FullName -and $file.LastWriteTimeUtc -gt $latest) { $latest = $file.LastWriteTimeUtc } }
+        return $latest
+    }
+    $segmentCount = { @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config).Count }
+    $watchdogLines = { @(Get-Content -LiteralPath $sandbox.SupervisorLog | Where-Object { $_ -like '*watchdog*' }) }
+
+    $camera = $null
+    $process = $null
+    $suspended = 0
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        $child = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -TimeoutSeconds 20
+        $evidence += ("synthetic camera mediamtx pid {0}, publisher pid {1}; supervisor pid {2}; child pid {3}; limit {4} x {5} = {6} s" -f `
+            $camera.MediaMtx.Id, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id, $child, $segment, (Format-CamNumber -Value $factor -Format '0.0'), $limit)
+
+        # healthy
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ((& $segmentCount) -lt 1 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+        $first = & $segmentCount
+        $maxAge = 0.0
+        $deadline = [DateTime]::UtcNow.AddSeconds(21 * $segment + 20)
+        while (((& $segmentCount) - $first) -lt 21 -and [DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) {
+            $at = & $reference
+            if ($at) { $age = ([DateTime]::UtcNow - $at).TotalSeconds; if ($age -gt $maxAge) { $maxAge = $age } }
+            Start-Sleep -Milliseconds 200
+        }
+        $rolls = (& $segmentCount) - $first
+        $same = Get-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name
+        $row = @((Get-CamTestStatusJson -Sandbox $sandbox).Snapshot.Cameras)[0]
+        $evidence += ("healthy: {0} segment roll(s); child pid {1} -> {2}; watchdog lines {3}; RestartsLastHour {4}; largest watchdog age {5} s against the {6} s limit (margin {7} s)" -f `
+            $rolls, $child, $same, (& $watchdogLines).Count, $row.RestartsLastHour, (Format-CamNumber -Value $maxAge -Format '0.0'), $limit, (Format-CamNumber -Value ($limit - $maxAge) -Format '0.0'))
+        if ($rolls -lt 20 -or $same -ne $child -or (& $watchdogLines).Count -or [int]$row.RestartsLastHour -ne 0 -or $maxAge -ge $limit) {
+            $ok = $false; $evidence += 'FAIL: a healthy child was killed, restarted or came within the stall limit'
+        }
+
+        # stalled: suspend just after a roll, so the delay is close to the whole limit
+        $before = & $segmentCount
+        $deadline = [DateTime]::UtcNow.AddSeconds($segment + 5)
+        while ((& $segmentCount) -eq $before -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+        Start-Sleep -Milliseconds 500
+        $lastProgress = & $reference
+        $old = Get-Process -Id $child
+        $suspendedAt = [DateTime]::UtcNow
+        Suspend-CamTestProcess -ProcessId $child
+        $suspended = $child
+        $evidence += ("stalled: suspended pid {0} at +{1} s after its last progress; suspended threads seen {2}" -f `
+            $child, (Format-CamNumber -Value ($suspendedAt - $lastProgress).TotalSeconds -Format '0.0'), (Test-CamTestProcessSuspended -ProcessId $child))
+
+        $killedAt = $null
+        $deadline = $suspendedAt.AddSeconds($limit + 20)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if ($old.HasExited) { $killedAt = [DateTime]::UtcNow; break }
+            Start-Sleep -Milliseconds 100
+        }
+        $next = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -Not $child -TimeoutSeconds 15
+        $resumed = $false
+        $deadline = [DateTime]::UtcNow.AddSeconds($segment + 15)
+        while ($killedAt -and [DateTime]::UtcNow -lt $deadline) {
+            $newest = @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config) | Select-Object -Last 1
+            if ($newest -and $newest.CreationTimeUtc -gt $killedAt -and (Get-CamTestLiveLength -Path $newest.FullName) -gt 0) { $resumed = $true; break }
+            Start-Sleep -Milliseconds 250
+        }
+        Start-Sleep -Seconds 2
+        $row = @((Get-CamTestStatusJson -Sandbox $sandbox).Snapshot.Cameras)[0]
+        foreach ($line in (& $watchdogLines)) { $evidence += ('  log: ' + $line) }
+        $killLine = @(Get-Content -LiteralPath $sandbox.SupervisorLog | Where-Object { $_ -like "*kill $name pid $child*" }) | Select-Object -First 1
+        if ($killLine) { $evidence += ('  log: ' + $killLine) }
+        if ($killedAt) {
+            $sinceProgress = ($killedAt - $lastProgress).TotalSeconds
+            $sinceSuspend = ($killedAt - $suspendedAt).TotalSeconds
+            $evidence += ("  killed {0} s after its last progress and {1} s after the suspend (limit {2} s); new child pid {3}; new segment with data {4}; RestartsLastHour {5}, Alive {6}" -f `
+                (Format-CamNumber -Value $sinceProgress -Format '0.0'), (Format-CamNumber -Value $sinceSuspend -Format '0.0'), $limit, $next, $resumed, $row.RestartsLastHour, $row.Alive)
+            # Above the limit, and late by at most a status scan (1 s), a
+            # supervisor tick (1 s) and this poll.
+            if ($sinceProgress -le $limit -or $sinceProgress -gt ($limit + 3.5)) { $ok = $false; $evidence += 'FAIL: the kill was not about one limit after the last progress' }
+        }
+        else { $evidence += ("  FAIL: the suspended child was not killed within {0} s" -f ($limit + 20)) }
+        if (-not $killedAt -or $next -le 0 -or -not $resumed -or [int]$row.RestartsLastHour -ne 1 -or -not $row.Alive -or -not $killLine) {
+            $ok = $false; $evidence += 'FAIL: the stalled child was not killed, restarted, counted and recording again'
+        }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($suspended) {
+            $clear = Resume-CamTestProcess -ProcessId $suspended
+            $evidence += ("pid {0} left suspended: {1}" -f $suspended, (-not $clear))
+            if (-not $clear) { $ok = $false }
+        }
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $evidence += $leak.Text
+    if (-not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'stallwatch' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\stallwatch.none') }) `
+        -Message 'the stall watchdog kills a suspended child about StallFactor x SegmentSeconds after its last segment write, and never a healthy one'
+}
+
 
 function Invoke-CamCheckDocSwitches {
     <#
@@ -4198,6 +4341,7 @@ foreach ($check in $Checks) {
         'segments'  { Invoke-CamCheckSegments  -Run $run }
         'backoff'   { Invoke-CamCheckBackoff   -Run $run }
         'logrotatelive' { Invoke-CamCheckLogRotateLive -Run $run }
+        'stallwatch' { Invoke-CamCheckStallWatch -Run $run }
     }
 }
 
