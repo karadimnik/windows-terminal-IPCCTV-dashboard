@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -54,7 +54,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'relayapi', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'relayapi', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'livecfg', 'livesecret')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -6217,6 +6217,229 @@ function Invoke-CamCheckDocLinks {
 }
 
 
+function Invoke-CamCheckLiveCfg {
+    <#
+        [Stage 1A] Live view is additive and off by default.
+
+        (a) with the flag off, and with it on, the RELAY's rendered config is
+            byte-identical to what master's own Get-CamRelayConfigText renders
+            for the same inputs (master's cam.common.ps1 and template come
+            from git, run in their own process); the template file is
+            identical too;
+        (b) with the flag off, a real sandbox supervisor produces a status.json
+            with exactly master's top-level keys, no Live section, and no
+            mediamtx process; -Status and -Install -WhatIf print what master's
+            copies print for the same sandbox;
+        (c) with the flag on the live config has the exact properties the
+            design lists, holds the secret only as its sha256, and a live name
+            that collides with a relay path is refused;
+        (d) a malformed or unknown Live* key is refused at load.
+        No camera, no port.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $fail = { param([string]$Text) $script:CamLiveCfgOk = $false; $script:CamLiveCfgEvidence += ('FAIL ' + $Text) }
+    $script:CamLiveCfgOk = $true
+    $script:CamLiveCfgEvidence = @()
+    $sandboxes = @()
+
+    # -- the cameras: odd names, one already on the sub-stream, one with no Quality
+    $cameras = @(
+        [pscustomobject]@{ Name = 'Front Entrance'; IP = '127.0.0.1:1'; Quality = 'stream1'; Record = $false },
+        [pscustomobject]@{ Name = 'Rear Balcony'; IP = '127.0.0.1:1'; Quality = 'stream2'; Record = $false },
+        [pscustomobject]@{ Name = 'Car_Garage'; IP = '127.0.0.1:1'; Record = $false },
+        [pscustomobject]@{ Name = 'Workshop-Entrance'; IP = '127.0.0.1:1'; Quality = 'stream1'; Record = $false })
+    $liveKeys = @{ LiveExePath = 'C:\x\mediamtx.exe'; LiveConfigPath = 'C:\x\live.yml'; LiveWhepAddress = '127.0.0.1:28889'
+        LiveUdpAddress = '127.0.0.1:28189'; LiveSubStream = 'stream2'; LiveCloseAfterSeconds = 7; LiveSecretPath = 'C:\x\secret.txt' }
+
+    try {
+        # ---------------- (a) the relay config, against master
+        $sandbox = New-CamTestSandbox -Name 'livecfg' -Cameras $cameras -Config @{ RestreamerEnabled = $true }
+        $sandboxes += $sandbox
+        $masterDir = Join-Path -Path $sandbox.Dir -ChildPath 'master'
+        [void](New-Item -ItemType Directory -Path $masterDir -Force)
+        foreach ($name in @('cam.common.ps1', 'mediamtx.template.yml')) {
+            if (-not (Copy-CamTestMasterFile -Name $name -Destination (Join-Path $masterDir $name))) { throw "could not read master:$name through git in WSL" }
+        }
+        Copy-Item -LiteralPath $sandbox.Cameras -Destination $masterDir -Force
+        $evidence += ("master's cam.common.ps1: {0} bytes, sha256 {1}" -f (Get-Item (Join-Path $masterDir 'cam.common.ps1')).Length, (Get-FileHash -LiteralPath (Join-Path $masterDir 'cam.common.ps1') -Algorithm SHA256).Hash.Substring(0, 12))
+        $sameTemplate = ((Get-FileHash (Join-Path $masterDir 'mediamtx.template.yml')).Hash -eq (Get-FileHash (Join-Path (Get-CamTestRepo) 'mediamtx.template.yml')).Hash)
+        $evidence += ("(a) mediamtx.template.yml identical to master's: {0}" -f $sameTemplate)
+        if (-not $sameTemplate) { & $fail 'the relay template differs from master' }
+
+        $configs = [ordered]@{
+            'no live keys'                = @{ RestreamerEnabled = $true }
+            'flag explicitly off, keys set' = (@{ RestreamerEnabled = $true; LiveViewEnabled = $false } + $liveKeys)
+            'flag ON'                     = (@{ RestreamerEnabled = $true; LiveViewEnabled = $true } + $liveKeys)
+        }
+        $child = Join-Path -Path $masterDir -ChildPath 'render.ps1'
+        $lines = @('$ErrorActionPreference = "Stop"', ". '$(Join-Path $masterDir 'cam.common.ps1')'",
+            '$cred = New-Object System.Management.Automation.PSCredential("camrelayapi", (ConvertTo-SecureString ("0" * 64) -AsPlainText -Force))',
+            '$map = Get-CamRelayPathMap -Cameras (Get-CamList)')
+        $i = 0
+        $names = @()
+        foreach ($label in $configs.Keys) {
+            $i++
+            $cfgPath = Join-Path -Path $masterDir -ChildPath "cfg$i.json"
+            $settings = [ordered]@{ RootPath = $sandbox.Root; RestreamerEnabled = $true }
+            foreach ($key in $configs[$label].Keys) { $settings[$key] = $configs[$label][$key] }
+            [System.IO.File]::WriteAllText($cfgPath, (ConvertTo-Json -InputObject $settings), (New-Object System.Text.UTF8Encoding($false)))
+            $lines += ('[System.IO.File]::WriteAllText("{0}", (Get-CamRelayConfigText -Config (Get-CamConfig -Path "{1}") -PathMap $map -ApiCredential $cred), (New-Object System.Text.UTF8Encoding($false)))' -f (Join-Path $masterDir "relay$i.master.yml"), $cfgPath)
+            $names += $label
+        }
+        [System.IO.File]::WriteAllText($child, ($lines -join "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
+        $result = Invoke-CamTestScript -Path $child
+        if ($result.ExitCode -ne 0) { throw ('rendering with master failed: ' + ($result.Lines -join ' | ')) }
+        $cred = New-Object System.Management.Automation.PSCredential('camrelayapi', (ConvertTo-SecureString ('0' * 64) -AsPlainText -Force))
+        $map = Get-CamRelayPathMap -Cameras $cameras
+        $i = 0
+        foreach ($label in $names) {
+            $i++
+            $config = Get-CamConfig -Path (Join-Path $masterDir "cfg$i.json")
+            $mine = [System.Text.Encoding]::UTF8.GetBytes((Get-CamRelayConfigText -Config $config -PathMap $map -ApiCredential $cred))
+            $theirs = [System.IO.File]::ReadAllBytes((Join-Path $masterDir "relay$i.master.yml"))
+            $same = ($mine.Length -eq $theirs.Length) -and ([System.BitConverter]::ToString($mine) -eq [System.BitConverter]::ToString($theirs))
+            $evidence += ("(a) relay config, {0}: {1} bytes here, {2} bytes from master, identical {3}" -f $label, $mine.Length, $theirs.Length, $same)
+            if (-not $same -or $mine.Length -lt 500) { & $fail "relay config differs from master ($label)" }
+        }
+
+        # ---------------- (c) the live config
+        $secret = ('ab' * 32)
+        $liveCred = New-Object System.Management.Automation.PSCredential('camlive', (ConvertTo-SecureString $secret -AsPlainText -Force))
+        $on = Get-CamConfig -Path (Join-Path $masterDir 'cfg3.json')
+        $liveMap = Get-CamLivePathMap -Config $on -RelayPathMap $map
+        $text = Get-CamLiveConfigText -Config $on -LivePathMap $liveMap -LiveCredential $liveCred
+        $flat = @($text -split "`r`n")
+        $top = @{}
+        foreach ($l in $flat) { if ($l -match '^([A-Za-z0-9]+):\s*(.*)$') { $top[$Matches[1]] = $Matches[2].Trim() } }
+        $expect = [ordered]@{ webrtc = 'yes'; webrtcAddress = '127.0.0.1:28889'; webrtcLocalUDPAddress = '127.0.0.1:28189'; webrtcLocalTCPAddress = '""'
+            webrtcAllowOrigins = '[]'; webrtcIPsFromInterfaces = 'no'; webrtcAdditionalHosts = '["127.0.0.1"]'; webrtcEncryption = 'no'
+            rtsp = 'no'; rtmp = 'no'; hls = 'no'; srt = 'no'; api = 'no'; metrics = 'no'; pprof = 'no'; playback = 'no'; moq = 'no'; authMethod = 'internal' }
+        $bad = @($expect.Keys | Where-Object { $top[$_] -ne $expect[$_] } | ForEach-Object { "$_ = '$($top[$_])' want '$($expect[$_])'" })
+        $evidence += ("(c) live config keys checked: {0}; wrong: {1}" -f $expect.Count, $(if ($bad) { $bad -join '; ' } else { 'none' }))
+        if ($bad) { & $fail ('live config keys: ' + ($bad -join '; ')) }
+
+        $users = @($flat | Where-Object { $_ -match '^\s+- user:' })
+        $actions = @($flat | Where-Object { $_ -match '^\s+- action:' })
+        $passLine = @($flat | Where-Object { $_ -match '^\s+pass:' })
+        $userOk = ($users.Count -eq 1 -and $users[0].Trim() -eq '- user: camlive' -and $actions.Count -eq 1 -and $actions[0].Trim() -eq '- action: read')
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $expectedHash = 'sha256:' + [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($secret)))
+        $passOk = ($passLine.Count -eq 1 -and $passLine[0].Trim() -ceq "pass: $expectedHash")
+        $evidence += ("(c) users: {0} ({1}); actions: {2}; any-user present: {3}; pass is the sha256 of the secret: {4}; secret appears in the text: {5}" -f `
+            $users.Count, (($users | ForEach-Object { $_.Trim() }) -join ' '), (($actions | ForEach-Object { $_.Trim() }) -join ' '), ($text -match '(?m)user:\s*any'), $passOk, $text.Contains($secret))
+        $evidence += ("    the pass line (hash only): {0}" -f $passLine[0].Trim())
+        if (-not $userOk) { & $fail 'the live config must have exactly one user, camlive, with exactly one permission, read' }
+        if (-not $passOk) { & $fail 'the pass line is not the sha256 of the secret' }
+        if ($text.Contains($secret) -or $text -match '(?m)user:\s*any') { & $fail 'the live config holds the secret or an any user' }
+        if ($text -match 'Access-Control' -or $text -match '@') { & $fail 'the live config has an Access-Control or credential-looking text' }
+
+        $declared = @(Get-CamRelayConfigPathNames -Text $text)
+        $wantPaths = @('frontentrancesub', 'frontentrancemain', 'rearbalconymain', 'cargaragesub', 'cargaragemain', 'workshopentrancesub', 'workshopentrancemain')
+        $pathsOk = (($declared -join ',') -ceq ($wantPaths -join ','))
+        $evidence += ("(c) live paths: {0}" -f ($declared -join ', '))
+        $evidence += ("    Rear Balcony's recorder Quality is stream2 = LiveSubStream, so it has only rearbalconymain; the other three have sub and main")
+        if (-not $pathsOk) { & $fail ('live paths are not ' + ($wantPaths -join ', ')) }
+        $mainSources = @($flat | Where-Object { $_ -match '^\s+source: rtsp://' })
+        $subSources = @($flat | Where-Object { $_ -match '^\s+source: publisher' })
+        $mainOk = ($mainSources.Count -eq 4 -and @($mainSources | Where-Object { $_ -notmatch '^\s+source: rtsp://127\.0\.0\.1:8554/[a-z0-9]+$' }).Count -eq 0)
+        $evidence += ("(c) main sources: {0}; sub sources left to the environment: {1}" -f (($mainSources | ForEach-Object { $_.Trim() }) -join ' | '), $subSources.Count)
+        if (-not $mainOk -or $subSources.Count -ne 3) { & $fail 'main paths must pull the relay with no credential, sub paths come from the environment' }
+        $dflt = @($flat | Where-Object { $_ -match '^\s+(sourceOnDemand|sourceOnDemandCloseAfter|rtspTransport):' } | ForEach-Object { $_.Trim() })
+        $evidence += ("(c) path defaults: {0}" -f ($dflt -join ', '))
+        if (($dflt -join ',') -ne 'rtspTransport: tcp,sourceOnDemand: yes,sourceOnDemandCloseAfter: 7s') { & $fail 'pathDefaults are not tcp, on demand, 7s' }
+
+        $collide = @([pscustomobject]@{ Name = 'Cam'; IP = '1'; Quality = 'stream1' }, [pscustomobject]@{ Name = 'Camsub'; IP = '1'; Quality = 'stream1' })
+        $thrown = ''
+        try { [void](Get-CamLivePathMap -Config $on -RelayPathMap (Get-CamRelayPathMap -Cameras $collide)) } catch { $thrown = $_.Exception.Message }
+        $evidence += ("(c) cameras 'Cam' and 'Camsub' (live path camsub = relay path camsub): {0}" -f $thrown)
+        if ($thrown -notlike "*'camsub'*also the recording relay's path*") { & $fail 'a live path colliding with a relay path was not refused' }
+
+        # ---------------- (d) refused at load
+        $rejects = @(
+            @{ Key = 'LiveViewEnabled'; Value = 'yes' }, @{ Key = 'LiveViewEnable'; Value = $true },
+            @{ Key = 'LiveWhepAddress'; Value = '0.0.0.0:8889' }, @{ Key = 'LiveWhepAddress'; Value = '127.0.0.1:99999' },
+            @{ Key = 'LiveUdpAddress'; Value = 'localhost:8189' }, @{ Key = 'LiveWhepAddress'; Value = '127.0.0.1:9997' },
+            @{ Key = 'LiveCloseAfterSeconds'; Value = 0 }, @{ Key = 'LiveCloseAfterSeconds'; Value = 'soon' }, @{ Key = 'LiveSubStream'; Value = '../x' },
+            @{ Key = 'LiveConfigPath'; Value = '\\wsl.localhost\Ubuntu-20.04\x.yml' }, @{ Key = 'LiveConfigPath'; Value = '' }, @{ Key = 'LiveSecretPath'; Value = '\\server\share\s.txt' })
+        $refused = 0
+        foreach ($case in $rejects) {
+            $path = Join-Path $masterDir 'bad.json'
+            [System.IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject @{ $case.Key = $case.Value }), (New-Object System.Text.UTF8Encoding($false)))
+            $message = ''
+            try { [void](Get-CamConfig -Path $path) } catch { $message = $_.Exception.Message }
+            if ($message) { $refused++ } else { & $fail ("accepted {0} = '{1}'" -f $case.Key, $case.Value) }
+        }
+        $goodPath = Join-Path $masterDir 'good.json'
+        [System.IO.File]::WriteAllText($goodPath, (ConvertTo-Json -InputObject $liveKeys), (New-Object System.Text.UTF8Encoding($false)))
+        $goodOk = $true; try { [void](Get-CamConfig -Path $goodPath) } catch { $goodOk = $false; & $fail ('a valid live configuration was refused: ' + $_.Exception.Message) }
+        $defaults = Get-CamConfig -Path (Join-Path $masterDir 'missing.json')
+        $evidence += ("(d) {0} of {1} malformed or unknown Live* settings refused at load with a message; a valid set accepted: {2}; defaults: off={3}" -f `
+            $refused, $rejects.Count, $goodOk, ($defaults.LiveViewEnabled -eq $false))
+        $evidence += ("    default keys: LiveViewEnabled={0} LiveConfigPath={1} LiveWhepAddress={2} LiveUdpAddress={3} LiveSubStream={4} LiveCloseAfterSeconds={5} LiveExePath='{6}' LiveSecretPath='{7}'" -f `
+            $defaults.LiveViewEnabled, $defaults.LiveConfigPath, $defaults.LiveWhepAddress, $defaults.LiveUdpAddress, $defaults.LiveSubStream, $defaults.LiveCloseAfterSeconds, $defaults.LiveExePath, $defaults.LiveSecretPath)
+
+        # ---------------- (b) flag off: status.json, -Status and -Install -WhatIf against master
+            $inst = New-CamTestInstallSandbox -Name 'livecfg-inst'
+        $sandboxes += $inst
+        $instMaster = New-CamTestInstallSandbox -Name 'livecfg-inst-master'
+        $sandboxes += $instMaster
+        foreach ($name in @('cam.ps1', 'cam.common.ps1', 'cam.recorder.ps1', 'mediamtx.template.yml')) {
+            if (-not (Copy-CamTestMasterFile -Name $name -Destination (Join-Path $instMaster.Dir $name))) { throw "could not read master:$name" }
+        }
+        $run1 = @{}
+        foreach ($case in @(@{ L = 'status'; A = @('-Status') }, @{ L = 'install-whatif'; A = @('-Install', '-WhatIf') })) {
+            $a = Invoke-CamTestScript -Path $inst.Cam -Arguments $case.A -Environment @{ LOCALAPPDATA = $inst.LocalAppData }
+            $b = Invoke-CamTestScript -Path $instMaster.Cam -Arguments $case.A -Environment @{ LOCALAPPDATA = $instMaster.LocalAppData }
+            $norm = { param($r, $dir) @($r.Lines | ForEach-Object { $_.Replace($dir, '<SANDBOX>') } | Where-Object { $_ -notmatch '(?i)^\s*(\d{4}-\d{2}-\d{2}|pid |\s*uptime)' }) -join "`n" }
+            $na = & $norm $a $inst.Dir; $nb = & $norm $b $instMaster.Dir
+            $same = ($na -ceq $nb -and $a.ExitCode -eq $b.ExitCode -and $na.Length -gt 200)
+            $evidence += ("(b) cam.ps1 {0}: exit {1} here, {2} master; {3} lines here, {4} master; identical {5}" -f ($case.A -join ' '), $a.ExitCode, $b.ExitCode, $a.Lines.Count, $b.Lines.Count, $same)
+            if (-not $same) { & $fail ("cam.ps1 $($case.A -join ' ') differs from master's"); $evidence += ('    here  : ' + (($na -split "`n" | Select-Object -First 40) -join ' / ')); $evidence += ('    master: ' + (($nb -split "`n" | Select-Object -First 40) -join ' / ')) }
+            if ($na -match '(?i)live view|liveview|\blive\b') { & $fail "cam.ps1 $($case.A -join ' ') mentions live view with the flag off" }
+        }
+
+        # status.json from a real supervisor, flag off, here and with master's scripts
+        $mine = New-CamTestSandbox -Name 'livecfg-off' -Cameras @([pscustomobject]@{ Name = 'Idle'; IP = '127.0.0.1:1'; Quality = 'stream1'; Record = $false }) -Config @{ LiveViewEnabled = $false }
+        $sandboxes += $mine
+        $theirs = New-CamTestSandbox -Name 'livecfg-off-master' -Cameras @([pscustomobject]@{ Name = 'Idle'; IP = '127.0.0.1:1'; Quality = 'stream1'; Record = $false })
+        $sandboxes += $theirs
+        foreach ($name in @('cam.common.ps1', 'cam.recorder.ps1', 'mediamtx.template.yml')) {
+            if (-not (Copy-CamTestMasterFile -Name $name -Destination (Join-Path $theirs.Dir $name))) { throw "could not read master:$name" }
+        }
+        foreach ($s in @($mine, $theirs)) { [void](Set-CamTestAlertStub -Sandbox $s) }
+        $keys = @{}
+        foreach ($pair in @(@('here', $mine), @('master', $theirs))) {
+            $process = Start-CamTestSupervisor -Sandbox $pair[1]
+            $statusText = $null
+            $deadline = [DateTime]::Now.AddSeconds(20)
+            while ([DateTime]::Now -lt $deadline) { $got = Get-CamTestStatusJson -Sandbox $pair[1]; if ($got -and $got.Snapshot.State -eq 'running') { $statusText = $got; break }; Start-Sleep -Milliseconds 500 }
+            $mediamtx = @(Get-CimInstance Win32_Process -Filter "Name = 'mediamtx.exe'" | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($pair[1].Dir) })
+            $stop = Stop-CamTestSupervisor -Sandbox $pair[1] -Process $process
+            if (-not $statusText) { & $fail "no running status.json from the $($pair[0]) supervisor"; continue }
+            $keys[$pair[0]] = @{ Top = (@($statusText.Snapshot.PSObject.Properties.Name) -join ','); Restreamer = (@($statusText.Snapshot.Restreamer.PSObject.Properties.Name) -join ','); Media = $mediamtx.Count; Stop = $stop.Ok; Text = $statusText.Text }
+        }
+        if ($keys.here -and $keys.master) {
+            $sameKeys = ($keys.here.Top -ceq $keys.master.Top -and $keys.here.Restreamer -ceq $keys.master.Restreamer)
+            $evidence += ("(b) status.json top-level keys here == master: {0} ({1})" -f $sameKeys, $keys.here.Top)
+            $evidence += ("(b) status.json mentions live: {0}; mediamtx processes in the sandbox: {1}; supervisor stopped cleanly: {2}" -f ($keys.here.Text -match '"Live"\s*:'), $keys.here.Media, $keys.here.Stop)
+            if (-not $sameKeys -or $keys.here.Text -match '"Live"\s*:' -or $keys.here.Media -ne 0 -or -not $keys.here.Stop) { & $fail 'status.json or processes differ from master with the flag off' }
+        }
+    }
+    catch { & $fail ("check aborted: " + $_.Exception.Message) }
+    finally {
+        if ($script:CamLiveCfgOk) { foreach ($s in $sandboxes) { try { Remove-CamTestTree -Path $s.Dir } catch { $script:CamLiveCfgEvidence += "cleanup of $($s.Dir) failed" } } }
+        else { $script:CamLiveCfgEvidence += ('sandbox(es) left for inspection: ' + (@($sandboxes | ForEach-Object { $_.Dir }) -join ', ')) }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'livecfg' -Status $(if ($script:CamLiveCfgOk) { 'PASS' } else { 'FAIL' }) `
+        -Message 'live view is off by default and changes nothing then; its config has exactly the designed properties; bad Live settings are refused at load' `
+        -Evidence ($evidence + $script:CamLiveCfgEvidence)
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -6270,6 +6493,7 @@ foreach ($check in $Checks) {
         'dst'       { Invoke-CamCheckDst       -Run $run }
         'dstloop'   { Invoke-CamCheckDstLoop   -Run $run }
         'clocklint' { Invoke-CamCheckClockLint -Run $run }
+        'livecfg'   { Invoke-CamCheckLiveCfg   -Run $run }
         'soak'      { Invoke-CamCheckSoak      -Run $run -DryRun:$SoakDryRun }
     }
 }

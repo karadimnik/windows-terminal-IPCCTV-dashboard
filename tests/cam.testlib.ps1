@@ -2209,3 +2209,29 @@ function Find-CamDocLinkProblems {
 
     return [pscustomobject]@{ Links = $links; Anchors = $anchors; Problems = @($problems) }
 }
+
+
+# ---------------------------------------------------------------------------
+# Live view (Stage 1A)
+# ---------------------------------------------------------------------------
+
+function Copy-CamTestMasterFile {
+    <#
+        Writes a file as it is on the repository's master branch, byte for
+        byte, to $Destination, using git inside WSL (git is not installed on
+        Windows here). Returns $true when the file exists afterwards and is not
+        empty. cmd.exe does the redirection so no console encoding touches the
+        bytes.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $repo = Get-CamTestRepo
+    $linux = (& wsl.exe -e wslpath -a -u $repo) | Select-Object -First 1
+    if (-not $linux) { return $false }
+    if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+    & cmd.exe /c ('wsl.exe -e git -C "{0}" show "master:{1}" > "{2}"' -f $linux, $Name, $Destination) | Out-Null
+    return ((Test-Path -LiteralPath $Destination) -and ((Get-Item -LiteralPath $Destination).Length -gt 0))
+}
