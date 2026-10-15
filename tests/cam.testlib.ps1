@@ -983,6 +983,51 @@ function Send-CamAlert {
 }
 
 
+function Get-CamTestCadenceLimit {
+    <#
+        The longest gap a runtime check accepts between two runs of a
+        supervisor timer that fires every $IntervalSeconds: 3 x interval +
+        1.5 s. A timer fires on the first 1 s loop tick past its interval, and
+        a tick can be held by the work before it - directory scans, a child
+        start, a prune run, a slow disk under a loaded harness - so a healthy
+        1 s status timer was measured at 1.1-1.6 s and once at 3.7 s, which
+        failed the fixed 3 s limit. 3 x interval absorbs two late ticks, the
+        1.5 s a loaded host. A real stall is not near it: a frozen status
+        timer reads tens of seconds (30.9 s in the [86] red run), and a
+        watchdog-killed or dead loop never writes again.
+    #>
+    param([Parameter(Mandatory = $true)][double]$IntervalSeconds)
+    return (3 * $IntervalSeconds + 1.5)
+}
+
+
+function Find-CamClockLintProblems {
+    <#
+        [86] Lines of product PowerShell that read the LOCAL clock or a LOCAL
+        file time outside the display forms. Interval, age and deadline
+        arithmetic must use Get-CamWallClock (UTC) and LastWriteTimeUtc /
+        CreationTimeUtc, because DateTime subtraction ignores the offset and
+        a daylight-saving change would move it by an hour.
+
+        Allowed without comment - they can only produce text:
+            Get-Date -Format ...      [DateTime]::Now.ToString(...)
+            $x.LastWriteTime.ToString(...)   $x.CreationTime.ToString(...)
+        Anything else needs "# clock: display" on the same line, saying why
+        it is display only.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines, [string]$Label = '')
+
+    $problems = @()
+    $read = '\[DateTime\]::(Now|Today)\b|\bGet-Date\b|\.(LastWriteTime|CreationTime|LastAccessTime)\b'
+    $display = '\bGet-Date\s+-Format\b|\[DateTime\]::Now\.ToString\(|\.(LastWriteTime|CreationTime|LastAccessTime)\.ToString\(|#\s*clock:\s*display'
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        $line = $Lines[$i]
+        if ($line -match $read -and $line -notmatch $display) { $problems += ("{0}:{1}: {2}" -f $Label, ($i + 1), $line.Trim()) }
+    }
+    return , $problems
+}
+
+
 function Set-CamTestSandboxClock {
     <#
         Rewires every clock reading of the SANDBOX copies of cam.common.ps1 and

@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -3988,8 +3988,9 @@ function Invoke-CamCheckLogRotateLive {
             $ok = $false; $evidence += 'FAIL: with recorder.log held the supervisor died, rolled anyway, logged other than one notice, or did not roll once released'
         }
 
-        $evidence += ("status.json: longest gap between updates {0} s (StatusIntervalSeconds 1); last update {1}" -f (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'), $watch.LastUpdate.ToString('HH:mm:ss'))
-        if ($watch.MaxStatusGap -gt 3) { $ok = $false; $evidence += 'FAIL: status.json stopped updating' }
+        $gapLimit = Get-CamTestCadenceLimit -IntervalSeconds $sandbox.Config.StatusIntervalSeconds
+        $evidence += ("status.json: longest gap between updates {0} s (StatusIntervalSeconds {1}, limit {2} s); last update {3}" -f (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'), $sandbox.Config.StatusIntervalSeconds, $gapLimit, $watch.LastUpdate.ToString('HH:mm:ss'))
+        if ($watch.MaxStatusGap -gt $gapLimit) { $ok = $false; $evidence += 'FAIL: status.json stopped updating' }
     }
     catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
     finally {
@@ -4293,12 +4294,13 @@ function Invoke-CamCheckLogHeld {
         while ((& $created $releasedAt ([DateTime]::MaxValue)) -lt 1 -and [DateTime]::Now -lt $deadline) { & $sample; Start-Sleep -Milliseconds 250 }
         $afterHold = & $created $releasedAt ([DateTime]::MaxValue)
         $shutdown = @(Get-Content -LiteralPath $recLog | Where-Object { $_ -like '*supervisor shutting down*' }).Count
-        $evidence += ("  held recorder.log ({0} B) and {1}.log ({2} B) FileShare.None for 20 s, child pid {3} killed at +5 s: lengths unchanged {4}; supervisor alive {5}; restarted as pid {6}; status.json longest gap {7} s" -f `
-            $recHeld, $name, $camBefore, $child, ($camHeld -eq $camBefore), (-not $watch.Died), $next, (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'))
+        $gapLimit = Get-CamTestCadenceLimit -IntervalSeconds $sandbox.Config.StatusIntervalSeconds
+        $evidence += ("  held recorder.log ({0} B) and {1}.log ({2} B) FileShare.None for 20 s, child pid {3} killed at +5 s: lengths unchanged {4}; supervisor alive {5}; restarted as pid {6}; status.json longest gap {7} s (limit {8} s)" -f `
+            $recHeld, $name, $camBefore, $child, ($camHeld -eq $camBefore), (-not $watch.Died), $next, (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'), $gapLimit)
         $evidence += ("  recorder.log: {0}" -f $(if ($recNotice) { (@($recNotice) -join ' | ') } else { 'no drop notice' }))
         $evidence += ("  {0}.log: {1}" -f $name, $(if ($camNotice) { (@($camNotice) -join ' | ') } else { 'no drop notice' }))
         $evidence += ("  segments created during the hold: {0}, after the release: {1}; 'supervisor shutting down' lines: {2}" -f $duringHold, $afterHold, $shutdown)
-        if ($watch.Died -or -not $killed -or $next -le 0 -or @($recNotice).Count -ne 1 -or @($camNotice).Count -ne 1 -or $watch.MaxStatusGap -gt 3 -or $duringHold -lt 1 -or $afterHold -lt 1 -or $shutdown) {
+        if ($watch.Died -or -not $killed -or $next -le 0 -or @($recNotice).Count -ne 1 -or @($camNotice).Count -ne 1 -or $watch.MaxStatusGap -gt $gapLimit -or $duringHold -lt 1 -or $afterHold -lt 1 -or $shutdown) {
             $ok = $false; $evidence += 'FAIL: with its logs held the supervisor died, stopped updating or recording, or did not report the dropped lines once'
         }
     }
@@ -4409,9 +4411,11 @@ function Invoke-CamCheckPruneLoop {
         $restarts = @(& $logLines $sandbox '*restart #*').Count
         $failed = @(& $logLines $sandbox '* prune: FAILED to delete *').Count
         $facts | Add-Member -NotePropertyName Stops -NotePropertyValue $stops
-        $facts.Text += ("recording: {0} segment(s) written, largest start-to-start gap {1} s, {2} restart(s), {3} failed deletion(s); {4} 'prune stop:' line(s), at most {5} s apart; status.json longest gap {6} s; supervisor alive to the end {7}" -f `
-            $times.Count, $largest, $restarts, $failed, $stops.Count, $stopGap, (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'), (-not $watch.Died))
-        if ($times.Count -lt 4 -or $largest -gt ($segment + 2) -or $restarts -or $failed -or $stops.Count -lt 5 -or $stopGap -gt 4 -or $watch.MaxStatusGap -gt 3 -or $watch.Died) {
+        $stopLimit = Get-CamTestCadenceLimit -IntervalSeconds $sandbox.Config.PruneIntervalSeconds
+        $gapLimit = Get-CamTestCadenceLimit -IntervalSeconds $sandbox.Config.StatusIntervalSeconds
+        $facts.Text += ("recording: {0} segment(s) written, largest start-to-start gap {1} s, {2} restart(s), {3} failed deletion(s); {4} 'prune stop:' line(s), at most {5} s apart (limit {6} s); status.json longest gap {7} s (limit {8} s); supervisor alive to the end {9}" -f `
+            $times.Count, $largest, $restarts, $failed, $stops.Count, $stopGap, $stopLimit, (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'), $gapLimit, (-not $watch.Died))
+        if ($times.Count -lt 4 -or $largest -gt ($segment + 2) -or $restarts -or $failed -or $stops.Count -lt 5 -or $stopGap -gt $stopLimit -or $watch.MaxStatusGap -gt $gapLimit -or $watch.Died) {
             $facts.Ok = $false; $facts.Text += 'FAIL: recording, the prune schedule or status.json was disturbed'
         }
         return $facts
@@ -4743,7 +4747,7 @@ function Invoke-CamTestClockPhase {
     $camera = 'synth1'
     $interval = 1
     $limit = 6 * 2.5
-    $gapLimit = 3 * $interval + 1.5
+    $gapLimit = Get-CamTestCadenceLimit -IntervalSeconds $interval
     $sandbox = New-CamTestSynthSandbox -Name ('dstloop-' + $Name) -CameraName $camera -Port 18554 `
         -Config @{ SegmentSeconds = 6; StallFactor = 2.5; StatusIntervalSeconds = $interval; ReconcileSeconds = 2; ArchiveScanSeconds = 5; PruneIntervalSeconds = 10; BackoffStartSeconds = 1 }
     if ($ScriptDir) {
@@ -4880,7 +4884,7 @@ function Invoke-CamCheckDstLoop {
         $evidence += $r.Lines
         $phaseOk = $r.Ok -and $r.Alive -and $r.ChildAlive -and $r.SegmentsAfter -ge 1
         if ($phase.Mode -eq 'local') {
-            $phaseOk = $phaseOk -and $r.PidChanges -eq 0 -and $r.Alerts.Count -eq 0 -and $r.MaxGap -le 4.5 -and `
+            $phaseOk = $phaseOk -and $r.PidChanges -eq 0 -and $r.Alerts.Count -eq 0 -and $r.MaxGap -le (Get-CamTestCadenceLimit -IntervalSeconds 1) -and `
                 $null -ne $r.KilledAfter -and $r.KilledAfter -le 25 -and $r.WatchdogLines.Count -eq 2
         }
         if (-not $phaseOk) { $ok = $false; $evidence += ('FAIL: ' + $phase.Name) }
@@ -4888,6 +4892,45 @@ function Invoke-CamCheckDstLoop {
 
     Complete-CamPruneCheck -Run $Run -Check 'dstloop' -Ok $ok -Evidence $evidence -Sandboxes $sandboxes `
         -Message 'the real supervisor is undisturbed by a simulated fall-back and spring-forward - no restart, no alert, no stale status, the watchdog still kills a stall - and survives a +/-3600 s step of the clock itself'
+}
+
+
+function Invoke-CamCheckClockLint {
+    <#
+        T3 [86]: no product script reads the local clock or a local file time
+        for arithmetic - Find-CamClockLintProblems over every product .ps1,
+        with a positive and a negative control so the rule is known to bite.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $controls = @(
+        @{ Line = '$age = ([DateTime]::Now - $started).TotalSeconds'; Flag = $true },
+        @{ Line = '$deadline = (Get-Date).AddSeconds(20)'; Flag = $true },
+        @{ Line = 'if ($file.LastWriteTime -lt $cutoff) { }'; Flag = $true },
+        @{ Line = '$stamp = Get-Date -Format ''HH:mm:ss'''; Flag = $false },
+        @{ Line = '$text = $file.LastWriteTime.ToString(''yyyy-MM-dd'')'; Flag = $false },
+        @{ Line = '$shown = [DateTime]::Now   # clock: display - printed, never subtracted'; Flag = $false },
+        @{ Line = '$age = ((Get-CamWallClock) - $file.LastWriteTimeUtc).TotalSeconds'; Flag = $false })
+    foreach ($control in $controls) {
+        $flagged = (Find-CamClockLintProblems -Lines @($control.Line)).Count -gt 0
+        if ($flagged -ne $control.Flag) { $ok = $false; $evidence += ("FAIL: control {0} flagged={1}, expected {2}" -f $control.Line, $flagged, $control.Flag) }
+    }
+    $evidence += ("{0} control line(s): the rule flags local reads in arithmetic and passes display forms and the seam" -f $controls.Count)
+
+    $repo = Get-CamTestRepo
+    $files = @(Get-ChildItem -LiteralPath $repo -Filter '*.ps1' -File) + @(Get-ChildItem -LiteralPath (Join-Path $repo 'ui\scripts') -Filter '*.ps1' -File)
+    $problems = @()
+    foreach ($file in $files) {
+        $problems += Find-CamClockLintProblems -Lines ([System.IO.File]::ReadAllLines($file.FullName)) -Label $file.Name
+    }
+    $evidence += ("{0} product script(s) scanned: {1}" -f $files.Count, (@($files | ForEach-Object { $_.Name }) -join ', '))
+    foreach ($problem in $problems) { $evidence += ('local clock outside display: ' + $problem) }
+    if ($problems.Count -gt 0) { $ok = $false }
+
+    Add-CamTestResult -Run $Run -Check 'clocklint' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) -Evidence $evidence `
+        -Message ("no product script reads the local clock or a local file time outside a display form ({0} found)" -f $problems.Count)
 }
 
 
@@ -5086,6 +5129,7 @@ foreach ($check in $Checks) {
         'pruneloop' { Invoke-CamCheckPruneLoop -Run $run }
         'dst'       { Invoke-CamCheckDst       -Run $run }
         'dstloop'   { Invoke-CamCheckDstLoop   -Run $run }
+        'clocklint' { Invoke-CamCheckClockLint -Run $run }
     }
 }
 
