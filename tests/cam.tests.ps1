@@ -6895,6 +6895,130 @@ function Invoke-CamCheckLiveWhep {
 }
 
 
+function Get-CamTestPathReaders {
+    <# The sessions reading one path of a (synthetic camera's) MediaMTX, from its control API: count and their types; -1 when unanswered. #>
+    param([Parameter(Mandatory = $true)][int]$ApiPort, [Parameter(Mandatory = $true)][string]$Path)
+
+    $answer = Invoke-CamLiveHttp -Url "http://127.0.0.1:$ApiPort/v3/paths/get/$Path" -TimeoutMs 2000
+    if ($answer.Code -ne 200) { return [pscustomobject]@{ Count = -1; Types = '' } }
+    $json = ConvertFrom-Json -InputObject $answer.Body
+    $readers = @($json.readers)
+    return [pscustomobject]@{ Count = $readers.Count; Types = (($readers | ForEach-Object { $_.type }) -join ',') }
+}
+
+
+function Invoke-CamCheckLiveOnDemand {
+    <#
+        [Stage 1A] The camera's second session is held only while someone
+        watches. Real supervisor, synthetic camera (its control API counts the
+        sessions reading its paths), the recorder reading stream1 through the
+        relay, Chrome as the viewer (a clean leave: the page closes its peer
+        connections).
+
+          before any viewer      stream2 sessions 0 (stream1: the relay's one)
+          viewer on camonemain   stream2 0, stream1 still exactly 1: the main
+                                 path pulls the RELAY, adding no camera session
+          viewer on camonesub    stream2 1 while it is connected
+          viewer leaves          stream2 back to 0 within LiveCloseAfterSeconds
+                                 (4) plus a 6 s margin
+    #>
+    param($Run)
+
+    $evidence = @()
+    $fail = { param([string]$Text) $script:CamLiveOdOk = $false; $script:CamLiveOdEvidence += ('FAIL ' + $Text) }
+    $script:CamLiveOdOk = $true
+    $script:CamLiveOdEvidence = @()
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $name = 'liveondemand'
+    $rig = $null; $server = $null; $started = $null; $browserSeconds = 0
+    $script:CamLiveBrowsers = @()
+    $closeAfter = 4; $margin = 6
+
+    try {
+        if (-not (Test-CamTestPortFree -Port 18080)) { throw 'TCP port 18080 is already in use; the check needs it free.' }
+        $cameras = @([pscustomobject]@{ Name = 'Cam One'; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = $true })
+        $rig = Start-CamTestLiveRig -Name $name -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds $closeAfter
+        $dir = $rig.Dir; $api = $rig.CamApi
+        Start-Sleep -Seconds 4
+        $sample = { $a = Get-CamTestPathReaders -ApiPort $api -Path 'stream1'; $b = Get-CamTestPathReaders -ApiPort $api -Path 'stream2'; [pscustomobject]@{ Ms = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds(); S1 = $a.Count; S2 = $b.Count; T1 = $a.Types; T2 = $b.Types } }
+        $before = @(1..4 | ForEach-Object { & $sample; Start-Sleep -Milliseconds 500 })
+        $evidence += ("before any viewer: stream1 sessions {0} (types {1}), stream2 sessions {2}  (4 samples, 0.5 s apart)" -f (($before | ForEach-Object { $_.S1 }) -join '/'), $before[-1].T1, (($before | ForEach-Object { $_.S2 }) -join '/'))
+        if (@($before | Where-Object { $_.S1 -ne 1 }).Count) { & $fail 'stream1 did not have exactly the relay session before any viewer' }
+        if (@($before | Where-Object { $_.S2 -ne 0 }).Count) { & $fail 'stream2 had a session before any viewer' }
+
+        $config = $rig.Sandbox.Config
+        $server = Start-CamTestLiveServer -Prefix 'http://127.0.0.1:18080/' -PageFile (Join-Path (Get-CamTestRepo) 'tests\live\page.html') -DataDir $rig.DataDir `
+            -WhepBase "http://127.0.0.1:$($rig.WhepPort)" -SecretFile ([string]$config.LiveSecretPath)
+        $found = Get-CamTestBrowser -Browser 'chrome'
+        if (-not $found.Exe) { throw $found.Reason }
+        $runId = 'ondemand'
+        $stats = Join-Path -Path $rig.DataDir -ChildPath "$runId.jsonl"
+        $timeline = New-Object System.Collections.ArrayList
+        $started = Start-CamTestBrowser -Browser 'chrome' -BaseDir $dir -Url ("http://127.0.0.1:18080/?run={0}&tiles=camonemain&late=camonesub@12&leave=24" -f $runId)
+        $script:CamLiveBrowsers += $started
+        $began = [DateTime]::UtcNow
+        $leaveAt = $null; $lateAt = $null; $zeroAt = $null
+        try {
+            $deadline = [DateTime]::UtcNow.AddSeconds(70)
+            while ([DateTime]::UtcNow -lt $deadline) {
+                [void]$timeline.Add((& $sample))
+                $events = @(Read-CamTestLiveStats -Path $stats)
+                $late = @($events | Where-Object { $_.ev -eq 'late' }); if ($late.Count) { $lateAt = $late[0].t }
+                $leave = @($events | Where-Object { $_.ev -eq 'leave' }); if ($leave.Count) { $leaveAt = $leave[0].t }
+                if ($leaveAt -and -not $zeroAt) {
+                    $recent = @($timeline | Where-Object { $_.Ms -ge $leaveAt })
+                    $firstZero = @($recent | Where-Object { $_.S2 -eq 0 })
+                    if ($firstZero.Count -ge 2) { $zeroAt = $firstZero[0].Ms }
+                }
+                if ($zeroAt) { break }
+                Start-Sleep -Milliseconds 400
+            }
+            $last = @(Read-CamTestLiveStats -Path $stats | Where-Object { $_.ev -eq 's' -and (-not $leaveAt -or $_.t -lt $leaveAt) })
+            $lastSample = $(if ($last.Count) { $last[-1] } else { $null })
+        } finally {
+            $browserSeconds = ([DateTime]::UtcNow - $began).TotalSeconds
+            $end = Stop-CamTestBrowser -Started $started
+        }
+        if ($end.Left.Count -or -not $end.ProfileRemoved) { & $fail 'chrome left processes or a profile behind' }
+
+        $rows = @($timeline)
+        $mainOnly = @($rows | Where-Object { $lateAt -and $_.Ms -lt ($lateAt - 500) -and $_.Ms -gt ($rows[0].Ms + 3000) })
+        $both = @($rows | Where-Object { $lateAt -and $leaveAt -and $_.Ms -gt ($lateAt + 4000) -and $_.Ms -lt ($leaveAt - 500) })
+        $evidence += ("viewer on camonemain only ({0} samples before the sub tile was added): stream1 sessions max {1}, stream2 sessions max {2}" -f $mainOnly.Count, ($mainOnly | Measure-Object S1 -Maximum).Maximum, ($mainOnly | Measure-Object S2 -Maximum).Maximum)
+        $evidence += ("viewers on camonemain and camonesub ({0} samples): stream1 sessions min/max {1}/{2}, stream2 sessions min/max {3}/{4} (stream2 reader types: {5})" -f `
+            $both.Count, ($both | Measure-Object S1 -Minimum).Minimum, ($both | Measure-Object S1 -Maximum).Maximum, ($both | Measure-Object S2 -Minimum).Minimum, ($both | Measure-Object S2 -Maximum).Maximum, (($both | ForEach-Object { $_.T2 } | Select-Object -Unique) -join '|'))
+        if ($lastSample) { $evidence += ("the page's own view just before the viewers left: " + (($lastSample.tiles | ForEach-Object { '{0} status {1} framesDecoded {2}' -f $_.path, $_.status, $(if ($_.v) { $_.v.framesDecoded } else { 0 }) }) -join '; ')) }
+        if ($mainOnly.Count -lt 3 -or $both.Count -lt 3) { & $fail 'too few samples in a phase to judge' }
+        if (@($mainOnly | Where-Object { $_.S2 -ne 0 }).Count) { & $fail 'a viewer on the main path opened a stream2 camera session' }
+        if (@($mainOnly + $both | Where-Object { $_.S1 -ne 1 }).Count) { & $fail 'stream1 did not stay at exactly one session (the relay) while viewers were connected' }
+        if (@($both | Where-Object { $_.S2 -ne 1 }).Count) { & $fail 'stream2 did not hold exactly one session while the sub viewer was connected' }
+        if ($leaveAt -and $zeroAt) {
+            $gone = ($zeroAt - $leaveAt) / 1000
+            $evidence += ("viewers left cleanly (peer connections closed) at +0 s: stream2 sessions back to 0 after {0:n1} s (LiveCloseAfterSeconds {1} + margin {2} = {3} s allowed)" -f $gone, $closeAfter, $margin, ($closeAfter + $margin))
+            if ($gone -gt ($closeAfter + $margin)) { & $fail "stream2 took $gone s to close after the viewers left" }
+        } else { & $fail 'stream2 sessions never returned to 0 after the viewers left' }
+        $firstS2 = @($rows | Where-Object { $_.S2 -gt 0 } | Select-Object -First 1)
+        $evidence += ("timeline ({0} samples, every ~0.5 s): first stream2 session {1:n1} s after the first sample (the sub tile was added at about +12 s of the page); stream1 sessions over the whole run: min {2}, max {3}" -f `
+            $rows.Count, $(if ($firstS2.Count) { ($firstS2[0].Ms - $rows[0].Ms) / 1000 } else { 0 }), ($rows | Measure-Object S1 -Minimum).Minimum, ($rows | Measure-Object S1 -Maximum).Maximum)
+    }
+    catch { & $fail ('check aborted: ' + $_.Exception.Message) }
+    finally {
+        foreach ($b in @($script:CamLiveBrowsers)) { try { [void](Stop-CamTestBrowser -Started $b) } catch { } }
+        if ($server -and -not $server.HasExited) { try { $server.Kill(); [void]$server.WaitForExit(5000) } catch { } }
+        $notes = @()
+        if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
+        $evidence += ("browser window up {0:n0} s; whole check {1:n0} s" -f $browserSeconds, $watch.Elapsed.TotalSeconds)
+        $evidence += $notes
+        if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
+        if ($script:CamLiveOdOk -and $rig) { try { Remove-CamTestTree -Path $rig.Dir } catch { $script:CamLiveOdEvidence += "cleanup failed" } }
+        elseif ($rig) { $script:CamLiveOdEvidence += "left for inspection: $($rig.Dir)" }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'liveondemand' -Status $(if ($script:CamLiveOdOk) { 'PASS' } else { 'FAIL' }) `
+        -Message "the camera's stream2 session exists only while a sub viewer is connected, and a main viewer adds no camera session" -Evidence ($evidence + $script:CamLiveOdEvidence)
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -6951,6 +7075,7 @@ foreach ($check in $Checks) {
         'livecfg'   { Invoke-CamCheckLiveCfg   -Run $run }
         'livesecret' { Invoke-CamCheckLiveSecret -Run $run }
         'livewhep'  { Invoke-CamCheckLiveWhep  -Run $run }
+        'liveondemand' { Invoke-CamCheckLiveOnDemand -Run $run }
         'soak'      { Invoke-CamCheckSoak      -Run $run -DryRun:$SoakDryRun }
     }
 }
