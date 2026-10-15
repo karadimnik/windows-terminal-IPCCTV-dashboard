@@ -6558,7 +6558,7 @@ function Invoke-CamLiveHttp {
     foreach ($key in $Headers.Keys) {
         if ($key -eq 'Content-Type') { $request.ContentType = $Headers[$key] } else { $request.Headers[$key] = $Headers[$key] }
     }
-    if ($null -ne $Body) {
+    if ($PSBoundParameters.ContainsKey('Body')) {
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
         $stream = $request.GetRequestStream(); $stream.Write($bytes, 0, $bytes.Length); $stream.Dispose()
     }
@@ -6639,8 +6639,19 @@ function Invoke-CamCheckLiveWhep {
     try {
         foreach ($p in @(18080, 18081, 18890)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
         if (-not (Test-CamTestUdpPortFree -Port 18190)) { throw 'UDP port 18190 is already in use; the check needs it free.' }
-        $cameras = @([pscustomobject]@{ Name = 'Cam One'; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = $true })
-        $rig = Start-CamTestLiveRig -Name $name -Cameras $cameras -CameraPath @('stream1', 'stream2')
+        # Cam One: plain 640x360 stream1. Cam Two: its recorder stream IS the sub-stream (stream2), so it gets only a main path.
+        # Cam High: a 1280x720 High-profile stream. stream2 is a 640x360 H.264 HIGH stream with no B-frames, like the sub-streams of
+        # Rear Balcony, Field Front and Workshop; high720 is the 1280x720 High one (the Workshop's sub-stream size).
+        $cameras = @(
+            [pscustomobject]@{ Name = 'Cam One'; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = $true },
+            [pscustomobject]@{ Name = 'Cam Two'; IP = '127.0.0.1:18554'; Quality = 'stream2'; Record = $false },
+            [pscustomobject]@{ Name = 'Cam High'; IP = '127.0.0.1:18554'; Quality = 'high720'; Record = $false })
+        $rig = Start-CamTestLiveRig -Name $name -Cameras $cameras -CameraPath @('stream1', 'stream2', 'high720') -VideoSpec @{ stream2 = '640x360:high'; high720 = '1280x720:high' }
+        $ffprobe = Join-Path -Path (Split-Path -Parent (Get-CamConfigDefault).FfmpegPath) -ChildPath 'ffprobe.exe'
+        foreach ($stream in @('stream1', 'stream2', 'high720')) {
+            $probe = @(& $ffprobe -v error -select_streams v:0 -show_entries stream=codec_name,profile,width,height,has_b_frames -of csv=p=0 -rtsp_transport tcp "rtsp://127.0.0.1:18554/$stream" 2>&1)
+            $evidence += ("camera path {0} as published (ffprobe): {1}" -f $stream, ($probe -join ' '))
+        }
         $dir = $rig.Dir; $dataDir = $rig.DataDir; $config = $rig.Sandbox.Config
         $whep = "http://127.0.0.1:$($rig.WhepPort)"
         $status = (Get-CamTestStatusJson -Sandbox $rig.Sandbox).Snapshot
@@ -6698,32 +6709,38 @@ function Invoke-CamCheckLiveWhep {
                 Seconds = $seconds; Left = $end.Left.Count; ProfileRemoved = $end.ProfileRemoved }
         }
         $describe = {
-            param($Result, [string]$Phase)
+            param($Result, [string]$Phase, [hashtable]$Width)
             foreach ($t in @($Result.Last.tiles)) {
                 $v = $t.v
+                if ($Width -and $v -and $v.w -ne $Width[[string]$t.path]) { & $fail ("$($Result.Browser) $($t.path): width $($v.w), expected $($Width[[string]$t.path])") }
                 $text = "{0} {1} {2}: HTTP {3}, {4}x{5}, framesDecoded {6}, dropped {7}, {8} fps, decoder [{9}] powerEfficient={10}" -f $Phase, $Result.Browser, $t.path, $t.status, `
                     $(if ($v) { $v.w } else { 0 }), $(if ($v) { $v.h } else { 0 }), $(if ($v) { $v.framesDecoded } else { 0 }), $(if ($v) { $v.framesDropped } else { 0 }), $(if ($v) { $v.fps } else { 0 }), $(if ($v) { $v.impl } else { '' }), $(if ($v) { $v.powerEfficient } else { '' })
                 $script:CamLiveWhepEvidence += $text
                 if ($t.status -ne 201 -or -not $v -or $v.framesDecoded -lt 45 -or $v.w -lt 100) { & $fail "$($Result.Browser) did not play $($t.path): $text" }
             }
         }
-        $sets = @('camonesub,camonemain')
+        # Phase A: the supervisor's instance (LiveSubStream stream2 = High 640x360). Phase B below: LiveSubStream high720.
+        $tilesA = 'camonesub,camonemain,camtwomain,camhighmain'
+        $widthA = @{ camonesub = 640; camonemain = 640; camtwomain = 640; camhighmain = 1280 }
+        $tilesB = 'camonesub,camonemain,camtwomain,camhighmain'
+        $widthB = @{ camonesub = 1280; camonemain = 640; camtwomain = 640; camhighmain = 1280 }
 
         # PHASE A - production shape: UDP only, no capture permission. Plays, and the unmuted audio is heard.
         foreach ($browser in @('chrome', 'edge')) {
-            foreach ($tiles in $sets) {
+            foreach ($tiles in @($tilesA)) {
                 $r = & $browse $browser $tiles -Unmute 9
                 if ($r.Skipped) { & $fail ("$browser could not be run: " + $r.Skipped); continue }
                 $evidence += ("A {0} {1}: window up {2:n0} s; processes left after kill: {3}; profile removed: {4}" -f $browser, $r.Version, $r.Seconds, $r.Left, $r.ProfileRemoved)
                 if ($r.Left -or -not $r.ProfileRemoved) { & $fail "$browser left processes or a profile behind" }
                 if (-not $r.Last) { & $fail "$browser posted no stats"; continue }
                 $before = $null; if ($r.Mark) { $before = @($r.Mark.tiles | Where-Object { $_.path -eq 'camonesub' })[0] }
-                & $describe $r 'A'
+                & $describe $r 'A' $widthA
                 $sub = @($r.Last.tiles | Where-Object { $_.path -eq 'camonesub' })[0]
-                if ($sub -and $before -and $sub.a -and $before.a) {
-                    $delta = [double]$sub.a.energy - [double]$before.a.energy
+                if ($sub -and $sub.a) {
+                    $energyBefore = $(if ($before -and $before.a) { [double]$before.a.energy } else { 0.0 })
+                    $delta = [double]$sub.a.energy - $energyBefore
                     $evidence += ("(iv) {0} camonesub audio: energy {1:n4} at the unmute, {2:n4} after {3:n1} s (+{4:n4}), muted now: {5}, packets {6}" -f `
-                        $browser, $before.a.energy, $sub.a.energy, (($r.Last.t - $r.UnmuteAt) / 1000), $delta, $sub.muted, $sub.a.packets)
+                        $browser, $energyBefore, $sub.a.energy, (($r.Last.t - $r.UnmuteAt) / 1000), $delta, $sub.muted, $sub.a.packets)
                     if ($delta -le 0.001 -or $sub.muted) { & $fail "$browser played no audio after unmute" }
                 } else { & $fail "$browser reported no audio statistics" }
             }
@@ -6734,7 +6751,7 @@ function Invoke-CamCheckLiveWhep {
         # second live instance (ports 18890/18190, same relay and camera) whose generated config has ICE/TCP on the same
         # loopback port added - a test-only edit of the generated text.
         $bConfig = $config.Clone()
-        $bConfig.LiveWhepAddress = '127.0.0.1:18890'; $bConfig.LiveUdpAddress = '127.0.0.1:18190'; $bConfig.LiveConfigPath = (Join-Path $dir 'live\mediamtx-live-b.yml')
+        $bConfig.LiveSubStream = 'high720'; $bConfig.LiveWhepAddress = '127.0.0.1:18890'; $bConfig.LiveUdpAddress = '127.0.0.1:18190'; $bConfig.LiveConfigPath = (Join-Path $dir 'live\mediamtx-live-b.yml')
         $relayMap = Get-CamRelayPathMap -Cameras (Get-CamList -Path $rig.Sandbox.Cameras)
         $liveMap = Get-CamLivePathMap -Config $bConfig -RelayPathMap $relayMap
         $credential = Get-CamLiveCredential -Config $bConfig
@@ -6750,15 +6767,113 @@ function Invoke-CamCheckLiveWhep {
         $serverB = Start-CamTestLiveServer -Prefix "http://127.0.0.1:$pagePort/" -PageFile (Join-Path (Get-CamTestRepo) 'tests\live\page.html') -DataDir $dataDir `
             -WhepBase 'http://127.0.0.1:18890' -SecretFile ([string]$config.LiveSecretPath)
         foreach ($browser in @('chrome', 'edge')) {
-            foreach ($tiles in $sets) {
+            foreach ($tiles in @($tilesB)) {
                 $r = & $browse $browser $tiles -Cap
                 if ($r.Skipped) { & $fail ("$browser could not be run: " + $r.Skipped); continue }
                 $evidence += ("B {0} {1}: window up {2:n0} s; processes left after kill: {3}; profile removed: {4}" -f $browser, $r.Version, $r.Seconds, $r.Left, $r.ProfileRemoved)
                 if ($r.Left -or -not $r.ProfileRemoved) { & $fail "$browser left processes or a profile behind" }
                 if (-not $r.Last) { & $fail "$browser posted no stats"; continue }
-                & $describe $r 'B'
+                & $describe $r 'B' $widthB
                 foreach ($t in @($r.Last.tiles)) { if ($t.v -and -not $t.v.impl) { & $fail "$browser $($t.path): no decoder implementation reported" } }
             }
+        }
+
+        # (ii) THE HOLE, red then green. Another website (a page on http://localhost:18082, a different origin AND site from
+        # MediaMTX on 127.0.0.1) tries to open a WebRTC session to read a camera with no login.
+        #   red   : the shared relay's own generated config with only WebRTC switched on - anonymous read, default origins;
+        #   green : the same config with only webrtcAllowOrigins: [] changed (what the empty list alone does);
+        #   green : the real live instance (login, no origins).
+        foreach ($p in @(18082, 18891, 18892)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the hole proof needs it free." } }
+        foreach ($p in @(18191, 18192)) { if (-not (Test-CamTestUdpPortFree -Port $p)) { throw "UDP port $p is already in use; the hole proof needs it free." } }
+        $apiCred = New-Object System.Management.Automation.PSCredential('camrelayapi', (ConvertTo-SecureString ('0' * 64) -AsPlainText -Force))
+        $relayText = Get-CamRelayConfigText -Config $config -PathMap $relayMap -ApiCredential $apiCred
+        $shape = {
+            param([int]$HttpPort, [int]$UdpPort, [bool]$EmptyOrigins)
+            $x = $relayText
+            $x = [regex]::Replace($x, '(?m)^rtsp: yes', 'rtsp: no')
+            $x = [regex]::Replace($x, '(?m)^api: yes', 'api: no')
+            $web = "webrtc: yes`r`nwebrtcAddress: 127.0.0.1:$HttpPort`r`nwebrtcLocalUDPAddress: 127.0.0.1:$UdpPort`r`nwebrtcIPsFromInterfaces: no`r`nwebrtcAdditionalHosts: [`"127.0.0.1`"]"
+            if ($EmptyOrigins) { $web += "`r`nwebrtcAllowOrigins: []" }
+            $x = [regex]::Replace($x, '(?m)^webrtc: no', $web)
+            $x = [regex]::Replace($x, '(?m)^(  camone:\r\n    #[^\r\n]*\r\n)    source: publisher', ('${1}    source: rtsp://127.0.0.1:18554/stream2'))
+            if ($x -notmatch 'webrtc: yes' -or $x -notmatch 'source: rtsp://127.0.0.1:18554/stream2' -or $x -notmatch '(?m)^  - user: any') { throw 'could not shape the relay config for the hole proof' }
+            return $x
+        }
+        $red0 = $null; $red1 = $null; $evilServer = $null
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $dir 'live\red0.yml'), (& $shape 18891 18191 $false), (New-Object System.Text.UTF8Encoding($false)))
+            [System.IO.File]::WriteAllText((Join-Path $dir 'live\red1.yml'), (& $shape 18892 18192 $true), (New-Object System.Text.UTF8Encoding($false)))
+            $red0 = Start-CamTestMediaMtx -ConfigPath (Join-Path $dir 'live\red0.yml') -WorkDir (Join-Path $dir 'live') -LogPath (Join-Path $dir 'red0.out')
+            $red1 = Start-CamTestMediaMtx -ConfigPath (Join-Path $dir 'live\red1.yml') -WorkDir (Join-Path $dir 'live') -LogPath (Join-Path $dir 'red1.out')
+            $deadline = [DateTime]::Now.AddSeconds(15)
+            while ([DateTime]::Now -lt $deadline -and ((Test-CamTestPortFree -Port 18891) -or (Test-CamTestPortFree -Port 18892))) { Start-Sleep -Milliseconds 300 }
+            Start-Sleep -Seconds 3
+            $evidence += ("(ii) relay-shaped instances: red0 pid {0} (anonymous read, default origins) on 18891, red1 pid {1} (same, webrtcAllowOrigins: []) on 18892" -f $red0.Id, $red1.Id)
+
+            $evil = 'http://evil.example'
+            $header = @{ Origin = $evil; 'Access-Control-Request-Method' = 'POST'; 'Access-Control-Request-Headers' = 'content-type' }
+            $p0 = Invoke-CamLiveHttp -Url 'http://127.0.0.1:18891/camone/whep' -Method OPTIONS -Headers $header
+            $p1 = Invoke-CamLiveHttp -Url 'http://127.0.0.1:18892/camone/whep' -Method OPTIONS -Headers $header
+            $pl = Invoke-CamLiveHttp -Url "$whep/camonesub/whep" -Method OPTIONS -Headers $header
+            $evidence += ("(ii) preflight from Origin {0}: RED shared-relay shape -> HTTP {1}, Access-Control-Allow-Origin [{2}]" -f $evil, $p0.Code, $p0.Acao)
+            $evidence += ("(ii) preflight from Origin {0}: empty origins only -> HTTP {1}, Access-Control-Allow-Origin [{2}]" -f $evil, $p1.Code, $p1.Acao)
+            $evidence += ("(ii) preflight from Origin {0}: LIVE instance -> HTTP {1}, Access-Control-Allow-Origin [{2}]" -f $evil, $pl.Code, $pl.Acao)
+            if ($p0.Acao -ne $evil -and $p0.Acao -ne '*') { & $fail 'RED did not reproduce: the shared-relay shape did not grant the foreign origin' }
+            if ($p1.Acao -or $pl.Acao) { & $fail 'a config with an empty origin list, or the live instance, sent Access-Control-Allow-Origin' }
+
+            $rebind0 = Invoke-CamLiveHttp -Url 'http://127.0.0.1:18891/camone/whep' -Method POST -HostHeader 'attacker-rebind.example:18891' -Headers @{ 'Content-Type' = 'application/sdp' } -Body "v=0`r`n"
+            $rebindL = Invoke-CamLiveHttp -Url "$whep/camonesub/whep" -Method POST -HostHeader 'attacker-rebind.example:18889' -Headers @{ 'Content-Type' = 'application/sdp' } -Body "v=0`r`n"
+            $page0 = Invoke-CamLiveHttp -Url 'http://127.0.0.1:18891/camone/' -HostHeader 'attacker-rebind.example:18891'
+            $pageL = Invoke-CamLiveHttp -Url "$whep/camonesub/" -HostHeader 'attacker-rebind.example:18889'
+            $evidence += ("(ii) rebinding Host attacker-rebind.example, no login, POST /whep: RED -> HTTP {0} (not refused: 400 is the bad SDP); LIVE -> HTTP {1}" -f $rebind0.Code, $rebindL.Code)
+            $evidence += ("(ii) rebinding Host, GET the built-in player page: RED -> HTTP {0}; LIVE -> HTTP {1}" -f $page0.Code, $pageL.Code)
+            if ($rebind0.Code -in 401, 403 -or $page0.Code -ne 200) { & $fail 'RED did not reproduce: the shared-relay shape refused a rebinding Host' }
+            if ($rebindL.Code -ne 401 -or $pageL.Code -ne 401) { & $fail 'the live instance did not refuse a rebinding Host with no login' }
+
+            $evilServer = Start-CamTestLiveServer -Prefix 'http://localhost:18082/' -PageFile (Join-Path (Get-CamTestRepo) 'tests\live\evil.html') -DataDir $dataDir
+            $targets = 'red=http://127.0.0.1:18891/camone,emptyorigins=http://127.0.0.1:18892/camone,live=http://127.0.0.1:18889/camonesub'
+            $liveLog = Join-Path -Path $rig.Sandbox.Root -ChildPath '_logs\liveview.log'
+            $sessionsBefore = @(Get-Content -LiteralPath $liveLog | Where-Object { $_ -match '\[WebRTC\].*created by' }).Count
+            if ($sessionsBefore -lt 1) { & $fail 'the live log shows no WebRTC session from the earlier phases, so the session count below would prove nothing' }
+            foreach ($browser in @('chrome', 'edge')) {
+                $found = Get-CamTestBrowser -Browser $browser
+                if (-not $found.Exe) { & $fail ("$browser could not be run: " + $found.Reason); continue }
+                $script:CamLiveRunNo++
+                $runId = 'evil-{0}-{1}' -f $browser, $script:CamLiveRunNo
+                $stats = Join-Path -Path $dataDir -ChildPath "$runId.jsonl"
+                $started = Start-CamTestBrowser -Browser $browser -BaseDir $dir -Url ("http://localhost:18082/?run={0}&targets={1}" -f $runId, $targets)
+                $script:CamLiveBrowsers += $started
+                $began = [DateTime]::UtcNow
+                $results = @()
+                try {
+                    $deadline = [DateTime]::UtcNow.AddSeconds(45)
+                    while ([DateTime]::UtcNow -lt $deadline) {
+                        Start-Sleep -Seconds 2
+                        $events = @(Read-CamTestLiveStats -Path $stats)
+                        $results = @($events | Where-Object { $_.ev -eq 'result' })
+                        if (@($events | Where-Object { $_.ev -eq 'done' }).Count) { break }
+                    }
+                } finally {
+                    $script:CamLiveBrowserSeconds += ([DateTime]::UtcNow - $began).TotalSeconds
+                    $end = Stop-CamTestBrowser -Started $started
+                }
+                if ($end.Left.Count -or -not $end.ProfileRemoved) { & $fail "$browser left processes or a profile behind (hole run)" }
+                foreach ($label in @('red', 'emptyorigins', 'live')) {
+                    $row = @($results | Where-Object { $_.label -eq $label })[0]
+                    if (-not $row) { & $fail "${browser}: no result for $label"; continue }
+                    $evidence += ("(ii) {0} {1}: page origin {2} -> {3}: {4}; HTTP {5}; frames decoded {6}" -f $browser, $found.Version, $row.origin, $label, $row.outcome, $row.status, $row.framesDecoded)
+                    $granted = ($row.outcome -like 'SESSION GRANTED*' -and $row.framesDecoded -gt 0)
+                    if ($label -eq 'red' -and -not $granted) { & $fail "$browser RED did not reproduce: the foreign page got no video from the shared-relay shape ($($row.outcome))" }
+                    if ($label -ne 'red' -and ($row.outcome -like 'SESSION GRANTED*' -or $row.framesDecoded -gt 0)) { & $fail "$browser GREEN failed: the foreign page got a session from $label" }
+                    if ($label -ne 'red' -and $row.outcome -notlike 'blocked by the browser*') { & $fail "$browser $label : expected the browser to block the cross-origin request, got: $($row.outcome)" }
+                }
+            }
+            $sessionsAfter = @(Get-Content -LiteralPath $liveLog | Where-Object { $_ -match '\[WebRTC\].*created by' }).Count
+            $evidence += ("(ii) WebRTC sessions the live instance logged while the foreign page ran (both browsers): {0}" -f ($sessionsAfter - $sessionsBefore))
+            if ($sessionsAfter -ne $sessionsBefore) { & $fail 'the live instance created a session for the foreign page' }
+        } finally {
+            Stop-CamTestMediaMtx -Process $red0; Stop-CamTestMediaMtx -Process $red1
+            if ($evilServer -and -not $evilServer.HasExited) { try { $evilServer.Kill() } catch { } }
         }
     }
     catch { & $fail ('check aborted: ' + $_.Exception.Message) }

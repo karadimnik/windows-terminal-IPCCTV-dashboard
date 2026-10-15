@@ -2490,3 +2490,42 @@ function Stop-CamTestLiveRig {
     foreach ($entry in $left) { if ($entry -match 'pid (\d+)') { Stop-Process -Id ([int]$Matches[1]) -Force -ErrorAction SilentlyContinue } }
     return $notes
 }
+
+
+function Start-CamTestMediaMtx {
+    <#
+        A plain MediaMTX on a given config for a sandbox experiment (no
+        camera credentials, no environment sources): local working directory,
+        stdout to a file kept open on the returned process as LogStream.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ConfigPath,
+        [Parameter(Mandatory = $true)][string]$WorkDir,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = 'C:\mediamtx\mediamtx.exe'
+    $info.Arguments = Get-CamCommandLine -Arguments @($ConfigPath)
+    $info.WorkingDirectory = $WorkDir
+    $info.UseShellExecute = $false; $info.CreateNoWindow = $true; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $info
+    [void]$process.Start()
+    [void]$process.Handle
+    $file = [System.IO.File]::Open($LogPath, 'Create', 'Write', 'ReadWrite')
+    $null = $process.StandardOutput.BaseStream.CopyToAsync($file)
+    $null = $process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null)
+    Add-Member -InputObject $process -NotePropertyName LogStream -NotePropertyValue $file
+    return $process
+}
+
+
+function Stop-CamTestMediaMtx {
+    <# Kills a process from Start-CamTestMediaMtx (by object, never by name) and closes its log. #>
+    param($Process)
+
+    if (-not $Process) { return }
+    if (-not $Process.HasExited) { try { $Process.Kill(); [void]$Process.WaitForExit(5000) } catch { } }
+    if ($Process.LogStream) { try { $Process.LogStream.Dispose() } catch { } }
+}

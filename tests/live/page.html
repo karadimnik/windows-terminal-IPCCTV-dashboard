@@ -6,14 +6,18 @@
 <script>
 // Test page for the Stage 1A live-view checks (not part of the product). Query: tiles=<path>,<path>  run=<id>  unmute=<seconds>
 // Every WHEP request goes to THIS origin (/whep/<path>); the server in server.ps1 adds the login, as camui will.
+// Also: late=<path>@<seconds> adds one tile that long after the page starts; leave=<seconds> closes every peer connection then (a clean leave).
 const q = new URLSearchParams(location.search);
 const RUN = q.get('run') || 'adhoc', PATHS = (q.get('tiles') || '').split(',').filter(Boolean), UNMUTE = parseFloat(q.get('unmute') || '0'), CAP = q.get('cap') === '1';
+const LATE = (q.get('late') || '').split('@'), LEAVE = parseFloat(q.get('leave') || '0');
 const post = o => fetch('/stats?run=' + encodeURIComponent(RUN), { method: 'POST', body: JSON.stringify(o) }).catch(() => {});
-const tiles = PATHS.map(p => {
+const tiles = [];
+function addTile(p) {
   const d = document.createElement('div'); d.className = 't';
   const v = document.createElement('video'); v.muted = true; v.autoplay = true; v.playsInline = true; d.append(v, document.createTextNode(p));
-  document.getElementById('g').append(d); return { path: p, video: v, pc: null, status: null, error: null };
-});
+  document.getElementById('g').append(d); const t = { path: p, video: v, pc: null, status: null, error: null }; tiles.push(t); return t;
+}
+PATHS.forEach(addTile);
 const gathered = (pc, ms) => new Promise(res => { if (pc.iceGatheringState === 'complete') return res(); const t = setTimeout(res, ms); pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(t); res(); } }); });
 async function start(t) {
   try {
@@ -40,6 +44,8 @@ post({ ev: 'start', t: Date.now(), ua: navigator.userAgent, cap: CAP, tiles: PAT
 (async () => {
   if (CAP) { try { window.capStream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e) { post({ ev: 'error', msg: 'cap ' + e, t: Date.now() }); } }
   tiles.forEach((t, i) => setTimeout(() => start(t), i * 200));
+  if (LATE[0] && LATE[1]) setTimeout(() => { post({ ev: 'late', path: LATE[0], t: Date.now() }); start(addTile(LATE[0])); }, parseFloat(LATE[1]) * 1000);
+  if (LEAVE > 0) setTimeout(() => { tiles.forEach(t => { try { t.pc && t.pc.close(); } catch (e) {} }); post({ ev: 'leave', t: Date.now() }); }, LEAVE * 1000);
 })();
 setInterval(async () => post({ ev: 's', t: Date.now(), vis: document.visibilityState, tiles: await Promise.all(tiles.map(sample)) }), 1000);
 if (UNMUTE > 0) setTimeout(() => { tiles[0].video.muted = false; tiles[0].video.volume = 1; post({ ev: 'unmute', t: Date.now(), path: tiles[0].path }); }, UNMUTE * 1000);
