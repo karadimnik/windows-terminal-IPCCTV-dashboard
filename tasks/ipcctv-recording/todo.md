@@ -1341,3 +1341,8 @@ The Operator approved all four. Documentation only; no code touched.
       PCMA mandatory). It is the plan's V3. TO DO: (a) test whether mpv's JSON IPC (`--input-ipc-server`, then
       `loadfile`) keeps the URL off the process command line - an in-architecture fix; (b) interview the Operator
       on the browser direction before any build: scope, which OS, what to keep of the grid and health strip.
+
+- **RULE (Operator, 2026-10-15): the portable NVR NEVER reaches `master`/`main` of this repository.** It is
+  developed on the branch `portable-nvr`, started from this repository's master, and when finished it moves to its
+  own repository. Its plan lives only on that branch. Do not merge `portable-nvr` into master, do not copy its
+  files here, do not push it to this repository's `master`. This repository keeps working exactly as it is.
