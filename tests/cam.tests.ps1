@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -4309,6 +4309,209 @@ function Invoke-CamCheckLogHeld {
         -Message 'Write-CamLog never throws when the append fails, counts the lost lines once, and the supervisor survives its logs held exclusively'
 }
 
+function Invoke-CamCheckPruneLoop {
+    <#
+        B2: retention and the pruning alerts through the REAL supervisor loop,
+        PruneIntervalSeconds 2, recording a synthetic camera. Three runs, one
+        per configuration; fixtures are planted after the supervisor has
+        claimed its root, and alerts go to the sandbox stub's alerts.log.
+
+        - age: MaxRetentionDays 1 (brake off). The loop deletes exactly the
+          expired segments - backdated ones in the recording camera's folder
+          and in a second camera's folder except that folder's newest - and
+          leaves the young fixture, a foreign file, a wrong-container file and
+          everything the camera records. One 'prune stop:' line per run.
+        - breaker: MaxRetentionDays 1, MaxAgePruneFraction 0.5, more than half
+          the archive expired: alert 122 (Error) once while the episode lasts
+          and nothing deleted; thinning the expired set below the brake resets
+          it, and a second flood raises 122 exactly once more.
+        - blocked: ReserveGB far above the free space, so the watermark deletes
+          everything it may and is still short: alert 121 (Error) once across
+          every blocked run, the newest segment never deleted.
+        Throughout: no other alert, the camera keeps recording without a gap,
+        status.json keeps updating.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $name = 'synth1'
+    $segment = 6
+    $base = @{ SegmentSeconds = $segment; StatusIntervalSeconds = 1; ReconcileSeconds = 2; PruneIntervalSeconds = 2; ArchiveScanSeconds = 5; BackoffStartSeconds = 1 }
+    $sandboxes = @()
+    $camera = $null
+
+    $configFor = { param([hashtable]$extra) $c = $base.Clone(); foreach ($k in $extra.Keys) { $c[$k] = $extra[$k] }; $c }
+    $logLines = { param($sandbox, [string]$like) @(Get-Content -LiteralPath $sandbox.SupervisorLog | Where-Object { $_ -like $like }) }
+    $alerts = { param($sandbox) if (Test-Path -LiteralPath $sandbox.AlertLog) { @(Get-Content -LiteralPath $sandbox.AlertLog) } else { @() } }
+    $lineTime = { param([string]$line) [DateTime]::ParseExact($line.Substring(0, 19), 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) }
+    $deletedPaths = { param($sandbox) @(& $logLines $sandbox '* prune: deleted *' | ForEach-Object { if ($_ -match ' prune: deleted (.+?) \(\d+ bytes') { $Matches[1] } }) }
+
+    # Runs one supervisor in $sandbox: waits for the claim and the first
+    # segment, calls $body with a sampler, stops it, and returns the facts
+    # every phase checks.
+    $runPhase = {
+        param($sandbox, [scriptblock]$body)
+        $watch = @{ LastUpdate = $null; MaxStatusGap = 0.0; Died = $false }
+        $process = $null
+        $facts = [pscustomobject]@{ Ok = $true; Text = @() }
+        $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
+        $phaseStart = [DateTime]::Now
+        $sample = {
+            $status = Get-CamTestStatusJson -Sandbox $sandbox
+            if ($status) {
+                $updated = [DateTime]::Parse([string]$status.Snapshot.UpdatedAt)
+                if ($watch.LastUpdate -and $updated -gt $watch.LastUpdate) {
+                    $gap = ($updated - $watch.LastUpdate).TotalSeconds
+                    if ($gap -gt $watch.MaxStatusGap) { $watch.MaxStatusGap = $gap }
+                }
+                if (-not $watch.LastUpdate -or $updated -gt $watch.LastUpdate) { $watch.LastUpdate = $updated }
+            }
+            if ($process.HasExited) { $watch.Died = $true }
+        }
+        $wait = { param([double]$seconds) $until = [DateTime]::Now.AddSeconds($seconds); while ([DateTime]::Now -lt $until) { & $sample; Start-Sleep -Milliseconds 250 } }
+        try {
+            $process = Start-CamTestSupervisor -Sandbox $sandbox
+            $deadline = [DateTime]::Now.AddSeconds(30)
+            while (-not ((Test-CamArchiveMarker -Config $sandbox.Config) -and @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config).Count -ge 2) -and [DateTime]::Now -lt $deadline) { & $sample; Start-Sleep -Milliseconds 250 }
+            & $body $wait
+        }
+        catch { $facts.Ok = $false; $facts.Text += ('FAIL: threw: ' + $_.Exception.Message) }
+        finally {
+            if ($process) {
+                $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+                if (-not $stop.Ok) { $facts.Ok = $false; $facts.Text += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+            }
+        }
+        # Every segment the camera wrote in this run, deleted or not, by the
+        # time its name records; the backdated fixtures are not recordings.
+        $names = @(@(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config | ForEach-Object { $_.Name }) +
+            @(& $deletedPaths $sandbox | Where-Object { (Split-Path -Path $_ -Parent) -eq $camDir } | ForEach-Object { Split-Path -Path $_ -Leaf }) | Sort-Object -Unique)
+        $times = @($names | ForEach-Object { Get-CamTestSegmentTime -Name $_ } | Where-Object { $_ -gt $phaseStart.AddSeconds(-$segment) } | Sort-Object)
+        $largest = 0
+        for ($i = 1; $i -lt $times.Count; $i++) { $g = ($times[$i] - $times[$i - 1]).TotalSeconds; if ($g -gt $largest) { $largest = $g } }
+        $stops = @(& $logLines $sandbox '* prune stop: *')
+        $stopGap = 0
+        for ($i = 1; $i -lt $stops.Count; $i++) { $g = ((& $lineTime $stops[$i]) - (& $lineTime $stops[$i - 1])).TotalSeconds; if ($g -gt $stopGap) { $stopGap = $g } }
+        $restarts = @(& $logLines $sandbox '*restart #*').Count
+        $failed = @(& $logLines $sandbox '* prune: FAILED to delete *').Count
+        $facts | Add-Member -NotePropertyName Stops -NotePropertyValue $stops
+        $facts.Text += ("recording: {0} segment(s) written, largest start-to-start gap {1} s, {2} restart(s), {3} failed deletion(s); {4} 'prune stop:' line(s), at most {5} s apart; status.json longest gap {6} s; supervisor alive to the end {7}" -f `
+            $times.Count, $largest, $restarts, $failed, $stops.Count, $stopGap, (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'), (-not $watch.Died))
+        if ($times.Count -lt 4 -or $largest -gt ($segment + 2) -or $restarts -or $failed -or $stops.Count -lt 5 -or $stopGap -gt 4 -or $watch.MaxStatusGap -gt 3 -or $watch.Died) {
+            $facts.Ok = $false; $facts.Text += 'FAIL: recording, the prune schedule or status.json was disturbed'
+        }
+        return $facts
+    }
+
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir (Join-Path $env:TEMP 'cam-tests') -Port $port -PathName $name
+        $evidence += ("synthetic camera mediamtx pid {0}, publisher pid {1}" -f $camera.MediaMtx.Id, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','))
+
+        # age
+        $sandbox = New-CamTestSynthSandbox -Name 'pruneloop-age' -CameraName $name -Port $port -Config (& $configFor @{ MaxRetentionDays = 1; MaxAgePruneFraction = 1.0 })
+        $sandboxes += $sandbox
+        $planted = @{}
+        $facts = & $runPhase $sandbox {
+            param($wait)
+            $now = [DateTime]::Now
+            $camDir = Join-Path $sandbox.Root $name
+            $other = Join-Path $sandbox.Root 'oldcam'
+            $planted.Expired = @(
+                (New-CamTestSegment -Dir $camDir -Camera $name -Time $now.AddDays(-3)),
+                (New-CamTestSegment -Dir $camDir -Camera $name -Time $now.AddDays(-2)),
+                (New-CamTestSegment -Dir $camDir -Camera $name -Time $now.AddHours(-30)),
+                (New-CamTestSegment -Dir $other -Camera 'oldcam' -Time $now.AddDays(-4)),
+                (New-CamTestSegment -Dir $other -Camera 'oldcam' -Time $now.AddDays(-3.5)))
+            $planted.Kept = @(
+                (New-CamTestSegment -Dir $camDir -Camera $name -Time $now.AddHours(-12)),
+                (New-CamTestSegment -Dir $other -Camera 'oldcam' -Time $now.AddDays(-3)),
+                (New-CamTestSegment -Dir $camDir -Camera $name -Time $now.AddDays(-5) -Extension '.mp4'))
+            $foreign = Join-Path $camDir 'notes.txt'
+            [System.IO.File]::WriteAllText($foreign, 'not a segment')
+            Set-CamTestFileAge -Path $foreign -Time $now.AddDays(-6)
+            $planted.Kept += $foreign
+            & $wait 20
+        }
+        $deleted = @(& $deletedPaths $sandbox)
+        $liveDeleted = @($deleted | Where-Object { $planted.Expired -notcontains $_ })
+        $missingExpired = @($planted.Expired | Where-Object { $deleted -notcontains $_ -or (Test-Path -LiteralPath $_) })
+        $keptGone = @($planted.Kept | Where-Object { -not (Test-Path -LiteralPath $_) })
+        $ageStops = @($facts.Stops | Where-Object { $_ -like '*age rule*cutoff*' })
+        $evidence += ("age: planted {0} expired + {1} to keep (12 h old, the other camera's newest at 3 days, a 5-day .mp4, a 6-day notes.txt); deleted {2}: every expired one {3}, anything else {4}; kept files gone {5}" -f `
+            $planted.Expired.Count, $planted.Kept.Count, $deleted.Count, ($missingExpired.Count -eq 0), $liveDeleted.Count, $keptGone.Count)
+        foreach ($line in @(& $logLines $sandbox '* prune: deleted *')) { $evidence += ('  log: ' + $line.Substring(26)) }
+        $evidence += ('  first stop line after the plant: ' + (@($facts.Stops | Where-Object { $_ -like '*age rule reached its cutoff*after 5 deletion*' }) | Select-Object -First 1))
+        $evidence += ('  ' + ($facts.Text -join ' | '))
+        $evidence += ("  alerts: {0}" -f (@(& $alerts $sandbox) -join ' | '))
+        if (-not $facts.Ok -or $missingExpired.Count -or $liveDeleted.Count -or $keptGone.Count -or $deleted.Count -ne 5 -or $ageStops.Count -ne $facts.Stops.Count -or @(& $alerts $sandbox).Count) {
+            $ok = $false; $evidence += 'FAIL: the loop did not delete exactly the expired segments with one age stop line per run and no alert'
+        }
+
+        # breaker
+        $sandbox = New-CamTestSynthSandbox -Name 'pruneloop-breaker' -CameraName $name -Port $port -Config (& $configFor @{ MaxRetentionDays = 1; MaxAgePruneFraction = 0.5 })
+        $sandboxes += $sandbox
+        $episode = @{}
+        $facts = & $runPhase $sandbox {
+            param($wait)
+            $other = Join-Path $sandbox.Root 'oldcam'
+            $flood = { param($from) @(for ($i = 0; $i -lt 20; $i++) { New-CamTestSegment -Dir $other -Camera 'oldcam' -Time ([DateTime]::Now.AddDays(-3).AddMinutes(-15 * ($i + $from))) }) }
+            $first = & $flood 0
+            & $wait 12
+            $episode.FirstAlerts = @(& $alerts $sandbox | Where-Object { $_ -like '122 *' }).Count
+            $episode.FirstSurvivors = @($first | Where-Object { Test-Path -LiteralPath $_ }).Count
+            # Thin the flood below the brake: the next run deletes the rest by age and resets it.
+            foreach ($path in ($first | Select-Object -First 18)) { Remove-Item -LiteralPath $path -Force }
+            & $wait 8
+            $episode.Reset = @(& $logLines $sandbox '*circuit breaker is reset*').Count
+            [void](& $flood 20)
+            & $wait 12
+        }
+        $all122 = @(& $alerts $sandbox | Where-Object { $_ -like '122 Error *' })
+        $other = @(& $alerts $sandbox | Where-Object { $_ -notlike '122 *' })
+        $held = @($facts.Stops | Where-Object { $_ -like '*HELD by the circuit breaker*' }).Count
+        $evidence += ("breaker: first flood of 20 expired segments -> 122 alerts {0}, flood files surviving {1}/20 after 12 s; thinned to 2 -> reset lines {2}; second flood -> 122 alerts in total {3}; held stop lines {4} of {5}; other alerts {6}" -f `
+            $episode.FirstAlerts, $episode.FirstSurvivors, $episode.Reset, $all122.Count, $held, $facts.Stops.Count, $other.Count)
+        if ($all122.Count) { $evidence += ('  alert: ' + $all122[0]).Substring(0, [math]::Min(260, ('  alert: ' + $all122[0]).Length)) }
+        $evidence += ('  ' + ($facts.Text -join ' | '))
+        if (-not $facts.Ok -or $episode.FirstAlerts -ne 1 -or $episode.FirstSurvivors -ne 20 -or $episode.Reset -ne 1 -or $all122.Count -ne 2 -or $held -lt 6 -or $other.Count) {
+            $ok = $false; $evidence += 'FAIL: alert 122 was not raised once per episode with nothing deleted while held'
+        }
+
+        # blocked
+        $sandbox = New-CamTestSynthSandbox -Name 'pruneloop-blocked' -CameraName $name -Port $port -Config (& $configFor @{ ReserveGB = 1000000; PruneHysteresisGB = 1 })
+        $sandboxes += $sandbox
+        $facts = & $runPhase $sandbox { param($wait) & $wait 25 }
+        $all121 = @(& $alerts $sandbox | Where-Object { $_ -like '121 Error *' })
+        $other = @(& $alerts $sandbox | Where-Object { $_ -notlike '121 *' })
+        $blockedRuns = @(& $logLines $sandbox '* PRUNE BLOCKED: *').Count
+        $camDir = Join-Path $sandbox.Root $name
+        $left = @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config)
+        $evidence += ("blocked: ReserveGB 1000000; PRUNE BLOCKED runs {0}; 121 alerts {1}; other alerts {2}; segments deleted {3}, left in the folder {4}" -f `
+            $blockedRuns, $all121.Count, $other.Count, @(& $deletedPaths $sandbox).Count, $left.Count)
+        if ($all121.Count) { $evidence += ('  alert: ' + $all121[0]).Substring(0, [math]::Min(260, ('  alert: ' + $all121[0]).Length)) }
+        $evidence += ('  ' + ($facts.Text -join ' | '))
+        if (-not $facts.Ok -or $blockedRuns -lt 5 -or $all121.Count -ne 1 -or $other.Count -or $left.Count -lt 1) {
+            $ok = $false; $evidence += 'FAIL: alert 121 was not raised exactly once across the blocked runs, or recording was disturbed'
+        }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    foreach ($sandbox in $sandboxes) {
+        $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+        $evidence += $leak.Text
+        if (-not $leak.Ok) { $ok = $false }
+    }
+    $cleanup = @($sandboxes | ForEach-Object { [pscustomobject]@{ Dir = $_.Dir; Log = (Join-Path $env:TEMP 'cam-tests\pruneloop.none') } })
+    $cleanup += [pscustomobject]@{ Dir = (Join-Path $env:TEMP 'cam-tests\synthcam'); Log = (Join-Path $env:TEMP 'cam-tests\pruneloop.none') }
+    Complete-CamPruneCheck -Run $Run -Check 'pruneloop' -Ok $ok -Evidence $evidence -Sandboxes $cleanup `
+        -Message 'the real loop deletes exactly the expired segments on its schedule, raises 122 and 121 once per episode, and keeps recording'
+}
+
 
 function Invoke-CamCheckDocSwitches {
     <#
@@ -4502,6 +4705,7 @@ foreach ($check in $Checks) {
         'logrotatelive' { Invoke-CamCheckLogRotateLive -Run $run }
         'stallwatch' { Invoke-CamCheckStallWatch -Run $run }
         'logheld'   { Invoke-CamCheckLogHeld   -Run $run }
+        'pruneloop' { Invoke-CamCheckPruneLoop -Run $run }
     }
 }
 
