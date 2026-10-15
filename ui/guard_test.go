@@ -350,6 +350,28 @@ func TestGuardLANHosts(t *testing.T) {
 	}
 }
 
+func TestGuardLANWildcardBindAdmitsIPLiteralsOnly(t *testing.T) {
+	for _, listen := range []string{"0.0.0.0:8787", ":8787"} {
+		for host, allow := range map[string]bool{
+			"192.168.50.20:8787": true,
+			"[fe80::1]:8787":     true,
+			"nvr.lan":            false,
+			"evil.example":       false,
+		} {
+			handler, _ := guardHandler(t, func(c *Config) { c.Listen = listen; c.Token = lanToken })
+			code := probe{host: host, headers: map[string]string{"Authorization": "Bearer " + lanToken}}.do(handler).Code
+			if allow && !reached(code) || !allow && code != http.StatusForbidden {
+				t.Errorf("listen %s, Host %q: got %d, want allowed=%v", listen, host, code, allow)
+			}
+		}
+	}
+	// Loopback mode never admits arbitrary IP literals.
+	handler, _ := guardHandler(t, nil)
+	if code := (probe{host: "192.168.50.20:8787"}).do(handler).Code; code != http.StatusForbidden {
+		t.Errorf("loopback mode, LAN IP Host: got %d, want 403", code)
+	}
+}
+
 func TestGuardLoopbackModeDoesNotAllowAnArbitraryListenHost(t *testing.T) {
 	handler, _ := guardHandler(t, nil)
 	if code := (probe{host: "192.168.50.20:8787"}).do(handler).Code; code != http.StatusForbidden {

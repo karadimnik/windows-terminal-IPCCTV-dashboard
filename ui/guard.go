@@ -47,34 +47,50 @@ func hostName(hostport string) string {
 	return h
 }
 
-// allowedHostSet is what the Host header may name: loopback always, the listen
-// host in LAN mode (non-loopback listen and a token), and the configured
-// allowedHosts.
-func allowedHostSet(cfg Config) map[string]bool {
-	allowed := map[string]bool{}
+// hostAllowlist is what the Host header may name.
+type hostAllowlist struct {
+	names map[string]bool
+	// anyIP admits any IP-literal Host. Set only in LAN mode with a wildcard
+	// bind ("0.0.0.0:8787", ":8787"), where there is no one listen host to
+	// name and the address a client reaches camui by is not known in advance.
+	// An IP literal cannot be DNS-rebound: rebinding needs the browser to
+	// resolve an attacker-owned NAME.
+	anyIP bool
+}
+
+func (a hostAllowlist) allows(host string) bool {
+	return a.names[host] || (a.anyIP && net.ParseIP(host) != nil)
+}
+
+// newHostAllowlist admits loopback always, the listen host in LAN mode
+// (non-loopback listen and a token), and the configured allowedHosts.
+func newHostAllowlist(cfg Config) hostAllowlist {
+	list := hostAllowlist{names: map[string]bool{}}
 	for _, name := range loopbackHostNames {
-		allowed[name] = true
+		list.names[name] = true
 	}
 	if cfg.RequiresToken() {
 		if loopback, err := listenIsLoopback(cfg.Listen); err == nil && !loopback {
 			host, _, _ := net.SplitHostPort(cfg.Listen)
-			if ip := net.ParseIP(host); host != "" && (ip == nil || !ip.IsUnspecified()) {
-				allowed[hostName(host)] = true
+			if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+				list.anyIP = true
+			} else {
+				list.names[hostName(host)] = true
 			}
 		}
 	}
 	for _, name := range cfg.AllowedHosts {
 		if name = hostName(name); name != "" {
-			allowed[name] = true
+			list.names[name] = true
 		}
 	}
-	return allowed
+	return list
 }
 
 // newGuard returns the middleware. It sits inside the request logger and
 // outside the mux, so it covers the static page and every API route.
 func newGuard(cfg Config, log *slog.Logger) func(http.Handler) http.Handler {
-	allowed := allowedHostSet(cfg)
+	allowed := newHostAllowlist(cfg)
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -93,7 +109,7 @@ func newGuard(cfg Config, log *slog.Logger) func(http.Handler) http.Handler {
 			}
 
 			host := hostName(r.Host)
-			if !allowed[host] {
+			if !allowed.allows(host) {
 				if len(host) > maxLoggedHost {
 					host = host[:maxLoggedHost]
 				}
