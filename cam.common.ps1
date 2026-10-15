@@ -990,6 +990,70 @@ function Stop-CamViewer {
 }
 
 
+function Send-CamViewerUrl {
+    <#
+        Hands a stream URL to a running mpv over its JSON IPC pipe, so the URL
+        never appears on mpv's command line, where every local process can read
+        it. $true only when mpv acknowledged the loadfile.
+
+        mpv was started idle with --input-ipc-server=$PipeName. The pipe takes a
+        moment to exist, so the connect is retried until $TimeoutMs, and it
+        gives up at once if mpv has already exited. After the load is
+        acknowledged the pipe is switched off again: its default access lets
+        any local user connect, and mpv would answer the `path` property with
+        the URL. A refusal of that last step is not a failure of the hand-over.
+
+        Nothing here logs, and nothing throws: any fault is a $false.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [Parameter(Mandatory = $true)][string]$PipeName,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [int]$TimeoutMs = 8000
+    )
+
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $client = $null
+    try {
+        while ($true) {
+            if ($Process.HasExited -or $clock.ElapsedMilliseconds -ge $TimeoutMs) { return $false }
+            $attempt = New-Object System.IO.Pipes.NamedPipeClientStream('.', $PipeName, [System.IO.Pipes.PipeDirection]::InOut)
+            try { $attempt.Connect(250); $client = $attempt; break }
+            catch { $attempt.Dispose() }
+        }
+
+        $writer = New-Object System.IO.StreamWriter($client)
+        $writer.AutoFlush = $true
+        $reader = New-Object System.IO.StreamReader($client)
+
+        $sent = 0
+        foreach ($command in @(
+                @{ command = @('loadfile', $Url); request_id = 1 },
+                @{ command = @('set_property', 'input-ipc-server', ''); request_id = 2 })) {
+            $writer.WriteLine(($command | ConvertTo-Json -Compress))
+            $sent++
+            # mpv interleaves events with replies, and only the reply to this
+            # request id says whether it worked.
+            $reply = $null
+            while ($null -eq $reply) {
+                $left = $TimeoutMs - $clock.ElapsedMilliseconds
+                if ($left -lt 500) { $left = 500 }
+                $line = $reader.ReadLineAsync()
+                if (-not $line.Wait([int]$left) -or $null -eq $line.Result) { break }
+                if ($line.Result -notmatch '"request_id"\s*:\s*' + $sent + '\b') { continue }
+                $reply = $line.Result | ConvertFrom-Json
+            }
+            if ($sent -eq 1 -and (($null -eq $reply) -or ([string]$reply.error -ne 'success'))) { return $false }
+        }
+        return $true
+    }
+    catch { return $false }
+    finally {
+        if ($client) { $client.Dispose() }
+    }
+}
+
+
 function Invoke-CamViewer {
     <#
         Runs ONE mpv attempt for a dashboard pane and answers one question:
@@ -1021,6 +1085,17 @@ function Invoke-CamViewer {
         The pane hands over the argument tokens exactly as PowerShell parsed
         them and Get-CamArgumentLine rejoins them, so the arguments mpv
         receives are the ones the call operator used to pass.
+
+        A URL that carries credentials is the one exception to "the URL is
+        mpv's first argument", because any local process can read a command
+        line and the direct URL holds the camera password. mpv is started idle
+        with a private IPC pipe and the URL is sent to it afterwards
+        (Send-CamViewerUrl). --idle=once keeps the rest of this function
+        unchanged: mpv idles only until that first load and then exits when
+        playback ends or fails, as it does without the option. If the hand-over
+        fails the answer is $false and mpv is stopped - never a retry with the
+        URL as an argument. A relay URL has no credentials and keeps the old
+        path.
     #>
     param(
         [Parameter(Mandatory = $true)]$Config,
@@ -1032,10 +1107,22 @@ function Invoke-CamViewer {
 
         [Parameter(Mandatory = $true)][string]$MpvPath,
 
-        [AllowNull()][AllowEmptyCollection()][string[]]$MpvArgs
+        [AllowNull()][AllowEmptyCollection()][string[]]$MpvArgs,
+
+        [int]$IpcTimeoutMs = 8000
     )
 
-    $line = Get-CamArgumentLine -Tokens (@([string]$Choice.Url) + @($MpvArgs))
+    # Any '@' after the scheme counts, not only a well-formed user:pass@: a
+    # password containing a slash would slip past the redactor's own pattern,
+    # and the cost of a false positive is only an IPC hand-over.
+    $viaIpc = ([string]$Choice.Url -match '^[a-z][a-z0-9+.\-]*://.*@')
+    if ($viaIpc) {
+        $pipeName = 'camviewer-' + [guid]::NewGuid().ToString('N')
+        $line = Get-CamArgumentLine -Tokens (@($MpvArgs) + @('--idle=once', "--input-ipc-server=$pipeName"))
+    }
+    else {
+        $line = Get-CamArgumentLine -Tokens (@([string]$Choice.Url) + @($MpvArgs))
+    }
 
     # -NoNewWindow keeps mpv's console output in the pane it belongs to, the
     # way the call operator did. Its stderr is not captured, so it can no
@@ -1044,6 +1131,12 @@ function Invoke-CamViewer {
     try { $null = $process.Handle } catch { }
 
     try {
+        if ($viaIpc -and -not (Send-CamViewerUrl -Process $process -PipeName $pipeName -Url ([string]$Choice.Url) -TimeoutMs $IpcTimeoutMs)) {
+            Stop-CamViewer -Process $process
+            Write-Host (Get-CamRedacted -Text 'The viewer could not hand the stream to mpv over its control pipe; mpv was stopped and the pane will retry.') -ForegroundColor Yellow
+            return $false
+        }
+
         $seconds = 10
         try { $seconds = [int]$Config.ViewerPromoteCheckSeconds } catch { }
 
