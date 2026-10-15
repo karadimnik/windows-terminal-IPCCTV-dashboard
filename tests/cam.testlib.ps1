@@ -924,7 +924,10 @@ function Start-CamTestSyntheticCamera {
         [int]$TimeoutSeconds = 20,
         # A control API on this loopback port, no login (sandbox only), so a
         # check can count the sessions on the camera's own paths. 0 = none.
-        [int]$ApiPort = 0
+        [int]$ApiPort = 0,
+        # Per path: 'WxH:profile', for example '1280x720:high' - an encode with that size and H.264
+        # profile, no B-frames, instead of the default 640x360 baseline-ish stream.
+        [hashtable]$VideoSpec = @{}
     )
 
     if (-not (Test-CamTestPortFree -Port $Port)) { throw "TCP port $Port is already in use; the synthetic camera needs it free." }
@@ -964,11 +967,16 @@ function Start-CamTestSyntheticCamera {
 
         $ffmpeg = (Get-CamConfigDefault).FfmpegPath
         foreach ($name in $PathName) {
+            $size = '640x360'; $encode = @('-preset', 'ultrafast', '-tune', 'zerolatency')
+            if ($VideoSpec.ContainsKey($name)) {
+                $size, $codecProfile = ([string]$VideoSpec[$name]) -split ':'
+                $encode = @('-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', $codecProfile, '-bf', '0')
+            }
             $publish = @('-hide_banner', '-loglevel', 'error', '-nostdin',
-                '-re', '-f', 'lavfi', '-i', "testsrc2=size=640x360:rate=$FrameRate",
+                '-re', '-f', 'lavfi', '-i', "testsrc2=size=${size}:rate=$FrameRate",
                 '-re', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=8000',
                 '-map', '0:v', '-map', '1:a',
-                '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
+                '-c:v', 'libx264') + $encode + @('-pix_fmt', 'yuv420p',
                 '-g', "$FrameRate", '-keyint_min', "$FrameRate", '-sc_threshold', '0',
                 '-c:a', 'pcm_alaw', '-ar', '8000', '-ac', '1')
             if ($NonMonotonic) { $publish += '-bsf:v', ('setts=ts=if(eq(mod(N\,{0})\,{1})\,PREV_OUTPTS\,PTS)' -f $NonMonotonicEvery, ($NonMonotonicEvery - 1)) }
@@ -2313,7 +2321,9 @@ function Get-CamTestBrowserPids {
 
     $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CommandLine)
     $set = New-Object System.Collections.Generic.HashSet[int]
-    [void]$set.Add([int]$Started.Pid)
+    # The root pid only while it is still the process this run started (a recycled pid is somebody else's).
+    $root = Get-Process -Id $Started.Pid -ErrorAction SilentlyContinue
+    if ($root -and $root.StartTime.ToUniversalTime() -ge $Started.StartedAt.AddSeconds(-5)) { [void]$set.Add([int]$Started.Pid) }
     foreach ($p in $all) { if ($p.CommandLine -and $p.CommandLine.Contains($Started.Profile)) { [void]$set.Add([int]$p.ProcessId) } }
     do {
         $n = $set.Count
@@ -2327,9 +2337,14 @@ function Stop-CamTestBrowser {
     <# Kills exactly the processes Get-CamTestBrowserPids finds and removes the throwaway profile. Returns what was left, if anything. #>
     param([Parameter(Mandatory = $true)]$Started)
 
-    foreach ($id in @(Get-CamTestBrowserPids -Started $Started)) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Milliseconds 1500
-    $left = @(Get-CamTestBrowserPids -Started $Started | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+    # Chromium respawns helpers while its root is dying, so kill again until a listing finds nothing (a few rounds at most).
+    $left = @()
+    for ($round = 0; $round -lt 6; $round++) {
+        foreach ($id in @(Get-CamTestBrowserPids -Started $Started)) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 1000
+        $left = @(Get-CamTestBrowserPids -Started $Started | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if (-not $left.Count) { break }
+    }
     for ($i = 0; $i -lt 8 -and (Test-Path -LiteralPath $Started.Profile); $i++) {
         Remove-Item -LiteralPath $Started.Profile -Recurse -Force -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $Started.Profile) { Start-Sleep -Seconds 1 }
@@ -2389,4 +2404,89 @@ function Read-CamTestLiveStats {
         }
     } finally { $stream.Dispose() }
     return @($events)
+}
+
+
+function Start-CamTestLiveRig {
+    <#
+        The whole live-view rig in a sandbox, run by the REAL supervisor: a
+        synthetic camera (paths -CameraPath, with a control API so sessions
+        can be counted), the recording relay and the live instance as the
+        supervisor's own children, the recorder reading the camera through
+        the relay. Fake credentials, non-default ports: camera 18554 (API
+        18557), relay RTSP 18564 and API 18567, live WHEP 18889 and ICE/UDP
+        18189. Returns the rig, or throws after tearing down what it started.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][object[]]$Cameras,
+        [Parameter(Mandatory = $true)][string[]]$CameraPath,
+        [hashtable]$Config = @{},
+        [hashtable]$VideoSpec = @{},
+        [int]$LiveCloseAfterSeconds = 4
+    )
+
+    $rig = [pscustomobject]@{
+        Name = $Name; Dir = (Join-Path -Path $env:TEMP -ChildPath "cam-tests\$Name"); CamPort = 18554; CamApi = 18557; RelayPort = 18564; RelayApi = 18567
+        WhepPort = 18889; UdpPort = 18189; Sandbox = $null; Camera = $null; Supervisor = $null; DataDir = $null; Alerts = $null
+    }
+    foreach ($p in @($rig.CamPort, $rig.CamApi, $rig.RelayPort, $rig.RelayApi, $rig.WhepPort)) {
+        if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the live rig needs it free." }
+    }
+    if (-not (Test-CamTestUdpPortFree -Port $rig.UdpPort)) { throw "UDP port $($rig.UdpPort) is already in use; the live rig needs it free." }
+
+    try {
+        $settings = @{
+            RestreamerEnabled = $true; RestreamerExePath = (Join-Path $rig.Dir 'bin\mediamtx.exe'); RestreamerConfigPath = (Join-Path $rig.Dir 'mtx\mediamtx.yml')
+            RelayBase = "rtsp://127.0.0.1:$($rig.RelayPort)"; RelayApiBase = "http://127.0.0.1:$($rig.RelayApi)"
+            RelayProbeTimeoutMs = 800; RelayStartupWaitSeconds = 15; RelayReadyWaitSeconds = 8; StatusIntervalSeconds = 3
+            LiveViewEnabled = $true; LiveWhepAddress = "127.0.0.1:$($rig.WhepPort)"; LiveUdpAddress = "127.0.0.1:$($rig.UdpPort)"
+            LiveConfigPath = (Join-Path $rig.Dir 'live\mediamtx-live.yml'); LiveSecretPath = (Join-Path $rig.Dir 'live\live_view_secret.txt')
+            LiveCloseAfterSeconds = $LiveCloseAfterSeconds }
+        foreach ($key in $Config.Keys) { $settings[$key] = $Config[$key] }
+        $rig.Sandbox = New-CamTestSandbox -Name $Name -Cameras $Cameras -Config $settings
+        $rig.Alerts = Set-CamTestAlertStub -Sandbox $rig.Sandbox
+        $rig.DataDir = Join-Path -Path $rig.Dir -ChildPath 'data'
+        [void](New-Item -ItemType Directory -Path (Join-Path $rig.Dir 'bin'), $rig.DataDir -Force)
+        Copy-Item -LiteralPath 'C:\mediamtx\mediamtx.exe' -Destination (Join-Path $rig.Dir 'bin\mediamtx.exe')
+
+        $rig.Camera = Start-CamTestSyntheticCamera -Dir $rig.Dir -Port $rig.CamPort -PathName $CameraPath -ApiPort $rig.CamApi -VideoSpec $VideoSpec
+        $install = Invoke-CamTestScript -Path $rig.Sandbox.Recorder -Arguments @('-InstallRestreamer')
+        if ($install.ExitCode -ne 0) { throw ('-InstallRestreamer failed: ' + ($install.Lines -join ' | ')) }
+        $rig.Supervisor = Start-CamTestSupervisor -Sandbox $rig.Sandbox
+
+        $deadline = [DateTime]::Now.AddSeconds(60)
+        $ready = $false
+        while ([DateTime]::Now -lt $deadline) {
+            $status = Get-CamTestStatusJson -Sandbox $rig.Sandbox
+            if ($status -and $status.Snapshot.Live -and $status.Snapshot.Live.Alive -and $status.Snapshot.Restreamer.Alive -and -not (Test-CamTestPortFree -Port $rig.WhepPort)) { $ready = $true; break }
+            if ($rig.Supervisor.HasExited) { throw 'the sandbox supervisor exited' }
+            Start-Sleep -Milliseconds 700
+        }
+        if (-not $ready) { throw 'the live instance did not come up under the supervisor within 60 s; see ' + $rig.Dir }
+        return $rig
+    }
+    catch {
+        $message = $_.Exception.Message
+        [void](Stop-CamTestLiveRig -Rig $rig)
+        throw $message
+    }
+}
+
+
+function Stop-CamTestLiveRig {
+    <# Stops the rig through the product's own -Stop, then the synthetic camera. Returns lines describing anything that had to be forced or was left. #>
+    param([Parameter(Mandatory = $true)]$Rig)
+
+    $notes = @()
+    if ($Rig.Sandbox -and $Rig.Supervisor) {
+        $stop = Stop-CamTestSupervisor -Sandbox $Rig.Sandbox -Process $Rig.Supervisor
+        $notes += ("-Stop through the product: exit {0}, forced: {1}" -f $stop.ExitCode, $(if ($stop.Killed.Count) { $stop.Killed -join '; ' } else { 'nothing' }))
+    }
+    if ($Rig.Camera) { [void](Stop-CamTestSyntheticCamera -Camera $Rig.Camera) }
+    $left = @(Get-CimInstance Win32_Process -Filter "Name = 'mediamtx.exe' or Name = 'ffmpeg.exe' or Name = 'powershell.exe'" |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($Rig.Dir) } | ForEach-Object { '{0} pid {1}' -f $_.Name, $_.ProcessId })
+    $notes += ("processes still tied to {0}: {1}" -f $Rig.Dir, $(if ($left.Count) { $left -join ', ' } else { 'none' }))
+    foreach ($entry in $left) { if ($entry -match 'pid (\d+)') { Stop-Process -Id ([int]$Matches[1]) -Force -ErrorAction SilentlyContinue } }
+    return $notes
 }

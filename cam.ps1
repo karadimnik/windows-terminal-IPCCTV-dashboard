@@ -244,6 +244,10 @@ function Get-CamComponentState {
         $relayApi = Get-CamRelayApiStatus
     }
 
+    # Live view, from status.json alone (no network call); $null when it is off.
+    $liveStatus = $null
+    if ((Get-CamLiveEnabled -Config $Config) -and $snapshot -and $snapshot.PSObject.Properties['Live']) { $liveStatus = $snapshot.Live }
+
     # By the handle its warden published, not by the title it is showing. A
     # Windows Terminal window's title follows its active tab, so counting
     # titles reported the NVR window as gone every time a foreign console was
@@ -278,6 +282,7 @@ function Get-CamComponentState {
         HealthWindows   = @(Get-CamTerminalWindow -Title 'cam.health').Count
         ReadyPaths      = $readyPaths
         RelayApi        = $relayApi
+        LiveStatus      = $liveStatus
     }
 }
 
@@ -365,6 +370,24 @@ function Show-CamStatus {
         }
         else {
             Write-Host ("  serving      {0} path(s): {1}" -f $State.ReadyPaths.Count, (($State.ReadyPaths | Sort-Object) -join ', '))
+        }
+    }
+
+    # Only when live view is switched on, so with it off -Status reads as it always did.
+    if (Get-CamLiveEnabled -Config $Config) {
+        Write-CamSection 'live view'
+        if (-not $supervisorState.Running) {
+            Write-Host '  supervisor not running, so live view is not either' -ForegroundColor DarkGray
+        }
+        elseif (-not $State.LiveStatus) {
+            Write-Host '  no live-view section in status.json yet (the supervisor writes it once it has started)' -ForegroundColor Yellow
+        }
+        else {
+            $live = $State.LiveStatus
+            $liveColour = $(if ($live.Alive) { 'Gray' } else { 'Yellow' })
+            Write-Host ("  mediamtx     {0}, {1} restart(s)" -f $(if ($live.Alive) { "alive, pid $($live.Pid)" } else { 'NOT running' }), $live.RestartsTotal) -ForegroundColor $liveColour
+            Write-Host ("  paths        {0}" -f ((@($live.Paths) | Sort-Object) -join ', '))
+            if ($live.LastError) { Write-Host ("  last error   {0}" -f $live.LastError) -ForegroundColor Yellow }
         }
     }
 

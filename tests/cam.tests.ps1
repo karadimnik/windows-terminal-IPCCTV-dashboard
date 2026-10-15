@@ -6613,11 +6613,11 @@ function Start-CamTestLiveInstance {
 
 function Invoke-CamCheckLiveWhep {
     <#
-        [Stage 1A] The live instance, in a real browser. Synthetic camera
-        only, fake credentials, non-default ports (camera 18554 and its API
-        18557, live WHEP 18889, ICE/UDP 18189, test page server 18080).
-        Chrome and Edge only, headed, small window, throwaway profile, killed
-        by profile marker afterwards.
+        [Stage 1A] The live instance, run by the real supervisor, in a real
+        browser. Synthetic camera only, fake credentials, non-default ports
+        (see Start-CamTestLiveRig; page servers 18080 and 18081, the
+        decoder-report instance 18890/18190). Chrome and Edge only, headed,
+        small window, throwaway profile, killed by profile marker afterwards.
 
         (i) WHEP with no login is 401, with a wrong login 401, and with the
             right login (added by the page server, as camui will) Chrome and
@@ -6632,44 +6632,19 @@ function Invoke-CamCheckLiveWhep {
     $script:CamLiveWhepOk = $true
     $script:CamLiveWhepEvidence = @()
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
-    $camPort = 18554; $camApi = 18557; $whepPort = 18889; $udpPort = 18189; $pagePort = 18080
     $name = 'livewhep'
-    $dir = Join-Path -Path $env:TEMP -ChildPath "cam-tests\$name"
-    $camera = $null; $live = $null; $server = $null; $browsers = @(); $sandbox = $null
-    $browserSeconds = 0
-    $script:CamLiveBrowsers = @()
+    $rig = $null; $server = $null; $serverB = $null; $liveB = $null; $dir = Join-Path -Path $env:TEMP -ChildPath "cam-tests\$name"
+    $script:CamLiveBrowsers = @(); $script:CamLiveBrowserSeconds = 0; $script:CamLiveRunNo = 0
 
     try {
-        foreach ($p in @($camPort, $camApi, $whepPort, $pagePort)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
-        if (-not (Test-CamTestUdpPortFree -Port $udpPort)) { throw "UDP port $udpPort is already in use; the check needs it free." }
-
-        $cameras = @([pscustomobject]@{ Name = 'Cam One'; IP = "127.0.0.1:$camPort"; Quality = 'stream1'; Record = $false })
-        $sandbox = New-CamTestSandbox -Name $name -Cameras $cameras -Config @{
-            RestreamerEnabled = $true; RelayBase = "rtsp://127.0.0.1:$camPort"
-            LiveViewEnabled = $true; LiveWhepAddress = "127.0.0.1:$whepPort"; LiveUdpAddress = "127.0.0.1:$udpPort"
-            LiveConfigPath = (Join-Path $dir 'live\mediamtx-live.yml'); LiveSecretPath = (Join-Path $dir 'live\live_view_secret.txt'); LiveCloseAfterSeconds = 4 }
-        $config = $sandbox.Config
-        $workDir = Join-Path -Path $dir -ChildPath 'live'
-        [void](New-Item -ItemType Directory -Path $workDir -Force)
-        $dataDir = Join-Path -Path $dir -ChildPath 'data'
-        [void](New-Item -ItemType Directory -Path $dataDir -Force)
-
-        # The synthetic camera: stream2 is the sub-stream, camone stands in for the recording relay's path.
-        $camera = Start-CamTestSyntheticCamera -Dir $dir -Port $camPort -PathName @('stream1', 'stream2', 'camone') -ApiPort $camApi
-
-        $credential = Get-CamLiveCredential -Config $config -Create
-        $relayMap = Get-CamRelayPathMap -Cameras (Get-CamList -Path $sandbox.Cameras)
-        $liveMap = Get-CamLivePathMap -Config $config -RelayPathMap $relayMap
-        [System.IO.File]::WriteAllText([string]$config.LiveConfigPath, (Get-CamLiveConfigText -Config $config -LivePathMap $liveMap -LiveCredential $credential), (New-Object System.Text.UTF8Encoding($false)))
-        $cameraCredential = Get-CamCredential -Path (Join-Path $sandbox.Dir 'camera_creds.xml')
-        $live = Start-CamTestLiveInstance -Config $config -LivePathMap $liveMap -CameraCredential $cameraCredential -WorkDir $workDir -LogPath (Join-Path $dir 'live.out')
-        $whep = "http://127.0.0.1:$whepPort"
-        $deadline = [DateTime]::Now.AddSeconds(15)
-        while ([DateTime]::Now -lt $deadline -and (Test-CamTestPortFree -Port $whepPort)) {
-            if ($live.HasExited) { throw 'the live MediaMTX exited: ' + (Get-Content (Join-Path $dir 'live.out') -Raw) }
-            Start-Sleep -Milliseconds 300
-        }
-        $evidence += ("live MediaMTX pid {0} on the generated config; paths {1}" -f $live.Id, ($liveMap.Keys -join ', '))
+        foreach ($p in @(18080, 18081, 18890)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
+        if (-not (Test-CamTestUdpPortFree -Port 18190)) { throw 'UDP port 18190 is already in use; the check needs it free.' }
+        $cameras = @([pscustomobject]@{ Name = 'Cam One'; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = $true })
+        $rig = Start-CamTestLiveRig -Name $name -Cameras $cameras -CameraPath @('stream1', 'stream2')
+        $dir = $rig.Dir; $dataDir = $rig.DataDir; $config = $rig.Sandbox.Config
+        $whep = "http://127.0.0.1:$($rig.WhepPort)"
+        $status = (Get-CamTestStatusJson -Sandbox $rig.Sandbox).Snapshot
+        $evidence += ("supervisor-run live MediaMTX pid {0} (status.json Live.Alive {1}), paths {2}; relay pid {3}" -f $status.Live.Pid, $status.Live.Alive, (@($status.Live.Paths) -join ', '), $status.Restreamer.Pid)
 
         # (i) the login, over plain HTTP
         $offer = "v=0`r`n"
@@ -6681,6 +6656,7 @@ function Invoke-CamCheckLiveWhep {
         if ($wrong.Code -ne 401) { & $fail 'a WHEP request with a wrong login was not answered 401' }
 
         # the page server, as camui will be: same origin, adds the login
+        $pagePort = 18080
         $server = Start-CamTestLiveServer -Prefix "http://127.0.0.1:$pagePort/" -PageFile (Join-Path (Get-CamTestRepo) 'tests\live\page.html') -DataDir $dataDir `
             -WhepBase $whep -SecretFile ([string]$config.LiveSecretPath)
         $evidence += ("page server pid {0} on 127.0.0.1:{1} (its command line holds the secret FILE path only)" -f $server.Id, $pagePort)
@@ -6718,11 +6694,9 @@ function Invoke-CamCheckLiveWhep {
                 $script:CamLiveBrowserSeconds += $seconds
                 $end = Stop-CamTestBrowser -Started $started
             }
-            $errors = @(Read-CamTestLiveStats -Path $stats | Where-Object { $_.ev -eq 'error' })
             return [pscustomobject]@{ Skipped = $null; Browser = $Browser; Version = $found.Version; Last = $last; Mark = $mark; UnmuteAt = $unmuteAt
-                Seconds = $seconds; Left = $end.Left.Count; ProfileRemoved = $end.ProfileRemoved; Errors = $errors }
+                Seconds = $seconds; Left = $end.Left.Count; ProfileRemoved = $end.ProfileRemoved }
         }
-        $script:CamLiveRunNo = 0; $script:CamLiveBrowsers = @(); $script:CamLiveBrowserSeconds = 0
         $describe = {
             param($Result, [string]$Phase)
             foreach ($t in @($Result.Last.tiles)) {
@@ -6756,16 +6730,25 @@ function Invoke-CamCheckLiveWhep {
         }
 
         # PHASE B - decoder report. Chromium exposes decoderImplementation only to a page holding a capture permission, and
-        # such a page offers real interface addresses that a loopback UDP listener cannot pair with; so this phase alone runs
-        # the live instance with ICE/TCP on the same loopback port added (a test-only edit of the generated text).
-        $live.Kill(); [void]$live.WaitForExit(5000); $live.LogStream.Dispose()
-        $baseText = Get-CamLiveConfigText -Config $config -LivePathMap $liveMap -LiveCredential $credential
-        $tcpText = $baseText.Replace('webrtcLocalTCPAddress: ""', "webrtcLocalTCPAddress: 127.0.0.1:$udpPort")
+        # such a page offers real interface addresses that a loopback UDP listener cannot pair with; so this phase alone uses a
+        # second live instance (ports 18890/18190, same relay and camera) whose generated config has ICE/TCP on the same
+        # loopback port added - a test-only edit of the generated text.
+        $bConfig = $config.Clone()
+        $bConfig.LiveWhepAddress = '127.0.0.1:18890'; $bConfig.LiveUdpAddress = '127.0.0.1:18190'; $bConfig.LiveConfigPath = (Join-Path $dir 'live\mediamtx-live-b.yml')
+        $relayMap = Get-CamRelayPathMap -Cameras (Get-CamList -Path $rig.Sandbox.Cameras)
+        $liveMap = Get-CamLivePathMap -Config $bConfig -RelayPathMap $relayMap
+        $credential = Get-CamLiveCredential -Config $bConfig
+        $baseText = Get-CamLiveConfigText -Config $bConfig -LivePathMap $liveMap -LiveCredential $credential
+        $tcpText = $baseText.Replace('webrtcLocalTCPAddress: ""', 'webrtcLocalTCPAddress: 127.0.0.1:18190')
         if ($tcpText -eq $baseText) { throw 'the test-only TCP edit did not apply' }
-        [System.IO.File]::WriteAllText([string]$config.LiveConfigPath, $tcpText, (New-Object System.Text.UTF8Encoding($false)))
-        $live = Start-CamTestLiveInstance -Config $config -LivePathMap $liveMap -CameraCredential $cameraCredential -WorkDir $workDir -LogPath (Join-Path $dir 'live-b.out')
+        [System.IO.File]::WriteAllText([string]$bConfig.LiveConfigPath, $tcpText, (New-Object System.Text.UTF8Encoding($false)))
+        $cameraCredential = Get-CamCredential -Path (Join-Path $rig.Sandbox.Dir 'camera_creds.xml')
+        $liveB = Start-CamTestLiveInstance -Config $bConfig -LivePathMap $liveMap -CameraCredential $cameraCredential -WorkDir (Join-Path $dir 'live') -LogPath (Join-Path $dir 'live-b.out')
         $deadline = [DateTime]::Now.AddSeconds(15)
-        while ([DateTime]::Now -lt $deadline -and (Test-CamTestPortFree -Port $whepPort)) { Start-Sleep -Milliseconds 300 }
+        while ([DateTime]::Now -lt $deadline -and (Test-CamTestPortFree -Port 18890)) { Start-Sleep -Milliseconds 300 }
+        $pagePort = 18081
+        $serverB = Start-CamTestLiveServer -Prefix "http://127.0.0.1:$pagePort/" -PageFile (Join-Path (Get-CamTestRepo) 'tests\live\page.html') -DataDir $dataDir `
+            -WhepBase 'http://127.0.0.1:18890' -SecretFile ([string]$config.LiveSecretPath)
         foreach ($browser in @('chrome', 'edge')) {
             foreach ($tiles in $sets) {
                 $r = & $browse $browser $tiles -Cap
@@ -6777,17 +6760,17 @@ function Invoke-CamCheckLiveWhep {
                 foreach ($t in @($r.Last.tiles)) { if ($t.v -and -not $t.v.impl) { & $fail "$browser $($t.path): no decoder implementation reported" } }
             }
         }
-        $browserSeconds = $script:CamLiveBrowserSeconds
-        $browsers = @($script:CamLiveBrowsers)
     }
     catch { & $fail ('check aborted: ' + $_.Exception.Message) }
     finally {
         foreach ($b in @($script:CamLiveBrowsers)) { try { [void](Stop-CamTestBrowser -Started $b) } catch { } }
-        foreach ($proc in @($server, $live)) { if ($proc -and -not $proc.HasExited) { try { $proc.Kill(); [void]$proc.WaitForExit(5000) } catch { } } }
-        if ($live -and $live.LogStream) { try { $live.LogStream.Dispose() } catch { } }
-        if ($camera) { [void](Stop-CamTestSyntheticCamera -Camera $camera) }
-        $running = @($server, $live | Where-Object { $_ -and -not $_.HasExited }).Count
-        $evidence += ("browser windows were up {0:n0} s in total; whole check {1:n0} s; helper processes still running: {2}" -f $browserSeconds, $watch.Elapsed.TotalSeconds, $running)
+        foreach ($proc in @($server, $serverB, $liveB)) { if ($proc -and -not $proc.HasExited) { try { $proc.Kill(); [void]$proc.WaitForExit(5000) } catch { } } }
+        if ($liveB -and $liveB.LogStream) { try { $liveB.LogStream.Dispose() } catch { } }
+        $notes = @()
+        if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
+        $evidence += ("browser windows were up {0:n0} s in total; whole check {1:n0} s" -f $script:CamLiveBrowserSeconds, $watch.Elapsed.TotalSeconds)
+        $evidence += $notes
+        if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
         if ($script:CamLiveWhepOk) { try { Remove-CamTestTree -Path $dir } catch { $script:CamLiveWhepEvidence += "cleanup of $dir failed" } }
         else { $script:CamLiveWhepEvidence += "left for inspection: $dir" }
     }
