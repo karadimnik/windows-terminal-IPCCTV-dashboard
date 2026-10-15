@@ -64,6 +64,29 @@ The paths and addresses here are configuration; the keys marked * are tuning con
 | `ViewerPromoteCheckSeconds` * | `10` | How often an `mpv` pane that is on a direct connection asks whether its camera is back on the relay, so it can hand the second session back. One control-API call per direct pane per interval. `0` switches the watch off and leaves such a pane direct until the dashboard is relaunched. |
 | `StartStaggerMs` * | `300` | Delay between consecutive consumer starts, recorder children and `mpv` panes alike, so six of them do not burst onto the relay, the control API and the cameras in the same instant. |
 
+## Live view
+
+Off by default. With `LiveViewEnabled` false nothing here is read, started or written, and `status.json`, `cam.ps1 -Status` and the relay's generated config are exactly what they were. It is the server half of watching the cameras in a browser (the page that uses it is a later stage): a **second** MediaMTX, dedicated to WebRTC, supervised exactly like the relay and stopped with it. The recording relay never speaks WebRTC, because MediaMTX's WebRTC port answers any website's cross-origin request when its origins are the default and has no `Host` check, and a user allowed to read RTSP may read WebRTC too. The design and the reasoning behind each generated key are in [tasks/portable-nvr/live-1a-design.md](../tasks/portable-nvr/live-1a-design.md).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `LiveViewEnabled` | `false` | Starts the live instance under the supervisor, once the relay is running. It needs `RestreamerEnabled`; without it the supervisor logs why and does not start it. A failed start logs one redacted line and recording carries on. |
+| `LiveExePath` | `""` | The MediaMTX binary. Empty means `RestreamerExePath`. |
+| `LiveConfigPath` | `C:\mediamtx\mediamtx-live.yml` | The generated config, rewritten by the supervisor at every start. A local path: a network or WSL share path is refused at load. |
+| `LiveWhepAddress` | `127.0.0.1:8889` | Where WebRTC signaling listens. Loopback only: any other host is refused at load. |
+| `LiveUdpAddress` | `127.0.0.1:8189` | The WebRTC media port, advertised to browsers as `127.0.0.1` only. |
+| `LiveSubStream` | `stream2` | The camera stream the live grid pulls, on demand. |
+| `LiveCloseAfterSeconds` | `10` | How long after the last viewer leaves the camera's session is closed. |
+| `LiveSecretPath` | `""` | The login's secret. Empty means `%LOCALAPPDATA%\IPCCTV\live_view_secret.txt`: a local per-user folder, because the repository share holds no access control list at all. |
+
+A malformed value, or any key starting with `Live` that is not in this table, is refused when the configuration loads, whether or not live view is on.
+
+- **Paths.** For each camera `<name>sub` pulls the camera's `LiveSubStream` only while someone watches (its second camera session), and `<name>main` pulls the recording relay's own loopback path, which adds no camera session. A camera whose recorder `Quality` already is `LiveSubStream` gets only `<name>main`. A live name that equals a relay path is an error.
+- **Login.** One user, `camlive`, with `read` only; there is no anonymous user. The secret is 32 random bytes (64 hex characters) in a plain ASCII file the supervisor creates when it is missing, with an access control list naming only the current Windows user and nothing inherited, so no other account can read it; `camui` reads the same file. The generated config holds only its SHA-256 (`pass: sha256:...`). The secret is on no command line and in no log, `status.json` or `-Status` output. A web page cannot learn it, and `camui` adds the login server-side.
+- **No cross-origin permission.** `webrtcAllowOrigins` is empty, so MediaMTX sends no `Access-Control-Allow-Origin`, and a browser POST that is not same-origin is refused even with a correct login. The browser therefore reaches the live instance only through a same-origin proxy such as `camui`. Every other MediaMTX server (RTSP, RTMP, HLS, SRT, API, metrics, pprof, playback) is off.
+- **Status.** While live view is on, `status.json` has a `Live` section (`Enabled`, `Alive`, `Pid`, `LastPid`, `StartedAt`, `RestartsTotal`, `Paths` as names only, `LastError`) and `cam.ps1 -Status` a `live view` section. With it off neither exists. Its log is `liveview.log` in the archive's `_logs` folder. Cameras added to `cameras.json` while it runs appear at its next start.
+- **Camera sessions.** Each camera allows two. The recorder holds one through the relay; live view may hold the second, only while a `<name>sub` viewer is connected. While anyone watches a sub-stream, the phone app has no free session on that camera.
+
 ## Dashboard layout and health strip
 
 `HealthStripHeightPx` is the one setting here - it is how you resize the strip or switch it off. The keys marked * are tuning constants that describe the layout this system already computes correctly, and a wrong one will degrade a working grid rather than configure it.
