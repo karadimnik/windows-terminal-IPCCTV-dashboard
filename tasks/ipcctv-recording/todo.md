@@ -1381,7 +1381,7 @@ The Operator approved all four. Documentation only; no code touched.
   (the observation stays recorded, worst case about 2 MB a day at real log rates), and the quiet-PC UDP rerun of the
   portable project's one-tile spike. A functionality check for something new is still expected.
 
-- [ ] **[91]** SECURITY, found 2026-10-15 while preparing portable Stage 1, reproduced against a throwaway copy of the built
+- [x] **[91]** DONE 2026-10-15 (`executor/camui-guard`, merged; effective once camui is rebuilt and restarted). SECURITY, found 2026-10-15 while preparing portable Stage 1, reproduced against a throwaway copy of the built
       `camui.exe` (non-default port, stub folder): the web app has NO Host, Origin or Sec-Fetch-Site check anywhere and its
       JSON handlers decode the body without checking the content type. Proven: a cross-site POST (`Origin: evil.example`,
       `Sec-Fetch-Site: cross-site`, `Content-Type: text/plain`, which a browser sends without a preflight) to `/api/acknowledge`
@@ -1393,3 +1393,10 @@ The Operator approved all four. Documentation only; no code touched.
       (Host allowlist, cross-site rejection by Origin and Sec-Fetch-Site on `/api/*`, JSON content type on state-changing
       requests, `Cross-Origin-Resource-Policy: same-origin`). Takes effect when the Operator rebuilds `ui/build.sh` and restarts
       camui; the running camui (pid 3576) is the old binary.
+
+      Fix: `ui/guard.go` - Host allowlist on every request (loopback names, the LAN listen host, `allowedHosts`; any IP literal on a
+      wildcard LAN bind), Sec-Fetch-Site and Origin checks on `/api/*`, `application/json` on state-changing requests, CORP,
+      nosniff and no-store on `/api/*`. Verified independently: the four original probes went from 422/200/200/422 to 403 on a
+      throwaway build; `uiguard` (new harness check) and the Go table tests were red on the old binary and green on the new; the
+      page and every front-end call (all through one JSON helper) still work. Not proven: a real-browser cross-site POST (headless
+      Chrome gated loopback itself), LAN mode with the real binary.
