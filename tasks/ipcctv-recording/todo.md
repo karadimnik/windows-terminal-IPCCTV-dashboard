@@ -71,14 +71,14 @@ exact codec and consumer shape we have - so the restreamer must be proven, not a
 
 - [x] **[14]** DONE Phase D. README rewritten end to end: install order, command reference for all
       four entry points, how it works, every config key, twelve known limitations, the screenshot.
-- [ ] **[15]** Commit to `executor/recording-feature`. No merge, no push without approval.
+- [x] **[15]** DONE (everything is committed and merged locally). Commit to `executor/recording-feature`. No merge, no push without approval.
 
 ## Deferred
 
 - [ ] **[16]** Motion-triggered recording, simple version. Research ONVIF Profile S event
       subscription first - these are ONVIF cameras, so the built-in detector may well be reachable,
       which beats re-detecting motion on the PC. ffmpeg `select`/`scene` only as fallback.
-- [ ] **[17]** Local restreamer revisit (go2rtc / MediaMTX) - one camera connection fanned out
+- [x] **[17]** DONE: the MediaMTX relay has been the production input path since 2026-10-12. Local restreamer revisit (go2rtc / MediaMTX) - one camera connection fanned out
       locally; also removes the credential-in-command-line exposure.
 
 ## Operator-owned verification (after handover)
@@ -120,7 +120,7 @@ srt/moq - transport fan-out only, never a media server, never a recorder.
 **Open, carried forward:**
 - [x] **[23]** Operator to run DONE 2026-10-15, reported "done ok" by the Operator (camera-facing -SelfTest).  camera-facing `-SelfTest` (checks b/c/d) with the dashboard CLOSED.
       Never executed - the Phase B agent was forbidden from touching cameras.
-- [ ] **[24]** Untested over time: log rotation at `LogMaxBytes`, the 900 s production segment path,
+- [x] **[24]** Untested over time: DONE 2026-10-15: parts A and B and the production soak exercised every path named here in a sandbox. log rotation at `LogMaxBytes`, the 900 s production segment path,
       `HealthyResetSeconds` backoff reset, the real 2250 s stall threshold, `MaxRetentionDays`.
 - [x] **[25]** DONE Phase D: the README's configuration tables list every key with its default and
       mark the ones absent from `recorder.config.example.json` with a star, including
@@ -1370,3 +1370,8 @@ The Operator approved all four. Documentation only; no code touched.
 - [ ] **[90]** The recorder's ffmpeg children put the credentialed URL on their command line on the DIRECT path
       (relay off, or its path not ready), and `-SelfTest` probes always do. Not fixed; the relay path avoids it.
       Candidate: refuse direct input for recording when the relay is enabled, or accept as the floor.
+
+- **[89] merged locally 2026-10-15** (`executor/relay-api-auth`, alert id 130, login file `relay_api_creds.xml`). The first live
+  start after it rewrites `C:\mediamtx\mediamtx.yml` with the auth block and creates the login; not yet run against the
+  real cameras. Trade-off, by design: while the relay refuses the product's login, consumers stay on the relay, so a camera
+  whose path has no stream is not recorded until the login is fixed (alert 130 says so) instead of falling back to direct.
