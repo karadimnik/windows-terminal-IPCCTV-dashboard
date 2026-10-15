@@ -1481,8 +1481,43 @@ function Get-CamTestRecorderFunctions {
 }
 
 
+function Get-CamTestDstTransitions {
+    <#
+        The next fall-back and the next spring-forward of this machine's time
+        zone, as UTC instants, found from the zone itself rather than written
+        down so the clock checks follow whatever zone they run in. Each item:
+        Kind (FallBack | SpringForward), AtUtc, DeltaSeconds (-3600 / +3600 for
+        a one-hour change). Empty for a zone without daylight saving.
+    #>
+    param([DateTime]$FromUtc = [DateTime]::UtcNow)
+
+    $zone = [TimeZoneInfo]::Local
+    $found = @{}
+    $hour = [DateTime]::new($FromUtc.Year, $FromUtc.Month, $FromUtc.Day, 0, 0, 0, [DateTimeKind]::Utc)
+    for ($i = 0; $i -lt 24 * 400 -and $found.Count -lt 2; $i++) {
+        $next = $hour.AddHours(1)
+        $before = $zone.GetUtcOffset($hour)
+        $after = $zone.GetUtcOffset($next)
+        if ($before -ne $after) {
+            $at = $next
+            while ($zone.GetUtcOffset($at.AddMinutes(-1)) -eq $after) { $at = $at.AddMinutes(-1) }
+            $kind = $(if ($after -lt $before) { 'FallBack' } else { 'SpringForward' })
+            if (-not $found.ContainsKey($kind)) {
+                $found[$kind] = [pscustomobject]@{ Kind = $kind; AtUtc = $at; DeltaSeconds = ($after - $before).TotalSeconds }
+            }
+        }
+        $hour = $next
+    }
+    return @($found.Values | Sort-Object -Property AtUtc)
+}
+
+
 function Set-CamTestFileAge {
-    <# Backdates a file's write AND creation time; the pruner reads both. #>
+    <#
+        Backdates a file's write AND creation time; the pruner reads both. A
+        UTC $Time sets the exact instant, including one inside the repeated
+        hour of a fall-back that a local time cannot name.
+    #>
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [Parameter(Mandatory = $true)][DateTime]$Time

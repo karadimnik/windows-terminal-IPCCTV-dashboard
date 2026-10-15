@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -2476,7 +2476,7 @@ function Invoke-CamCheckPruneClock {
     $ok = $true
     $sandboxes = @()
     $script:CamTestClockShift = [TimeSpan]::Zero
-    function Get-CamWallClock { return [DateTime]::Now.Add($script:CamTestClockShift) }
+    function Get-CamWallClock { return [DateTime]::UtcNow.Add($script:CamTestClockShift) }
     try {
         $now = [DateTime]::Now
         $case = {
@@ -4525,6 +4525,199 @@ function Invoke-CamCheckPruneLoop {
 }
 
 
+function Invoke-CamCheckDst {
+    <#
+        T1 [86]: every age, elapsed and "is it due" computation across both
+        daylight-saving transitions of this machine's zone. Instants are built
+        in UTC a few minutes either side of each transition and fed two ways:
+
+          NEW  what the product supplies now - the seam Get-CamWallClock
+               (replaced here by the constructed UTC instant) and UTC file
+               times - through the product's own functions;
+          OLD  what it supplied before [86] - the local readings of the same
+               instants, which is what [DateTime]::Now and LastWriteTime
+               return - through the same function bodies, whose only change
+               was where their clock came from. Two bodies changed beyond that
+               and run here as they were at 46575e2: Get-CamSupervisorState's
+               Parse-then-subtract, and the pruner's clock check and age rule
+               on LastWriteTime.
+
+        PASS needs NEW to equal the true elapsed time and to decide correctly
+        at both transitions, AND OLD to be off by exactly the transition's
+        hour, so the check proves it is exercising a transition. The machine
+        clock is never touched.
+    #>
+    param($Run)
+
+    . (Get-CamTestRecorderFunctions -Name 'Test-CamChildStalled', 'Measure-CamCameraDown', 'Set-CamChildBackoff', 'Write-CamChildLine', 'Get-CamDirScan', 'Get-CamLiveFileLength', 'Invoke-CamPrune', 'Get-CamSegmentDirectories', 'Remove-CamEmptySegment', 'Write-CamHost')
+    function Write-CamHost { param($Message, $Colour) }
+    $evidence = @()
+    $ok = $true
+    $sandboxes = @()
+
+    $seam = Get-CamWallClock
+    $seamOk = ($seam.Kind -eq [DateTimeKind]::Utc -and [math]::Abs(([DateTime]::UtcNow - $seam).TotalSeconds) -lt 5)
+    $evidence += ("seam Get-CamWallClock: Kind {0}, {1:n3} s from UtcNow" -f $seam.Kind, ([DateTime]::UtcNow - $seam).TotalSeconds)
+    if (-not $seamOk) { $ok = $false; $evidence += 'FAIL: the seam is not UTC' }
+
+    $transitions = Get-CamTestDstTransitions
+    if ($transitions.Count -lt 2) {
+        Add-CamTestResult -Run $Run -Check 'dst' -Status 'SKIP' -Message ("time zone {0} has no daylight saving to test" -f [TimeZoneInfo]::Local.Id) -Evidence $evidence
+        return
+    }
+
+    $script:CamTestDstNow = $seam
+    function Get-CamWallClock { return $script:CamTestDstNow }
+    $local = { param([DateTime]$utc) $utc.ToLocalTime() }
+    $config = Get-CamConfigDefault
+    $config.SegmentSeconds = 900
+    $config.StallFactor = 2.5
+    $config.StatusIntervalSeconds = 5
+    $config.LogRepeatSuppressSeconds = 300
+    $config.BackoffStartSeconds = 60
+    $config.BackoffMaxSeconds = 60
+    $config.HealthyResetSeconds = 300
+
+    # One row per helper and transition. Old must be True + Sign x Delta.
+    $row = {
+        param([string]$Helper, [string]$Unit, [double]$TrueValue, [double]$Old, [double]$New, [double]$Sign, [bool]$Decided, [string]$Decision)
+        $rowOk = ([math]::Abs($New - $TrueValue) -lt 0.01) -and ([math]::Abs($Old - ($TrueValue + $Sign * $delta)) -lt 0.01) -and $Decided
+        $script:CamTestDstRowsOk = $script:CamTestDstRowsOk -and $rowOk
+        return ("{0} {1,-26} true {2,8:0.###} | OLD {3,8:0.###} | NEW {4,8:0.###} {5} - {6}{7}" -f `
+            $label, $Helper, $TrueValue, $Old, $New, $Unit, $Decision, $(if ($rowOk) { '' } else { '  <- FAIL' }))
+    }
+    $script:CamTestDstRowsOk = $true
+
+    try {
+        foreach ($transition in $transitions) {
+            $change = $transition.AtUtc
+            $delta = $transition.DeltaSeconds
+            $label = '{0,-13} {1:yyyy-MM-dd HH:mm}Z' -f $transition.Kind, $change
+            $A = $change.AddMinutes(-5)
+            $B = $change.AddMinutes(5)
+            $evidence += ("{0}: local {1:HH:mm:ss} -> {2:HH:mm:ss} for a real 600 s" -f $label, (& $local $A), (& $local $B))
+
+            # Watchdog age, fed by the product's directory scan.
+            $w = New-CamTestPruneRoot -Name ('dst-' + $transition.Kind)
+            $sandboxes += $w
+            $dir = Join-Path $w.Root 'Front_Entrance'
+            [void](New-Item -ItemType Directory -Path $dir -Force)
+            $closed = Join-Path $dir 'closed.mkv'
+            $current = Join-Path $dir 'current.mkv'
+            [System.IO.File]::WriteAllText($closed, 'c')
+            [System.IO.File]::WriteAllText($current, 'o')
+            $item = Get-Item -LiteralPath $closed; $item.CreationTimeUtc = $A.AddSeconds(-600); $item.LastWriteTimeUtc = $A.AddSeconds(-1)
+            $item = Get-Item -LiteralPath $current; $item.CreationTimeUtc = $A; $item.LastWriteTimeUtc = $A
+            $scan = Get-CamDirScan -Path $dir
+            $newestNew = $scan.NewestClosedWrite
+            if ($scan.CurrentCreated -gt $newestNew) { $newestNew = $scan.CurrentCreated }
+            $closedItem = Get-Item -LiteralPath $closed
+            $currentItem = Get-Item -LiteralPath $current
+            $newestOld = $closedItem.LastWriteTime
+            if ($currentItem.CreationTime -gt $newestOld) { $newestOld = $currentItem.CreationTime }
+            if ($scan.CurrentCreated.Kind -ne [DateTimeKind]::Utc -or $scan.CurrentCreated -ne $A -or $scan.NewestClosedWrite -ne $A.AddSeconds(-1)) {
+                $ok = $false; $evidence += ("FAIL: Get-CamDirScan did not return the UTC file times: CurrentCreated {0:o} ({1})" -f $scan.CurrentCreated, $scan.CurrentCreated.Kind)
+            }
+            $script:CamTestDstNow = $B
+            $new = Test-CamChildStalled -Entry @{ StartedAt = $A.AddHours(-1); Dir = $dir } -Config $config -Now (Get-CamWallClock) -NewestWriteTime $newestNew
+            $old = Test-CamChildStalled -Entry @{ StartedAt = (& $local $A.AddHours(-1)); Dir = $dir } -Config $config -Now (& $local $B) -NewestWriteTime $newestOld
+            $evidence += & $row 'watchdog age' 's' 600 $old.AgeSeconds $new.AgeSeconds 1 (-not $new.Stalled) ("limit {0} s: OLD kills={1}, NEW kills={2}" -f $new.Threshold, $old.Stalled, $new.Stalled)
+
+            # Alert 110's down time, from the same scan.
+            $newDown = Measure-CamCameraDown -Scan $scan -SupervisorStartedAt $A.AddHours(-1) -Now $B
+            $oldDown = Measure-CamCameraDown -Scan @{ NewestClosedWrite = $closedItem.LastWriteTime; CurrentCreated = $currentItem.CreationTime } -SupervisorStartedAt (& $local $A.AddHours(-1)) -Now (& $local $B)
+            $downLimit = [double]$config.CameraDownAlertMinutes * 60
+            $evidence += & $row 'alert 110 down time' 's' 600 $oldDown.Seconds $newDown.Seconds 1 ($newDown.Seconds -le $downLimit) ("limit {0} s: OLD alerts={1}, NEW alerts={2}" -f $downLimit, ($oldDown.Seconds -gt $downLimit), ($newDown.Seconds -gt $downLimit))
+
+            # Status, reconcile, archive scan and prune timers.
+            $newDue = Test-CamIntervalDue -Last $A -Seconds $config.StatusIntervalSeconds -Now $B
+            $oldDue = Test-CamIntervalDue -Last (& $local $A) -Seconds $config.StatusIntervalSeconds -Now (& $local $B)
+            $evidence += & $row 'status/timer due' 's' 600 ((& $local $B) - (& $local $A)).TotalSeconds ($B - $A).TotalSeconds 1 $newDue ("every {0} s: OLD due={1}, NEW due={2}" -f $config.StatusIntervalSeconds, $oldDue, $newDue)
+
+            # Restart due: backoff of 60 s scheduled 30 s before the change.
+            $entryNew = @{ Backoff = 0; NextStartAt = [DateTime]::MinValue }
+            $entryOld = @{ Backoff = 0; NextStartAt = [DateTime]::MinValue }
+            $script:CamTestDstNow = $change.AddSeconds(-30)
+            [void](Set-CamChildBackoff -Entry $entryNew -Config $config -RanForSeconds 0)
+            $script:CamTestDstNow = & $local $change.AddSeconds(-30)
+            [void](Set-CamChildBackoff -Entry $entryOld -Config $config -RanForSeconds 0)
+            $early = $change.AddSeconds(5)
+            $late = $change.AddSeconds(40)
+            $waitNew = ($entryNew.NextStartAt - $early).TotalSeconds
+            $waitOld = ($entryOld.NextStartAt - (& $local $early)).TotalSeconds
+            $dueNew = @(($early -ge $entryNew.NextStartAt), ($late -ge $entryNew.NextStartAt))
+            $dueOld = @(((& $local $early) -ge $entryOld.NextStartAt), ((& $local $late) -ge $entryOld.NextStartAt))
+            $evidence += & $row 'restart wait at +35 s' 's' 25 $waitOld $waitNew -1 ((-not $dueNew[0]) -and $dueNew[1]) ("due at +35 s/+70 s: OLD {0}/{1}, NEW {2}/{3}" -f $dueOld[0], $dueOld[1], $dueNew[0], $dueNew[1])
+
+            # Heartbeat freshness: written by the product 4 s before, read 4 s after.
+            $snapshotNew = [pscustomobject]@{ SupervisorPid = $PID; State = 'running'; UpdatedAt = (Format-CamTimestamp -Value $change.AddSeconds(-4)) }
+            $script:CamTestDstNow = $change.AddSeconds(4)
+            $stateNew = Get-CamSupervisorState -Config $config -Snapshot $snapshotNew
+            $oldText = (& $local $change.AddSeconds(-4)).ToString('o')
+            $oldAge = [math]::Round(((& $local $change.AddSeconds(4)) - [DateTime]::Parse($oldText, [System.Globalization.CultureInfo]::InvariantCulture)).TotalSeconds, 1)
+            $limit = [math]::Max(15, 3 * $config.StatusIntervalSeconds)
+            $compat = Get-CamDateTimeOrNull -Value $oldText
+            $evidence += & $row 'heartbeat age' 's' 8 $oldAge $stateNew.AgeSeconds 1 ($stateNew.Running -and $compat -eq $change.AddSeconds(-4)) ("limit {0} s: OLD running={1}, NEW running={2}; NEW writes {3}, reads the old text {4} as {5:o}" -f $limit, ($oldAge -le $limit), $stateNew.Running, $snapshotNew.UpdatedAt, $oldText, $compat)
+
+            # Log repeat suppression: the same message shape 600 s apart, window 300 s.
+            $logNew = Join-Path $w.Dir 'child-new.log'
+            $logOld = Join-Path $w.Dir 'child-old.log'
+            $entryNew = @{ LogSeen = @{}; LogPath = $logNew }
+            $entryOld = @{ LogSeen = @{}; LogPath = $logOld }
+            Write-CamChildLine -Entry $entryNew -Config $config -Line 'frame 1 dropped' -Now $A
+            Write-CamChildLine -Entry $entryNew -Config $config -Line 'frame 2 dropped' -Now $B
+            Write-CamChildLine -Entry $entryOld -Config $config -Line 'frame 1 dropped' -Now (& $local $A)
+            Write-CamChildLine -Entry $entryOld -Config $config -Line 'frame 2 dropped' -Now (& $local $B)
+            $linesNew = @(Get-Content -LiteralPath $logNew).Count
+            $linesOld = @(Get-Content -LiteralPath $logOld).Count
+            $evidence += & $row 'log repeat suppression' 's' 600 ((& $local $B) - (& $local $A)).TotalSeconds ($B - $A).TotalSeconds 1 ($linesNew -eq 2) ("window {0} s, lines logged: OLD {1}, NEW {2} (2 expected)" -f $config.LogRepeatSuppressSeconds, $linesOld, $linesNew)
+
+            # NVR host restart window: restarts 35 and 10 minutes old, window 30 minutes.
+            $restartsNew = New-Object System.Collections.ArrayList
+            $restartsOld = New-Object System.Collections.ArrayList
+            foreach ($at in @($B.AddMinutes(-35), $B.AddMinutes(-10))) { [void]$restartsNew.Add($at); [void]$restartsOld.Add((& $local $at)) }
+            $oldestOld = ((& $local $B) - $restartsOld[0]).TotalSeconds
+            $oldestNew = ($B - $restartsNew[0]).TotalSeconds
+            Remove-CamExpiredRestart -Restarts $restartsNew -WindowMinutes 30 -Now $B
+            Remove-CamExpiredRestart -Restarts $restartsOld -WindowMinutes 30 -Now (& $local $B)
+            $evidence += & $row 'NVR restart window age' 's' 2100 $oldestOld $oldestNew 1 ($restartsNew.Count -eq 1) ("restarts kept in the window: OLD {0}, NEW {1} (1 expected)" -f $restartsOld.Count, $restartsNew.Count)
+
+            # Retention cutoff and the pruner's clock check: 600 s retention,
+            # segments written 15 and 4 minutes before the change, the newest
+            # 30 s before the run.
+            $p = New-CamTestPruneRoot -Name ('dst-prune-' + $transition.Kind) -Config @{ MaxRetentionDays = (600 / 86400); MaxAgePruneFraction = 1.0 }
+            $sandboxes += $p
+            $fe = Join-Path $p.Root 'Front_Entrance'
+            $segments = @()
+            foreach ($at in @($change.AddMinutes(-15), $change.AddMinutes(-4), $B.AddSeconds(-30))) {
+                $path = New-CamTestSegment -Dir $fe -Camera 'Front_Entrance' -Time (& $local $at)
+                Set-CamTestFileAge -Path $path -Time $at
+                $segments += Get-Item -LiteralPath $path
+            }
+            [void](Initialize-CamArchiveOwner -Config $p.Config)
+            $script:CamTestDstNow = $B
+            $dry = Invoke-CamPrune -Config $p.Config -SupervisorLog $p.Log -DryRun
+            $deletedNew = @($dry.Deletions | ForEach-Object { if ($_ -match '\\(Front_Entrance_[^\\ ]+)') { $Matches[1] } })
+            $retention = [double]$p.Config.MaxRetentionDays
+            $cutoffOld = (& $local $B).AddDays(-$retention)
+            $deletedOld = @($segments[0..1] | Where-Object { $_.LastWriteTime -lt $cutoffOld } | ForEach-Object { $_.Name })
+            $asOld = @($segments | ForEach-Object { [pscustomobject]@{ FullName = $_.FullName; LastWriteTimeUtc = $_.LastWriteTime } })
+            $refusalOld = (Get-CamPruneClockProblem -Candidates $asOld[0..1] -Newest @($asOld[2]) -Segments $asOld -Now (& $local $B) -Config $p.Config) -replace '[A-Za-z]:\\\S*\\', ''
+            $ageOld = ((& $local $B) - $segments[1].LastWriteTime).TotalSeconds
+            $ageNew = ($B - $segments[1].LastWriteTimeUtc).TotalSeconds
+            $decided = (-not $dry.ClockRefusal) -and $deletedNew.Count -eq 1 -and $deletedNew[0] -eq $segments[0].Name
+            $evidence += & $row 'retention age (T-4m seg)' 's' 540 $ageOld $ageNew 1 $decided ("retention 600 s: OLD deletes {0} of 2{1}, NEW deletes {2} of 2 (1 expected: the T-15m one), NEW clock refusal '{3}'" -f `
+                    $deletedOld.Count, $(if ($refusalOld) { ", OLD clock check REFUSES: " + $refusalOld } else { '' }), $deletedNew.Count, $dry.ClockRefusal)
+        }
+        if (-not $script:CamTestDstRowsOk) { $ok = $false }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message + ' at ' + $_.InvocationInfo.PositionMessage) }
+
+    Complete-CamPruneCheck -Run $Run -Check 'dst' -Ok $ok -Evidence $evidence -Sandboxes $sandboxes `
+        -Message 'at both daylight-saving transitions of this zone every age, elapsed and due helper reads the true elapsed time and decides correctly, where the pre-[86] local-time logic is an hour out'
+}
+
+
 function Invoke-CamCheckDocSwitches {
     <#
         Every -Switch the documentation names must exist. Two rules, over
@@ -4718,6 +4911,7 @@ foreach ($check in $Checks) {
         'stallwatch' { Invoke-CamCheckStallWatch -Run $run }
         'logheld'   { Invoke-CamCheckLogHeld   -Run $run }
         'pruneloop' { Invoke-CamCheckPruneLoop -Run $run }
+        'dst'       { Invoke-CamCheckDst       -Run $run }
     }
 }
 
