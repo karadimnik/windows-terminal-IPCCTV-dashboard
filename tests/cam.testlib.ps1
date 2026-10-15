@@ -846,6 +846,11 @@ function Start-CamTestSyntheticCamera {
         # the recorder's ffmpeg warns, so a soak can fill a 2 MB camera log.
         [ValidateRange(2, 100)][int]$NonMonotonicEvery = 5,
         [ValidateRange(5, 120)][int]$FrameRate = 15,
+        # With both, reading needs this user and password (a wrong or absent
+        # one is refused); publishing stays open on loopback so the
+        # publishers need none. Fake credentials only.
+        [string]$ReadUser,
+        [string]$ReadPass,
         [int]$TimeoutSeconds = 20
     )
 
@@ -858,8 +863,14 @@ function Start-CamTestSyntheticCamera {
     $yml = @(
         'logLevel: info', 'logDestinations: [stdout]', 'api: no', 'metrics: no', 'pprof: no', 'playback: no',
         'rtsp: yes', 'rtspTransports: [tcp]', "rtspAddress: 127.0.0.1:$Port",
-        'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'moq: no', 'paths:'
-    ) + @($PathName | ForEach-Object { "  ${_}: {}" })
+        'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'moq: no'
+    )
+    if ($ReadUser -and $ReadPass) {
+        $yml += @('authMethod: internal', 'authInternalUsers:',
+            '  - user: any', "    pass:", "    ips: ['127.0.0.1']", '    permissions:', '      - action: publish',
+            "  - user: $ReadUser", "    pass: $ReadPass", '    ips: []', '    permissions:', '      - action: read')
+    }
+    $yml = $yml + @('paths:') + @($PathName | ForEach-Object { "  ${_}: {}" })
     [System.IO.File]::WriteAllText($config, (($yml -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
 
     $camera = [pscustomobject]@{
