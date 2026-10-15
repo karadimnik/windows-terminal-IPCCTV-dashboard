@@ -83,11 +83,17 @@ NOT known, and therefore measured in Stage 0 instead of assumed:
 ### Stage 1 - live view in the web app (the first thing the Operator asked for)
 
 Additive to `camui`; the existing Dashboard, Settings and Footage screens are untouched.
-- 1.1 **Relay:** a config flag `LiveViewEnabled` (default off) makes `-InstallRestreamer` also generate a
-  sub-stream path per camera and enables WebRTC on loopback. With the flag off the generated config is
-  byte-identical to today's.
-- 1.2 **A "Live" screen** in `camui`. The browser talks only to `camui` (same origin); `camui` proxies WHEP to
-  MediaMTX. One auth point, MediaMTX's port is never exposed, no camera URL in any response.
+- 1.1 **A dedicated live-view MediaMTX instance, NOT the recording relay** (design change, 2026-10-15, see the finding
+  below). The relay that the recorder reads through is not touched and gains no WebRTC. A second instance, started and
+  supervised the same way as the relay and only when `LiveViewEnabled` is true (default false), serves WebRTC on
+  loopback for the browser. Its paths: `<cam>sub` pulls the camera's `stream2` on demand (`sourceOnDemand`, so the
+  camera's second session is held only while someone watches); `<cam>main` pulls the recording relay's anonymous
+  loopback RTSP path (NO extra camera session). WebRTC read on it requires a login: no anonymous `any` user, one named
+  user whose random secret only the supervisor and `camui` can read, `webrtcAllowOrigins` empty, RTSP/API/HLS/other
+  listeners off. With the flag off nothing changes anywhere.
+- 1.2 **A "Live" screen** in `camui`. The browser talks only to `camui` (same origin; the Host and Origin guard from [91]
+  protects it); `camui` proxies WHEP to the live instance, adding the login server-side. No camera URL, no MediaMTX
+  address and no credential in any response.
 - 1.3 **Tile policy:** the grid uses sub-streams; clicking a tile focuses it on the main stream; audio muted by
   default, unmuted per tile.
 - 1.4 **State:** each tile shows what `status.json` already knows (alive, restarts, last error).
@@ -209,6 +215,18 @@ What that settles and what it opens:
   (`sourceOnDemand`), so the second session is held only while a viewer is connected. The old mpv dashboard on the
   relay shares the recorder's path and adds no session; a direct fallback would be a third and is refused.
 - **The recorder keeps using `stream1`** (unchanged).
+
+## Finding that changed Stage 1 (2026-10-15): MediaMTX's WebRTC port is open to any website
+
+Reproduced against a throwaway MediaMTX with WebRTC and the product's anonymous-read user: a CORS preflight from
+`Origin: http://evil.example` to `/cam1/whep` returned 204 with `Access-Control-Allow-Origin: http://evil.example` (an
+echo; the default `webrtcAllowOrigins` is `*`), a request with a rebinding `Host` and no credentials was not refused
+(404 only because that sandbox had no stream), and the built-in player page was served to a rebinding `Host`. MediaMTX has
+no Host check, and its internal users cannot be limited by protocol, so `read` allowed for RTSP is `read` allowed for
+WebRTC. Putting WebRTC on the shared relay would therefore let a web page the Operator visits negotiate a session and
+watch any path the relay serves. Not shown: a whole stream viewed cross-site (the Stage 1A test makes that a
+red-then-green test). Hence the dedicated instance: WebRTC read there needs a login the browser never has, and the
+recording relay never speaks WebRTC.
 
 ## WebRTC access control (design for Stages 1 and 2)
 
