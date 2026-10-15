@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -54,7 +54,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'relayapi', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'relayapi', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -965,6 +965,139 @@ function Invoke-CamCheckUiLeak {
         -Evidence $evidence
 }
 
+
+function Invoke-CamCheckUiGuard {
+    <#
+        The request guard, asked of the real binary rather than of the Go
+        tests. camui is started on loopback over a SANDBOX folder (a stub
+        cam.ps1, an empty status file, a throwaway archive), so nothing it
+        writes touches the Operator's files, and it is probed with raw HTTP so
+        every header goes out as written:
+
+          - the four probes a hostile page can mount against a loopback
+            service - a cross-site POST with no preflight, a DNS-rebinding
+            Host, a foreign Origin, and a state-changing POST that is not
+            JSON - must be refused, and must not have changed anything;
+          - a request shaped exactly like the page's own, and a plain script
+            request with neither Origin nor Sec-Fetch-Site, must be accepted;
+          - the page itself must still load.
+
+        The binary is the repository's camui.exe unless CAMUI_TEST_EXE names
+        another one. Against a camui.exe built before the guard this check
+        FAILS, which is the point: rebuild with ui/build.sh.
+    #>
+    param($Run)
+
+    $source = $env:CAMUI_TEST_EXE
+    if (-not $source) { $source = Join-Path -Path $repo -ChildPath 'camui.exe' }
+    if (-not (Test-Path -LiteralPath $source)) {
+        Add-CamTestResult -Run $Run -Check 'uiguard' -Status 'SKIP' -Message 'camui.exe is not built; run ui/build.sh'
+        return
+    }
+
+    $sandbox = Join-Path -Path $env:TEMP -ChildPath ('cam-tests\uiguard-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $state = Join-Path -Path $sandbox -ChildPath 'arch\_state'
+    [void](New-Item -ItemType Directory -Path $state -Force)
+    Set-Content -LiteralPath (Join-Path -Path $sandbox -ChildPath 'cam.ps1') -Value '# stub'
+    Set-Content -LiteralPath (Join-Path -Path $sandbox -ChildPath 'cameras.json') -Value '[]'
+    Set-Content -LiteralPath (Join-Path -Path $sandbox -ChildPath 'recorder.config.json') -Value '{}'
+    $statusFile = Join-Path -Path $state -ChildPath 'status.json'
+    Set-Content -LiteralPath $statusFile -Value '{"Schema":1,"State":"stopped"}'
+    $ackFile = Join-Path -Path $state -ChildPath 'camui-acknowledged.json'
+
+    $ui = Start-CamTestUi -Port 18788 -StatusFile $statusFile -ScriptDir $sandbox -Source $source
+    if (-not $ui.Started) {
+        Add-CamTestResult -Run $Run -Check 'uiguard' -Status 'SKIP' -Message $ui.Reason
+        if ($ui.Process) { [void](Stop-CamTestUi -Ui $ui) }
+        Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+        return
+    }
+
+    $ok = $true
+    $evidence = @(("camui {0} from {1}, sandbox {2}" -f $ui.BaseUrl, $source, $sandbox))
+    $ackBody = '{"notice":"LastWindowClose","at":"2026-01-01 00:00:00 +00:00"}'
+    $port = $ui.Port
+
+    # Dot-sourced (. $expect ...) so it updates $ok and $evidence in this scope.
+    $expect = {
+        param([string]$what, $response, [int[]]$want)
+        $pass = ($want -contains $response.Status)
+        if (-not $pass) { $ok = $false }
+        $evidence += ('  {0,-4} {1}: HTTP {2} (wanted {3})' -f $(if ($pass) { 'ok' } else { 'FAIL' }), $what, $response.Status, ($want -join ' or '))
+    }
+
+    try {
+        # --- refused ------------------------------------------------------
+        . $expect 'cross-site POST /api/acknowledge (Origin evil.example, Sec-Fetch-Site cross-site, text/plain)' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/acknowledge' -Body $ackBody -Headers ([ordered]@{
+                'Origin' = 'http://evil.example'; 'Sec-Fetch-Site' = 'cross-site'; 'Content-Type' = 'text/plain' })) @(403)
+        . $expect 'cross-site POST /api/control (same shape, harmless body)' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/control' -Body '{"scope":"none","action":"status"}' -Headers ([ordered]@{
+                'Origin' = 'http://evil.example'; 'Sec-Fetch-Site' = 'cross-site'; 'Content-Type' = 'text/plain' })) @(403)
+        . $expect 'GET /api/status with Host attacker-rebind.example (DNS rebinding)' `
+            (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Host' = 'attacker-rebind.example' })) @(403)
+        . $expect 'GET / with Host attacker-rebind.example (the page too)' `
+            (Invoke-CamRawHttp -Port $port -Path '/' -Headers ([ordered]@{ 'Host' = 'attacker-rebind.example:18788' })) @(403)
+        . $expect 'GET /api/status with a foreign Origin' `
+            (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Origin' = 'http://evil.example' })) @(403)
+        . $expect 'GET /api/status with Origin null' `
+            (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Origin' = 'null' })) @(403)
+        . $expect 'GET /api/status with Sec-Fetch-Site same-site' `
+            (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Sec-Fetch-Site' = 'same-site' })) @(403)
+        . $expect 'POST /api/control, text/plain, no Origin (a script)' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/control' -Body '{"scope":"none","action":"status"}' -Headers ([ordered]@{ 'Content-Type' = 'text/plain' })) @(415)
+        . $expect 'POST /api/acknowledge, form-urlencoded, no Origin' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/acknowledge' -Body $ackBody -Headers ([ordered]@{ 'Content-Type' = 'application/x-www-form-urlencoded' })) @(415)
+        . $expect 'PUT /api/config, no content type' `
+            (Invoke-CamRawHttp -Port $port -Method PUT -Path '/api/config' -Body '{"config":{}}') @(415)
+
+        $changed = Test-Path -LiteralPath $ackFile
+        if ($changed) { $ok = $false }
+        $evidence += ('  {0,-4} none of the refused requests wrote the acknowledgement file (present: {1})' -f $(if ($changed) { 'FAIL' } else { 'ok' }), $changed)
+
+        # --- accepted -----------------------------------------------------
+        $page = Invoke-CamRawHttp -Port $port -Path '/' -Headers ([ordered]@{ 'Sec-Fetch-Site' = 'none' })
+        . $expect 'GET / (the page, as typed in the address bar)' $page @(200)
+        $titled = ($page.Body -match '<html')
+        if (-not $titled) { $ok = $false }
+        $evidence += ('  {0,-4} the page body is the HTML UI (found <html: {1})' -f $(if ($titled) { 'ok' } else { 'FAIL' }), $titled)
+
+        $api = Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{
+            'Origin' = ('http://127.0.0.1:{0}' -f $port); 'Sec-Fetch-Site' = 'same-origin' })
+        . $expect 'GET /api/status shaped like the page own fetch (same-origin)' $api @(200)
+        foreach ($pair in @(@('cross-origin-resource-policy', 'same-origin'), @('x-content-type-options', 'nosniff'), @('cache-control', 'no-store'))) {
+            $got = $api.Headers[$pair[0]]
+            $pass = ($got -eq $pair[1])
+            if (-not $pass) { $ok = $false }
+            $evidence += ('  {0,-4} /api/status header {1}: {2}' -f $(if ($pass) { 'ok' } else { 'FAIL' }), $pair[0], $got)
+        }
+
+        . $expect 'POST /api/acknowledge shaped like the page own (same-origin Origin, Sec-Fetch-Site same-origin, application/json)' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/acknowledge' -Body $ackBody -Headers ([ordered]@{
+                'Origin' = ('http://127.0.0.1:{0}' -f $port); 'Sec-Fetch-Site' = 'same-origin'
+                'Content-Type' = 'application/json' })) @(200)
+        $written = Test-Path -LiteralPath $ackFile
+        if (-not $written) { $ok = $false }
+        $evidence += ('  {0,-4} the accepted request changed state (acknowledgement file written: {1})' -f $(if ($written) { 'ok' } else { 'FAIL' }), $written)
+
+        . $expect 'POST /api/acknowledge from a script (no Origin, no Sec-Fetch-Site, application/json; charset=utf-8)' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/acknowledge' -Body $ackBody -Headers ([ordered]@{
+                'Content-Type' = 'application/json; charset=utf-8' })) @(200)
+        . $expect 'GET /api/status with Host localhost:18788' `
+            (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Host' = ('localhost:{0}' -f $port) })) @(200)
+        . $expect 'GET /api/status with Host [::1]:18788 (the name is allowed even though camui listens on IPv4 only)' `
+            (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Host' = ('[::1]:{0}' -f $port) })) @(200)
+    }
+    finally {
+        $logLines = @(Stop-CamTestUi -Ui $ui)
+        Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $evidence += @($logLines | Where-Object { $_ -match 'request refused' } | Select-Object -First 3 | ForEach-Object { '  log: ' + $_ })
+
+    Add-CamTestResult -Run $Run -Check 'uiguard' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
+        -Message 'camui refuses a cross-site POST, a DNS-rebinding Host, a foreign Origin and a non-JSON state change, and still serves the page and a request shaped like its own' `
+        -Evidence $evidence
+}
 
 function Invoke-CamCheckCrashSafe {
     <#
@@ -6108,6 +6241,7 @@ foreach ($check in $Checks) {
         'nvrstart'   { Invoke-CamCheckNvrStart   -Run $run }
         'leak'       { Invoke-CamCheckLeak       -Run $run }
         'uileak'     { Invoke-CamCheckUiLeak     -Run $run }
+        'uiguard'    { Invoke-CamCheckUiGuard    -Run $run }
         'procs'      { Invoke-CamCheckProcs      -Run $run }
         'relay'      { Invoke-CamCheckRelay      -Run $run }
         'prunematrix' { Invoke-CamCheckPruneMatrix -Run $run }
