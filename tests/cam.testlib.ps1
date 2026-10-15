@@ -341,10 +341,16 @@ function Start-CamTestUi {
         [int]$Port = 18787,
         [string]$StatusFile,
         [string]$ScriptDir,
-        [string]$Token
+        [string]$Token,
+        # A different binary to start: this, else CAMUI_TEST_EXE, else the
+        # repository's camui.exe. Whichever it is, it is copied, never run in
+        # place.
+        [string]$Source
     )
 
-    $source = Join-Path -Path (Get-CamTestRepo) -ChildPath 'camui.exe'
+    if (-not $Source) { $Source = $env:CAMUI_TEST_EXE }
+    if (-not $Source) { $Source = Join-Path -Path (Get-CamTestRepo) -ChildPath 'camui.exe' }
+    $source = $Source
     if (-not (Test-Path -LiteralPath $source)) {
         return [pscustomobject]@{ Started = $false; Reason = 'camui.exe is not built; run ui/build.sh' }
     }
@@ -394,6 +400,70 @@ function Start-CamTestUi {
         StdOut     = $out
         StdErr     = $err
     }
+}
+
+
+function Invoke-CamRawHttp {
+    <#
+        One HTTP/1.1 request over a plain socket, so every header - Host,
+        Origin, Sec-Fetch-Site, Content-Type - goes out exactly as written.
+        The .NET web classes rewrite or refuse some of them, and the request
+        guard is a question about precisely those. Returns Status (0 when
+        there was no response), Headers (names lower-cased) and Body.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [string]$Method = 'GET',
+        [string]$Path = '/',
+        [System.Collections.IDictionary]$Headers = @{},
+        [string]$Body
+    )
+
+    $bytes = if ($Body) { [System.Text.Encoding]::UTF8.GetBytes($Body) } else { @() }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(('{0} {1} HTTP/1.1' -f $Method, $Path))
+    if (-not $Headers.Contains('Host')) { $lines.Add(('Host: 127.0.0.1:{0}' -f $Port)) }
+    foreach ($name in $Headers.Keys) { $lines.Add(('{0}: {1}' -f $name, $Headers[$name])) }
+    if ($bytes.Length -gt 0) { $lines.Add(('Content-Length: {0}' -f $bytes.Length)) }
+    $lines.Add('Connection: close')
+    $head = [System.Text.Encoding]::ASCII.GetBytes((($lines -join "`r`n") + "`r`n`r`n"))
+
+    $buffer = $null
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $client.ReceiveTimeout = 10000
+        $client.Connect('127.0.0.1', $Port)
+        $stream = $client.GetStream()
+        # One write: a server that refuses on the headers and closes before a
+        # second segment arrives would reset the connection under the client.
+        $request = New-Object byte[] ($head.Length + $bytes.Length)
+        [Array]::Copy($head, 0, $request, 0, $head.Length)
+        if ($bytes.Length -gt 0) { [Array]::Copy($bytes, 0, $request, $head.Length, $bytes.Length) }
+        $stream.Write($request, 0, $request.Length)
+        $buffer = New-Object System.IO.MemoryStream
+        $chunk = New-Object byte[] 8192
+        while (($n = $stream.Read($chunk, 0, $chunk.Length)) -gt 0) { $buffer.Write($chunk, 0, $n) }
+    }
+    catch {
+        if (-not $buffer -or $buffer.Length -eq 0) {
+            return [pscustomobject]@{ Status = 0; Headers = @{}; Body = ''; Error = $_.Exception.Message }
+        }
+    }
+    finally { $client.Close() }
+
+    $text = [System.Text.Encoding]::UTF8.GetString($buffer.ToArray())
+    $split = $text.IndexOf("`r`n`r`n")
+    $headText = if ($split -ge 0) { $text.Substring(0, $split) } else { $text }
+    $bodyText = if ($split -ge 0) { $text.Substring($split + 4) } else { '' }
+    $headerLines = $headText -split "`r`n"
+    $status = 0
+    if ($headerLines[0] -match '^HTTP/\d\.\d (\d{3})') { $status = [int]$Matches[1] }
+    $parsed = @{}
+    foreach ($line in ($headerLines | Select-Object -Skip 1)) {
+        $colon = $line.IndexOf(':')
+        if ($colon -gt 0) { $parsed[$line.Substring(0, $colon).ToLowerInvariant()] = $line.Substring($colon + 1).Trim() }
+    }
+    return [pscustomobject]@{ Status = $status; Headers = $parsed; Body = $bodyText; Error = '' }
 }
 
 
