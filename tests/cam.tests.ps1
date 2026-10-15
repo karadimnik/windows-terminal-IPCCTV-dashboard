@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -3579,6 +3579,206 @@ for ($i = 1; $i -le $Count; $i++) {
 }
 
 
+function Get-CamTestSegmentFiles {
+    <# The recorder segments in one camera folder, oldest created first. #>
+    param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$SafeName, [Parameter(Mandatory = $true)]$Config)
+    if (-not (Test-Path -LiteralPath $Dir)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Dir -File -Force | Where-Object { Test-CamSegmentName -Name $_.Name -SafeName $SafeName -Config $Config } |
+        Sort-Object -Property CreationTime)
+}
+
+
+function Get-CamTestSegmentTime {
+    <# The wall-clock start a segment's name records, or $null. #>
+    param([Parameter(Mandatory = $true)][string]$Name)
+    if ($Name -notmatch '_(\d{8}_\d{6})([+-]\d{4})\.') { return $null }
+    return [DateTime]::ParseExact($Matches[1], 'yyyyMMdd_HHmmss', [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+
+function Test-CamTestSandboxLeak {
+    <#
+        Evidence that a synthetic-camera sandbox held only its throwaway
+        credential: the store decrypts to the fake user, and the fake password
+        appears in none of the sandbox's logs or status files.
+    #>
+    param([Parameter(Mandatory = $true)]$Sandbox)
+    $credential = Import-Clixml -Path (Join-Path -Path $Sandbox.Dir -ChildPath 'camera_creds.xml')
+    $hits = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $Sandbox.Root -Recurse -File -Include '*.log', '*.log.1', '*.json')) {
+        if ([System.IO.File]::ReadAllText($file.FullName).Contains($credential.GetNetworkCredential().Password)) { $hits++ }
+    }
+    return [pscustomobject]@{ Ok = ($credential.UserName -eq 'fakeuser' -and $hits -eq 0); Text = ("credential user {0}; fake password found in {1} sandbox log/status file(s)" -f $credential.UserName, $hits) }
+}
+
+
+function Invoke-CamCheckSegments {
+    <#
+        A3: the production segment path, with the real supervisor recording a
+        synthetic camera through the product's own ffmpeg arguments at
+        SegmentSeconds 10.
+
+        - every file the recorder writes passes Test-CamSegmentName;
+        - after the first (partial) segment, each starts on a multiple of 10 s
+          of the wall clock (segment_atclocktime), its name agreeing with its
+          creation time;
+        - each closed segment is H.264 + pcm_alaw, 10 s within a second, and
+          starts at 0 (reset_timestamps);
+        - no zero-byte file is left behind while recording;
+        - a hard kill of the ffmpeg child mid-segment is restarted, the killed
+          segment stays readable; a kill before the segment's first write
+          leaves a zero-byte file, which is removed, while zero-byte foreign
+          files beside it survive.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $name = 'synth1'
+    $sandbox = New-CamTestSynthSandbox -Name 'segments' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = 10; StatusIntervalSeconds = 1; ReconcileSeconds = 2; BackoffStartSeconds = 1; BackoffMaxSeconds = 4 }
+    $config = $sandbox.Config
+    $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
+    $foreign = @('notes.txt', "${name}_20260101_000000+0300.mp4", "${name}_20260101_000010+0300.mkv.tmp")
+
+    $camera = $null
+    $process = $null
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        # Planted after the root is claimed: a foreign entry in an unclaimed
+        # root keeps it unclaimed, and that disables the cleanup under test.
+        [void](New-Item -ItemType Directory -Path $camDir -Force)
+        foreach ($leaf in $foreign) { [System.IO.File]::WriteAllBytes((Join-Path $camDir $leaf), [byte[]]@()) }
+        $evidence += ("synthetic camera: mediamtx pid {0} on 127.0.0.1:{1}, publisher pid {2}; sandbox supervisor pid {3}" -f `
+            $camera.MediaMtx.Id, $port, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id)
+
+        # Record until the first partial segment, four full ones and the open
+        # one exist, watching for an empty file among the closed ones.
+        $emptyClosed = @{}
+        $deadline = [DateTime]::Now.AddSeconds(90)
+        while ([DateTime]::Now -lt $deadline) {
+            $files = Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config
+            for ($i = 0; $i -lt $files.Count - 1; $i++) { if ($files[$i].Length -eq 0) { $emptyClosed[$files[$i].Name] = $true } }
+            if ($files.Count -ge 6) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        $files = Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config
+        $closed = @($files | Select-Object -First ($files.Count - 1))
+        $evidence += ("{0} segment file(s) after {1}s, {2} closed; zero-byte closed segments seen while recording: {3}" -f `
+            $files.Count, [int]([DateTime]::Now - $process.StartTime).TotalSeconds, $closed.Count, $emptyClosed.Count)
+        if ($closed.Count -lt 5 -or $emptyClosed.Count) { $ok = $false; $evidence += 'FAIL: fewer than 4 full closed segments, or an empty closed segment was left' }
+
+        for ($i = 0; $i -lt $closed.Count; $i++) {
+            $file = $closed[$i]
+            $at = Get-CamTestSegmentTime -Name $file.Name
+            $skew = ($file.CreationTime - $at).TotalSeconds
+            $probe = Get-CamTestSegmentProbe -Path $file.FullName -FfprobePath $config.FfprobePath
+            $line = "{0} {1,8} B  created {2}s from its name  {3}  start {4}  duration {5}" -f `
+                $file.Name, $file.Length, (Format-CamNumber -Value $skew -Format '+0.0;-0.0'), ($probe.Codecs -join '+'), (Format-CamNumber -Value $probe.Start -Format '0.000'), (Format-CamNumber -Value $probe.Duration -Format '0.000')
+            $bad = @()
+            if (($probe.Codecs -notcontains 'h264') -or ($probe.Codecs -notcontains 'pcm_alaw')) { $bad += 'codecs' }
+            if ($null -eq $probe.Start -or $probe.Start -gt 0.5) { $bad += 'start not reset' }
+            if ([math]::Abs($skew) -gt 2) { $bad += 'name disagrees with creation time' }
+            if ($i -eq 0) { $line += '  (first: starts when recording did, so neither aligned nor full)' }
+            else {
+                if ($at.Second % 10 -ne 0) { $bad += 'not on a 10 s boundary' }
+                if ($null -eq $probe.Duration -or [math]::Abs($probe.Duration - 10) -gt 1) { $bad += 'duration' }
+            }
+            if ($bad.Count) { $ok = $false; $line += '  FAIL: ' + ($bad -join ', ') }
+            $evidence += $line
+        }
+
+        # Kill 1: mid-segment, with footage already on disk.
+        $deadline = [DateTime]::Now.AddSeconds(15)
+        do {
+            Start-Sleep -Milliseconds 200
+            $current = @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config)[-1]
+            $current.Refresh()
+        } while ([DateTime]::Now -lt $deadline -and -not ((([DateTime]::Now - $current.CreationTime).TotalSeconds -ge 6) -and $current.Length -gt 0))
+        $victim = Get-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name
+        $killed = Stop-CamTestChildHard -ProcessId $victim
+        $restarted = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -Not $victim -TimeoutSeconds 20
+        $current.Refresh()
+        $probe = Get-CamTestSegmentProbe -Path $current.FullName -FfprobePath $config.FfprobePath
+        $evidence += ("kill 1, {0}s into {1}: pid {2} killed={3}, restarted as pid {4}; the killed segment is {5} B, {6}, duration {7}" -f `
+            (Format-CamNumber -Value ([DateTime]::Now - $current.CreationTime).TotalSeconds -Format '0.0'), $current.Name, $victim, $killed, $restarted, $current.Length, ($probe.Codecs -join '+'), $(if ($null -eq $probe.Duration) { 'none (killed mid-write)' } else { $probe.Duration }))
+        if ($victim -le 0 -or -not $killed -or $restarted -le 0 -or $current.Length -le 0 -or $probe.Codecs -notcontains 'h264') {
+            $ok = $false; $evidence += 'FAIL: the child was not restarted, or the segment it was writing is not readable'
+        }
+
+        # Kill 2: the restarted child's first segment, before its first write
+        # reaches disk. ffmpeg writes in 256 KB blocks, so a new segment is
+        # empty for about a second and a half. Sizes are read through a
+        # handle: the directory entry of an open file goes stale on NTFS.
+        $restartedAt = [DateTime]::Now
+        $victim2 = $restarted
+        $empty = $null
+        $emptyBytes = -1
+        $deadline = [DateTime]::Now.AddSeconds(15)
+        while ([DateTime]::Now -lt $deadline -and -not $empty) {
+            $fresh = @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config | Where-Object { $_.CreationTime -gt $current.CreationTime })
+            if ($fresh.Count -and (Get-CamTestLiveLength -Path $fresh[-1].FullName) -eq 0) { $empty = $fresh[-1] } else { Start-Sleep -Milliseconds 50 }
+        }
+        $killed2 = Stop-CamTestChildHard -ProcessId $victim2
+        if ($empty) { $emptyBytes = Get-CamTestLiveLength -Path $empty.FullName }
+        $restarted2 = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -Not $victim2 -TimeoutSeconds 20
+        Start-Sleep -Seconds 2
+        $emptyName = $(if ($empty) { $empty.Name } else { '(no empty segment caught)' })
+        $emptyGone = ($empty -and -not (Test-Path -LiteralPath $empty.FullName))
+        $survivors = @($foreign | Where-Object { Test-Path -LiteralPath (Join-Path $camDir $_) })
+        $removedLines = @(Get-Content -LiteralPath $sandbox.SupervisorLog | Where-Object { $_ -like '*removed empty segment*' -or $_ -like '*empty foreign file*' -or $_ -like '*empty file(s)*' })
+        $evidence += ("kill 2, before the first write: {0} was {1} B when pid {2} was killed ({3}); restarted as pid {4}; removed={5}; zero-byte foreign files surviving {6}/{7}" -f `
+            $emptyName, $emptyBytes, $victim2, $killed2, $restarted2, $emptyGone, $survivors.Count, $foreign.Count)
+        $evidence += @($removedLines | ForEach-Object { '  log: ' + $_ })
+        if (-not $empty -or $emptyBytes -ne 0 -or -not $killed2 -or $restarted2 -le 0 -or -not $emptyGone -or $survivors.Count -ne $foreign.Count) {
+            $ok = $false; $evidence += 'FAIL: the empty segment of a killed child was left behind, or a foreign empty file was removed'
+        }
+
+        # Recording carries on after both kills.
+        $deadline = [DateTime]::Now.AddSeconds(25)
+        $after = @()
+        while ([DateTime]::Now -lt $deadline) {
+            $after = @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $config | Where-Object { $_.CreationTime -gt $restartedAt })
+            if ($after.Count -ge 2 -and $after[-2].Length -gt 0) { break }
+            Start-Sleep -Milliseconds 500
+        }
+        $status = (Get-CamTestStatusJson -Sandbox $sandbox).Snapshot
+        $row = @($status.Cameras)[0]
+        $evidence += ("after the kills: {0} new segment(s) ({1}); status State {2}, RestartsLastHour {3}, LastError '{4}'" -f `
+            $after.Count, (@($after | ForEach-Object { "$($_.Name) $($_.Length) B" }) -join ', '), $status.State, $row.RestartsLastHour, $row.LastError)
+        if ($after.Count -lt 2 -or $after[-2].Length -le 0 -or $status.State -ne 'running' -or [int]$row.RestartsLastHour -ne 2) {
+            $ok = $false; $evidence += 'FAIL: recording did not carry on after the kills, or the restarts were not counted'
+        }
+
+        $names = @(Get-ChildItem -LiteralPath $camDir -File | Where-Object { $foreign -notcontains $_.Name })
+        $badNames = @($names | Where-Object { -not (Test-CamSegmentName -Name $_.Name -SafeName $name -Config $config) })
+        $evidence += ("{0} file(s) written by the recorder, {1} failing Test-CamSegmentName {2}" -f $names.Count, $badNames.Count, (@($badNames | ForEach-Object { $_.Name }) -join ', '))
+        if ($badNames.Count) { $ok = $false }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $survivors = @($foreign | Where-Object { Test-Path -LiteralPath (Join-Path $camDir $_) })
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $alerts = 0
+    if (Test-Path -LiteralPath $sandbox.AlertLog) { $alerts = @(Get-Content -LiteralPath $sandbox.AlertLog).Count }
+    $evidence += ("after -Stop: foreign files surviving {0}/{1}; {2}; alerts recorded by the stub {3}" -f $survivors.Count, $foreign.Count, $leak.Text, $alerts)
+    if ($survivors.Count -ne $foreign.Count -or -not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'segments' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\segments.none') }) `
+        -Message 'the real supervisor records clock-aligned, correctly named H.264 + pcm_alaw segments, restarts a killed child and removes only its own empty segment'
+}
+
+
 function Invoke-CamCheckDocSwitches {
     <#
         Every -Switch the documentation names must exist. Two rules, over
@@ -3766,6 +3966,7 @@ foreach ($check in $Checks) {
         'docswitches' { Invoke-CamCheckDocSwitches -Run $run }
         'doclinks' { Invoke-CamCheckDocLinks -Run $run }
         'logrotate' { Invoke-CamCheckLogRotate -Run $run }
+        'segments'  { Invoke-CamCheckSegments  -Run $run }
     }
 }
 

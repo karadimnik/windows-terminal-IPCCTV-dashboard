@@ -3529,6 +3529,9 @@ function Invoke-CamSupervisor {
                         $entry.Process = $null
                         $entry.ReadTask = $null
                         $entry.ReadStream = $null
+                        # A child that died on its own leaves the same empty
+                        # segment as one the supervisor stopped.
+                        Remove-CamEmptySegment -Entry $entry -Config $Config -SupervisorLog $supervisorLog
                         $entry.RestartCount = $entry.RestartCount + 1
                         [void]$entry.Restarts.Add($now)
                         $entry.LastError = "ffmpeg exited with code $exitCode after $([int]$ranFor)s"

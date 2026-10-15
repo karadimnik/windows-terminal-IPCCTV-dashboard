@@ -1007,6 +1007,113 @@ function New-CamTestSynthSandbox {
 }
 
 
+function Get-CamTestChildPid {
+    <#
+        The pid status.json reports for one camera's recorder child, or 0.
+        Only a pid that is alive, is ffmpeg.exe and is a CHILD of this sandbox
+        supervisor is returned, so a caller that kills it can never hit an
+        ffmpeg of the Operator's.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Sandbox,
+        [Parameter(Mandatory = $true)]$SupervisorProcess,
+        [Parameter(Mandatory = $true)][string]$CameraName
+    )
+
+    $status = Get-CamTestStatusJson -Sandbox $Sandbox
+    if (-not $status) { return 0 }
+    $childPid = 0
+    foreach ($row in @($status.Snapshot.Cameras)) { if ($row.Name -eq $CameraName -and $row.Pid) { $childPid = [int]$row.Pid } }
+    if ($childPid -le 0) { return 0 }
+    $process = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $childPid" -ErrorAction SilentlyContinue
+    if (-not $process -or $process.Name -ne 'ffmpeg.exe' -or [int]$process.ParentProcessId -ne $SupervisorProcess.Id) { return 0 }
+    return $childPid
+}
+
+
+function Wait-CamTestChildPid {
+    <# Waits for a recorder child other than -Not to be reported; returns its pid, or 0 on timeout. #>
+    param(
+        [Parameter(Mandatory = $true)]$Sandbox,
+        [Parameter(Mandatory = $true)]$SupervisorProcess,
+        [Parameter(Mandatory = $true)][string]$CameraName,
+        [int]$Not = 0,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::Now.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::Now -lt $deadline) {
+        $childPid = Get-CamTestChildPid -Sandbox $Sandbox -SupervisorProcess $SupervisorProcess -CameraName $CameraName
+        if ($childPid -gt 0 -and $childPid -ne $Not) { return $childPid }
+        Start-Sleep -Milliseconds 200
+    }
+    return 0
+}
+
+
+function Stop-CamTestChildHard {
+    <#
+        Hard-kills one recorder child by pid, the way a crash ends it, and
+        waits for it to exit. The pid must come from Get-CamTestChildPid.
+        Returns $true once it has gone.
+    #>
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $process) { return $true }
+    try { $process.Kill() } catch { }
+    return $process.WaitForExit(10000)
+}
+
+
+function Get-CamTestLiveLength {
+    <#
+        A file's true length, read through a handle. The directory entry of a
+        file another process holds open is not refreshed on NTFS, so
+        FileInfo.Length can say 0 for a segment that already has data.
+        -1 when the file is gone.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+            ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        try { return $stream.Length } finally { $stream.Dispose() }
+    }
+    catch { return -1 }
+}
+
+
+function Get-CamTestSegmentProbe {
+    <#
+        ffprobe's view of one segment: the codec of every stream, the format
+        start time and duration. Duration is $null for a file whose writer
+        was killed, because a matroska file stopped mid-write has no duration
+        element.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$FfprobePath = (Get-CamConfigDefault).FfprobePath
+    )
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $json = (& $FfprobePath -v error -show_entries 'format=duration,start_time:stream=codec_name' -of json $Path 2>&1) -join "`n" }
+    finally { $ErrorActionPreference = $previous }
+    $codecs = @()
+    $start = $null
+    $duration = $null
+    try {
+        $parsed = ConvertFrom-Json -InputObject $json
+        foreach ($stream in @($parsed.streams)) { $codecs += [string]$stream.codec_name }
+        $value = 0.0
+        if ([double]::TryParse([string]$parsed.format.start_time, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { $start = $value }
+        if ([double]::TryParse([string]$parsed.format.duration, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$value)) { $duration = $value }
+    }
+    catch { }
+    return [pscustomobject]@{ Codecs = $codecs; Start = $start; Duration = $duration; Raw = $json }
+}
+
+
 # ---------------------------------------------------------------------------
 # A warden and the window it watches
 # ---------------------------------------------------------------------------
