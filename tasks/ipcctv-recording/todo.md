@@ -1346,3 +1346,11 @@ The Operator approved all four. Documentation only; no code touched.
   developed on the branch `portable-nvr`, started from this repository's master, and when finished it moves to its
   own repository. Its plan lives only on that branch. Do not merge `portable-nvr` into master, do not copy its
   files here, do not push it to this repository's `master`. This repository keeps working exactly as it is.
+
+- **[24] soak DONE 2026-10-15** (merged locally, `-Checks soak`, named only). 33 min at the production defaults: two
+  complete 900 s segments (900.018 s, 900.117 s, quarter-hour aligned), `recorder.log` and the camera log rolled at 2 MB
+  with nothing lost, 0 restarts, 0 alerts, status gap max 6.7 s, handles flat, ffmpeg flat. ONE OPEN OBSERVATION:
+  supervisor memory rose about 1.3 MB/min between minutes 10 and 30 (then levelled), under a camera about 840x noisier
+  than a real one. A micro-test showed `Write-CamLog` (old and new) is flat over 45,000 calls, so the cause is unproven
+  (a leak elsewhere, or collector drift). Worst case scaled to real log rates is about 2 MB/day. The check reports
+  memory but only fails on handles. FOLLOW-UP (cheap, report-only): a 60-minute soak on a QUIET camera.
