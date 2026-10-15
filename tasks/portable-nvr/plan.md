@@ -3,6 +3,18 @@
 Status: DRAFT for the Operator, 2026-10-15. Nothing here is built. Origin: the Operator's direction in
 `tasks/ipcctv-recording/todo.md` [87].
 
+## WHERE THIS LIVES - the Operator's rule (2026-10-15)
+
+**This project never reaches `master`/`main` of the `windows-terminal-IPCCTV-dashboard` repository.** It is developed
+on the branch `portable-nvr`, which starts from that repository's master, and **when it is finished it moves to its
+own repository.** This plan exists only on that branch. The original repository keeps working exactly as it is.
+A local `pre-push` hook in the original repository refuses any push that names this branch or carries a commit
+touching `tasks/portable-nvr/`. Because it is a fork, the new system's copy of `camui` (`ui/`) evolves on this branch
+and the original `ui/` on master stays untouched.
+
+**Order agreed with the Operator:** the soak, then Stage 1b (the mpv password fix, done in the ORIGINAL repository on
+master) are finished before Stage 0 of this project starts.
+
 ## The brief, in the Operator's words
 
 > "We currently have a web app that serves as a configuration page, partly as a dashboard and playback. We
@@ -17,10 +29,11 @@ work can stop after any of them.
 
 ## Rules that govern every stage
 
-1. **Nothing is removed and nothing existing changes behaviour.** The PowerShell recorder, supervisor, mpv
-   grid, health strip, `cam.ps1` and `camui` keep working exactly as today. New behaviour is additive: new
-   screens, new endpoints, new binaries, new config keys that default to off. The full harness (40 checks
-   today) must stay green at every merge. No stage deletes a file.
+1. **Nothing is removed and nothing existing changes behaviour.** The PowerShell recorder, supervisor, mpv grid, health
+   strip, `cam.ps1` and `camui` on master keep working exactly as today, because this work happens on a separate
+   branch and ends in a separate repository. Inside this fork the same discipline applies stage by stage: new behaviour
+   is additive (new screens, endpoints, binaries, config keys that default to off), and the full harness inherited
+   from master (40 checks today) stays green on the branch. No stage deletes a file.
 2. **Credentials never reach a browser.** No camera URL, password or `rtsp://` string appears in any response
    or page. This is a test (`uileak`), extended with every new endpoint. (Frigate CVE-2026-33469 leaked
    camera credentials to any logged-in viewer.)
@@ -83,13 +96,13 @@ Additive to `camui`; the existing Dashboard, Settings and Footage screens are un
   flag off, everything behaves as before; the full harness green.
 - **Gate:** the Operator compares it with the mpv grid. Both keep working.
 
-### Stage 1b - the mpv password exposure (independent, small, queued)
+### Stage 1b - the mpv password exposure (in the ORIGINAL repository, done BEFORE Stage 0)
 
 Verified 2026-10-15 by experiment: starting mpv idle (`--idle=once --input-ipc-server=<pipe>`) and sending the
 URL through the JSON IPC `loadfile` keeps the password off mpv's command line; the current direct-fallback
 launch exposes it. The change is one function (`cam.common.ps1`, the mpv launch near line 1043). Caveats: the
 pipe's access control was not tested with a second user; relay panes carry no credential and are unaffected.
-Needs the usage limit to reset before it can be commissioned.
+Commissioned on master of the original repository, ahead of this project, as the Operator asked.
 
 ### Stage 2 - the LAN
 
@@ -126,11 +139,28 @@ A new Go recorder, built beside the PowerShell one, ffmpeg still an external dep
 
 ### Stage 5 - a portable supervisor and control plane
 
-- Replaces the host, wardens and windows of the PowerShell stack with one supervisor: crash policy, one place
-  to stop everything (`stop` from the UI and the command line), and the Operator's standing requirement kept:
-  running it in a foreground terminal and closing that terminal stops everything it owns.
-- Acceptance: the fault-injection checks of [24] and [84] re-expressed and green: held logs, stalled child,
-  killed supervisor, stop-then-start, clock steps.
+Replaces the host, wardens and windows of the PowerShell stack with one supervisor: crash policy, one place to
+stop everything, and the Operator's standing requirement kept.
+
+**How the terminal is involved.** Today the NVR runs as a tab in a Windows Terminal window, and closing that window
+stops everything: a Win32 job holds every child, and its only handle is held by a small warden process that lives
+OUTSIDE the window, because a process inside a window cannot reliably see its own window close (measured on this
+machine: the pane's console survived the window's death). The portable supervisor keeps the behaviour and drops
+the Windows Terminal dependency: "terminal" means any console (cmd, PowerShell, bash, a Linux or macOS terminal).
+It runs in one of two modes, the same binary:
+
+| Mode | Lifetime | How everything stops | Typical use |
+|---|---|---|---|
+| **Attached** | Owned by the terminal it was started in | Close the terminal, or Ctrl+C: Windows - the supervisor and its children sit in a job object with kill-on-close, its handle held by a tiny keeper outside the console; Linux and macOS - children in the supervisor's process group, SIGHUP on terminal close, parent-death signal as a backstop | Starting it by hand; the Operator's current habit of closing windows on purpose |
+| **Service** | Independent of any terminal | `stop` from the command line or the UI Stop button; the service manager (Scheduled Task, systemd, launchd) restarts it after a crash or reboot | Autostart at logon or boot |
+
+In both modes there is exactly one place that stops everything (`stop`, and the UI's button), and a stopped system
+stays stopped unless something is asked to start it: a deliberate close is never "repaired". The keeper design is the
+part to prove in a spike, because the Windows lesson was that the obvious in-process approach fails.
+Decision **D7** below.
+- Acceptance: the fault-injection checks of [24] and [84] re-expressed and green: held logs, stalled child, killed
+  supervisor, stop-then-start, clock steps; in attached mode, closing the terminal stops every child within a set
+  time on Windows and on Linux, with nothing orphaned; in service mode, a terminal closing changes nothing.
 
 ### Not planned: retiring the PowerShell stack
 
@@ -147,12 +177,13 @@ portability before remote access; the order above follows what he asked for.
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D1 | Where the new code lives | Stage 1 inside `ui/` (additive, behind a new screen). Stages 4-5 in a new Go module in this repo (working name `nvr/`) so the harness and docs stay shared. A separate repository only if and when he wants one. |
+| D1 | Where the new code lives | **DECIDED by the Operator:** on the branch `portable-nvr`, started from master, never merged into master, moved to its own repository when finished. |
 | D2 | Name of the new system | He chooses; none is needed before Stage 4. |
 | D3 | Tile policy | Sub-stream in the grid, main stream on focus, subject to Spike B. |
 | D4 | Order of Stages 2-5 | As listed; portability before the LAN is possible. |
 | D5 | Shadow-run length for Stage 4 | At least one full retention cycle, and across the 25 Oct clock change if possible. |
 | D6 | Keep the PowerShell recorder as a permanent fallback | Yes: it costs nothing and follows "nothing is removed". |
+| D7 | Autostart in attached or service mode (Stage 5) | Support both; the Operator picks the default at install. Attached keeps today's behaviour (a visible window you close to stop); service is headless and UI-controlled. |
 
 ## Sources used for this plan
 
