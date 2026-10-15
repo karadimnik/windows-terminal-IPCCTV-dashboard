@@ -355,6 +355,31 @@ function Show-CamRestreamerPlan {
 }
 
 
+function Write-CamRelayConfig {
+    <#
+        Writes the MediaMTX config Get-CamRelayConfigText renders to
+        RestreamerConfigPath. Temp-then-rename: MediaMTX watches this file and
+        reloads on change, so it must never read a half-written one.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$PathMap,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$ApiCredential
+    )
+
+    $configPath = [string]$Config.RestreamerConfigPath
+    $text = Get-CamRelayConfigText -Config $Config -PathMap $PathMap -ApiCredential $ApiCredential
+
+    $dir = Split-Path -Path $configPath -Parent
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+
+    $temp = "$configPath.tmp"
+    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+    [System.IO.File]::WriteAllText($temp, $text, (New-Object System.Text.UTF8Encoding($false)))
+    Move-CamFileAtomic -TempPath $temp -Path $configPath
+}
+
+
 function Invoke-CamInstallRestreamer {
     <#
         Generates the live MediaMTX config from cameras.json: one path per
@@ -364,6 +389,9 @@ function Invoke-CamInstallRestreamer {
         and the supervisor supplies the real URL on the child's environment
         block at launch, which is the only reason the camera password stays off
         the disk.
+
+        The control API's login is created here when it does not exist yet
+        (relay_api_creds.xml, DPAPI), and only its hash is written.
 
         The binary itself is not installed here. It is a 55 MB download that
         must not live in the repository, so this command verifies it is in place
@@ -387,19 +415,11 @@ function Invoke-CamInstallRestreamer {
     }
 
     $pathMap = Get-CamRelayPathMap -Cameras (Get-CamList)
-    $text = Get-CamRelayConfigText -Config $Config -PathMap $pathMap
+    $apiCredential = Get-CamRelayApiCredential -Create
+    Write-CamRelayConfig -Config $Config -PathMap $pathMap -ApiCredential $apiCredential
 
-    $dir = Split-Path -Path $configPath -Parent
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
-
-    # Temp-then-rename: MediaMTX watches this file and reloads on change, so it
-    # must never read a half-written one.
-    $temp = "$configPath.tmp"
-    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
-    [System.IO.File]::WriteAllText($temp, $text, (New-Object System.Text.UTF8Encoding($false)))
-    Move-CamFileAtomic -TempPath $temp -Path $configPath
-
-    Write-CamHost -Message ("wrote {0} ({1} path(s), no credentials)" -f $configPath, $pathMap.Count) -Colour 'Green'
+    Write-CamHost -Message ("wrote {0} ({1} path(s), no credentials; the control API needs the login in {2})" -f `
+            $configPath, $pathMap.Count, (Join-Path -Path $PSScriptRoot -ChildPath 'relay_api_creds.xml')) -Colour 'Green'
     Write-CamHost -Message ''
     Write-CamHost -Message ("  {0,-20} {1,-18} {2,-40} {3}" -f 'path', 'camera', 'consumers use', 'source arrives in')
     Show-CamRestreamerPlan -Config $Config -PathMap $pathMap
@@ -1442,7 +1462,10 @@ function Test-CamRestreamer {
     }
 
     $ready = @(Get-CamRelayReadyPaths -Config $Config)
-    if ($ready.Count -eq 0) {
+    if ((Get-CamRelayApiStatus) -eq 'denied') {
+        Add-CamTestResult -Check 'restreamer serving' -Status 'FAIL' -Detail ("the control API at {0} refused the product's login: consumers are kept on the relay but readiness is not visible. Restart with cam.ps1 -Stop and -Start" -f [string]$Config.RelayApiBase)
+    }
+    elseif ($ready.Count -eq 0) {
         Add-CamTestResult -Check 'restreamer serving' -Status 'INFO' -Detail ("not reachable at {0}: consumers will use the direct camera inputs" -f [string]$Config.RelayApiBase)
     }
     else {
@@ -1998,7 +2021,43 @@ function New-CamRelayEntry {
     # Path name -> camera, read from cameras.json at every start so an
     # -Enable or an IP change is picked up by the next restart.
     $entry.PathMap = $null
+    # True from the first refused control-API login until the next accepted
+    # one: the episode Update-CamRelayLoginEpisode alerts on once.
+    $entry.LoginRefused = $false
     return $entry
+}
+
+
+function Update-CamRelayLoginEpisode {
+    <#
+        Alerts ONCE per episode of the control API refusing the product's
+        login, judged from this process's most recent API answer.
+
+        A refused login is a configuration fault, not a dead relay (see
+        Invoke-CamRelayApi): every consumer is kept on the relay, which serves
+        RTSP without a login, but whether each path is serving can no longer
+        be seen. The alert's ALERT line in the supervisor log is the one log
+        line; nothing more until an accepted login ends the episode. A relay
+        that goes down meanwhile does not end it, so a restart loop cannot
+        repeat the alert. Neither line carries the login.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$SupervisorLog
+    )
+
+    $status = Get-CamRelayApiStatus
+    if ($status -eq 'denied' -and -not $Entry.LoginRefused) {
+        $Entry.LoginRefused = $true
+        [void](Send-CamAlert -Title "the restreamer refused the recorder's login" `
+                -Message ("The MediaMTX control API at {0} refused the product's login (HTTP 401). Viewers and recorders are kept on the relay, but whether each camera is being served cannot be seen. Restart with cam.ps1 -Stop and -Start: the restreamer start rewrites its config to the stored login." -f [string]$Config.RelayApiBase) `
+                -EventId 130 -EntryType 'Error' -LogPath $SupervisorLog -LogMaxBytes ([int]$Config.LogMaxBytes))
+    }
+    elseif ($status -eq 'ok' -and $Entry.LoginRefused) {
+        $Entry.LoginRefused = $false
+        Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message "the restreamer's control API accepts the product's login again"
+    }
 }
 
 
@@ -2040,11 +2099,23 @@ function Start-CamRelayChild {
     $pathMap = Get-CamRelayPathMap -Cameras (Get-CamList)
     $Entry.PathMap = $pathMap
 
+    # The control API's login, created here if this install predates it, and
+    # the config brought up to it before MediaMTX reads the file: an existing
+    # install upgrades on its next start with nothing to run by hand. The
+    # rewrite is the same render -InstallRestreamer writes.
+    $apiCredential = Get-CamRelayApiCredential -Create
+    $covered = Test-CamRelayConfigCurrent -Config $Config -PathMap $pathMap -ConfigPath $configPath
+    if (-not $covered.AuthCurrent) {
+        Write-CamRelayConfig -Config $Config -PathMap $pathMap -ApiCredential $apiCredential
+        Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes `
+            -Message ("rewrote {0}: its control API login was missing or not the stored one; the API now requires the product's login" -f $configPath)
+        $covered = Test-CamRelayConfigCurrent -Config $Config -PathMap $pathMap -ConfigPath $configPath
+    }
+
     # A camera missing from the file comes up with no path at all and quietly
     # stays on the direct input, so this is said loudly and started anyway: a
     # stale relay still serves the cameras it does know. The test is the set of
     # path names, not the rendered text - see Test-CamRelayConfigCurrent.
-    $covered = Test-CamRelayConfigCurrent -Config $Config -PathMap $pathMap -ConfigPath $configPath
     if (-not $covered.Current) {
         Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes `
             -Message ("WARNING: {0} Starting the restreamer with the file as it is." -f $covered.Detail)
@@ -2101,16 +2172,23 @@ function Start-CamRelayChild {
         $answered = $false
         while ((Get-CamWallClock) -lt $deadline) {
             if ($process.HasExited) { break }
-            if ($null -ne (Get-CamRelayApiJson -Config $Config -Route 'v3/paths/list')) { $answered = $true; break }
+            # A refused login is an answer too: the relay is up.
+            if ((Invoke-CamRelayApi -Config $Config -Route 'v3/paths/list').Status -ne 'down') { $answered = $true; break }
             Start-Sleep -Milliseconds 500
         }
         $ready = @()
         if ($answered) { $ready = @(Get-CamRelayReadyPaths -Config $Config) }
         $waited = ((Get-CamWallClock) - $Entry.StartedAt).TotalSeconds
-        $message = "restreamer control API {0} after {1}s, serving {2} of {3} path(s): {4}" -f `
-            $(if ($answered) { 'answered' } else { 'did not answer' }), `
-            (Format-CamNumber -Value $waited -Format '0.0'), `
-            $ready.Count, $pathMap.Count, (($ready | Sort-Object) -join ', ')
+        if ($answered -and (Get-CamRelayApiStatus) -eq 'denied') {
+            $message = "restreamer control API refused the product's login after {0}s: readiness is not visible, so every consumer is kept on the relay" -f `
+                (Format-CamNumber -Value $waited -Format '0.0')
+        }
+        else {
+            $message = "restreamer control API {0} after {1}s, serving {2} of {3} path(s): {4}" -f `
+                $(if ($answered) { 'answered' } else { 'did not answer' }), `
+                (Format-CamNumber -Value $waited -Format '0.0'), `
+                $ready.Count, $pathMap.Count, (($ready | Sort-Object) -join ', ')
+        }
         Write-CamLog -Path $SupervisorLog -Message $message -MaxBytes $Config.LogMaxBytes
     }
 }
@@ -3516,7 +3594,10 @@ function Invoke-CamSupervisor {
                 if (-not $candidate.Process -and $now -ge $candidate.NextStartAt) { $pendingStart = $true; break }
             }
             $relayReady = $null
-            if ($relay -and ($statusDue -or $pendingStart)) { $relayReady = @(Get-CamRelayReadyPaths -Config $Config) }
+            if ($relay -and ($statusDue -or $pendingStart)) {
+                $relayReady = @(Get-CamRelayReadyPaths -Config $Config)
+                Update-CamRelayLoginEpisode -Entry $relay -Config $Config -SupervisorLog $supervisorLog
+            }
 
             # Until when a child may be held back from starting, waiting for its
             # own relay path. It is the RESTREAMER'S age that decides, because

@@ -3,9 +3,10 @@
 #
 # This file is not usable as-is. `cam.recorder.ps1 -InstallRestreamer` renders
 # it to the path in recorder.config.json (RestreamerConfigPath, by default
-# C:\mediamtx\mediamtx.yml). Three placeholders are substituted: the RTSP
+# C:\mediamtx\mediamtx.yml). Five placeholders are substituted: the RTSP
 # bind address and the API bind address, both taken from RelayBase and
-# RelayApiBase so the addresses have one source of truth, and the paths block,
+# RelayApiBase so the addresses have one source of truth, the control API's
+# user name and password hash, from relay_api_creds.xml, and the paths block,
 # generated with one entry per camera in cameras.json. The placeholder tokens
 # are deliberately absent from these comments, because the substitution is a
 # plain text replacement over the whole file.
@@ -30,6 +31,34 @@ logDestinations: [stdout]
 readTimeout: 10s
 writeTimeout: 10s
 writeQueueSize: 2048             # 2048 packets ~ 40 s of one camera's audio+video
+
+# Who may do what. Without this block MediaMTX's built-in default lets ANY
+# local process call the control API with no login, and /v3/config/paths then
+# returns every camera's source URL - password included. Setting
+# authInternalUsers replaces the defaults, so the first entry restates the
+# default anonymous access the consumers rely on: publish, read and playback,
+# from any address (RTSP below is loopback only). The second is the product's
+# own API login, loopback only, API only. Nothing grants api, metrics or pprof
+# without a login. The password is never in this file: pass holds its SHA-256
+# (the sha256: form MediaMTX documents), and the password itself is in
+# relay_api_creds.xml beside the scripts, protected by DPAPI.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+        path:
+      - action: read
+        path:
+      - action: playback
+        path:
+  - user: __API_USER__
+    pass: __API_PASS__
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
 
 # Localhost control API. Used by the recorder's and the dashboard's per-attempt
 # readiness check and for diagnostics; it exposes no media.
