@@ -882,7 +882,9 @@ function Start-CamTestSyntheticCamera {
     }
 
     try {
-        $camera.MediaMtx = Start-Process -FilePath 'C:\mediamtx\mediamtx.exe' -ArgumentList @("`"$config`"") -PassThru -WindowStyle Hidden `
+        # A local working directory: started from the repository share MediaMTX
+        # writes files there, and it must never depend on the caller's folder.
+        $camera.MediaMtx = Start-Process -FilePath 'C:\mediamtx\mediamtx.exe' -ArgumentList @("`"$config`"") -PassThru -WindowStyle Hidden -WorkingDirectory $work `
             -RedirectStandardOutput $log -RedirectStandardError "$log.err"
         [void]$camera.MediaMtx.Handle
 

@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'viewerpw', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -54,7 +54,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'relayapi', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -2296,6 +2296,359 @@ Start-Sleep -Seconds 60
     Complete-CamPruneCheck -Run $Run -Check 'viewerpw' -Ok $ok -Evidence $evidence `
         -Sandboxes @([pscustomobject]@{ Dir = $dir; Log = (Join-Path $env:TEMP 'cam-tests\viewerpw.none') }) `
         -Message 'a credentialed direct URL never reaches a command line: mpv plays it, exits and returns on stream loss, still goes back to the relay, and a failed hand-over returns false without a process, a log line or an argument carrying the password'
+}
+
+
+function Invoke-CamCheckRelayApi {
+    <#
+        [89] The restreamer's control API requires the product's login, and a
+        refused login is never taken for a dead relay. Runs the REAL sandbox
+        supervisor and its MediaMTX (a sandbox copy of the binary, so its
+        working directory is local) against a synthetic camera; fake
+        credentials only; ports 18554 (camera), 18564 (relay RTSP) and 18567
+        (relay API).
+
+        (a) upgrade: an old-style config with no login and no login file, then
+            a supervisor start, produces the login, a config that requires it
+            and holds only its hash, and a working login;
+        (b) without a login every route answers 401 and carries no password;
+            the product's login is accepted; a wrong one gets 401; no response
+            carries Access-Control-Allow-Origin;
+        (c) anonymous RTSP read through the relay still works;
+        (d) the running relay starts refusing the login (its file is changed
+            under it): exactly one alert (130, Error) and one log line, no
+            consumer goes direct - a recorder killed meanwhile restarts on the
+            relay, and the camera whose path has no stream moves onto the
+            relay and keeps retrying rather than waiting - and an accepted
+            login ends the episode with one line;
+        (e) on a standalone relay from the generated file: anonymous publish
+            and read; the readiness helpers and the real Get-CamInputUrl give
+            the old answers with the right login, never "not ready" or direct
+            with a wrong or missing one, each decision bounded; and the old
+            answers when the relay is down;
+        (f) no secret on any command line (continuous sweeps with a positive
+            control), in any file, log, status.json or -Status output; the
+            login file is DPAPI-protected.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $camPort = 18554; $rtspPort = 18564; $apiPort = 18567
+    $camPw = 'FakePassword-DoNotUse-9c41'
+    $ffmpeg = (Get-CamConfigDefault).FfmpegPath
+    $ffprobe = Join-Path -Path (Split-Path -Parent $ffmpeg) -ChildPath 'ffprobe.exe'
+    $name = 'relayapi'
+    $dir = Join-Path -Path $env:TEMP -ChildPath "cam-tests\$name"
+    $fail = { param([string]$Text) $script:CamRelayApiOk = $false; $script:CamRelayApiEvidence += ('FAIL ' + $Text) }
+    $script:CamRelayApiOk = $true
+    $script:CamRelayApiEvidence = @()
+
+    $api = {
+        param([string]$Route, [string]$Login, [int]$TimeoutMs = 6000)
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$apiPort$Route")
+        $request.Proxy = $null; $request.Timeout = $TimeoutMs; $request.ReadWriteTimeout = $TimeoutMs
+        $request.Headers['Origin'] = 'http://evil.example'
+        if ($Login) { $request.Headers['Authorization'] = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Login)) }
+        $response = $null
+        try { $response = $request.GetResponse() } catch [System.Net.WebException] { $response = $_.Exception.Response }
+        if (-not $response) { return [pscustomobject]@{ Code = 0; Body = ''; Acao = ''; Ms = [int]$watch.ElapsedMilliseconds } }
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $body = $reader.ReadToEnd(); $reader.Dispose()
+        $result = [pscustomobject]@{ Code = [int]$response.StatusCode; Body = $body; Acao = [string]$response.Headers['Access-Control-Allow-Origin']; Ms = [int]$watch.ElapsedMilliseconds }
+        $response.Dispose()
+        return $result
+    }
+    $readStatus = {
+        $s = $null; try { $s = (Get-CamTestStatusJson -Sandbox $sandbox).Snapshot } catch { }
+        $rows = @{}
+        if ($s) { foreach ($row in @($s.Cameras)) { $rows[[string]$row.Name] = $row } }
+        return $rows
+    }
+    $countLines = {
+        param([string]$Path, [string]$Pattern)
+        if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+        return @(Get-Content -LiteralPath $Path | Where-Object { $_ -match $Pattern }).Count
+    }
+
+    $sampler = $null; $samplerHandle = $null; $camera = $null; $supervisor = $null; $standalone = $null; $publisher = $null; $control = $null
+    $state = [hashtable]::Synchronized(@{ Stop = $false; Samples = 0; Hits = (New-Object System.Collections.ArrayList); Needles = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)) })
+    # Not the camera password: a recorder on a DIRECT input carries it on its
+    # command line by design until [90] is decided, and cam2 here starts direct.
+    $secret = $null; $token = $null
+    $sandbox = $null
+
+    try {
+        foreach ($p in @($camPort, $rtspPort, $apiPort)) {
+            if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." }
+        }
+        $cameras = @(
+            [pscustomobject]@{ Name = 'cam1'; IP = "127.0.0.1:$camPort"; Quality = 'cam1'; Record = $true },
+            [pscustomobject]@{ Name = 'cam2'; IP = "127.0.0.1:$camPort"; Quality = 'nostream'; Record = $true })
+        $sandbox = New-CamTestSandbox -Name $name -Cameras $cameras -Config @{
+            RestreamerEnabled = $true
+            RestreamerExePath = (Join-Path -Path $dir -ChildPath 'bin\mediamtx.exe')
+            RestreamerConfigPath = (Join-Path -Path $dir -ChildPath 'mtx\mediamtx.yml')
+            RelayBase = "rtsp://127.0.0.1:$rtspPort"; RelayApiBase = "http://127.0.0.1:$apiPort"
+            RelayProbeTimeoutMs = 800; RelayStartupWaitSeconds = 15; RelayReadyWaitSeconds = 8; StatusIntervalSeconds = 5 }
+        $alertLog = Set-CamTestAlertStub -Sandbox $sandbox
+        $supervisorLog = Join-Path -Path $sandbox.Root -ChildPath '_logs\recorder.log'
+        [void](New-Item -ItemType Directory -Path (Join-Path $dir 'bin') -Force)
+        Copy-Item -LiteralPath 'C:\mediamtx\mediamtx.exe' -Destination (Join-Path $dir 'bin\mediamtx.exe')
+        $yml = [string]$sandbox.Config.RestreamerConfigPath
+        $credPath = Join-Path -Path $dir -ChildPath 'relay_api_creds.xml'
+
+        # --- (a) an install from before the login: old-style file, no login file
+        $install = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-InstallRestreamer')
+        if ($install.ExitCode -ne 0) { throw ('-InstallRestreamer failed: ' + ($install.Lines -join ' | ')) }
+        if (Test-Path -LiteralPath $credPath) { Remove-Item -LiteralPath $credPath -Force }
+        $text = [System.IO.File]::ReadAllText($yml)
+        $keep = New-Object System.Collections.ArrayList; $skip = $false
+        foreach ($l in ($text -split "`r`n")) {
+            if ($l -match '^authMethod:') { $skip = $true; continue }
+            if ($skip -and ($l -match '^authInternalUsers:' -or $l -match '^\s' -or $l -eq '')) { continue }
+            $skip = $false; [void]$keep.Add($l)
+        }
+        $oldText = $keep -join "`r`n"
+        [System.IO.File]::WriteAllText($yml, $oldText)
+        $evidence += ("(a) old-style install: {0} has authMethod: {1}, login file present: {2}" -f $yml, ($oldText -match '(?m)^authMethod:'), (Test-Path -LiteralPath $credPath))
+
+        $camera = Start-CamTestSyntheticCamera -Dir $dir -Port $camPort -PathName 'cam1'
+
+        # (f) the listing sampler, from before the supervisor starts
+        $sampler = [powershell]::Create()
+        [void]$sampler.AddScript({
+            param($state)
+            while (-not $state.Stop) {
+                try {
+                    $needles = @($state.Needles.ToArray())
+                    foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, CommandLine)) {
+                        $line = [string]$p.CommandLine
+                        if (-not $line) { continue }
+                        foreach ($n in $needles) { if ($line.Contains($n)) { [void]$state.Hits.Add(('{0} {1} needle#{2}' -f $p.ProcessId, $p.Name, [array]::IndexOf($needles, $n))) } }
+                    }
+                }
+                catch { }
+                $state.Samples++
+                Start-Sleep -Milliseconds 50
+            }
+        }).AddArgument($state)
+        $samplerHandle = $sampler.BeginInvoke()
+
+        $supervisor = Start-CamTestSupervisor -Sandbox $sandbox -TimeoutSeconds 120
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        while ([DateTime]::UtcNow -lt $deadline) { $rows = & $readStatus; if ($rows['cam1'] -and $rows['cam1'].InputMode -eq 'relay') { break }; Start-Sleep -Milliseconds 500 }
+        $rows = & $readStatus
+        $evidence += ("supervisor pid {0}; cam1 InputMode '{1}', cam2 InputMode '{2}' (cam2's path has no stream)" -f $supervisor.Id, $rows['cam1'].InputMode, $rows['cam2'].InputMode)
+        if (-not $rows['cam1'] -or $rows['cam1'].InputMode -ne 'relay') { & $fail 'cam1 never recorded through the relay' }
+
+        $cred = $null
+        if (Test-Path -LiteralPath $credPath) { $cred = Import-Clixml -LiteralPath $credPath }
+        if ($cred) {
+            $secret = $cred.GetNetworkCredential().Password
+            $token = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($cred.UserName + ':' + $secret))
+            [void]$state.Needles.Add($secret); [void]$state.Needles.Add($token)
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $hash = 'sha256:' + [Convert]::ToBase64String($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($secret))); $sha.Dispose()
+            $credText = [System.IO.File]::ReadAllText($credPath)
+            $newText = [System.IO.File]::ReadAllText($yml)
+            $dpapi = $credText -match '<SS N="Password">01000000d08c9ddf'
+            $evidence += ("(a) the supervisor created the login: user {0}, a {1}-character secret; login file DPAPI-protected: {2}, secret in it as text: {3}" -f $cred.UserName, $secret.Length, $dpapi, $credText.Contains($secret))
+            if (-not $dpapi -or $credText.Contains($secret) -or $secret.Length -lt 32) { & $fail '(a) the login file is not a DPAPI-protected random secret' }
+            $hasBlock = ($newText -match '(?m)^authMethod: internal') -and $newText.Contains("pass: $hash") -and $newText.Contains("user: $($cred.UserName)")
+            $evidence += ("(a) config now requires the login, holds its sha256 hash: {0}; holds the secret: {1}; rewrite logged: {2} line(s)" -f $hasBlock, $newText.Contains($secret), (& $countLines $supervisorLog 'rewrote .*control API login'))
+            if (-not $hasBlock -or $newText.Contains($secret) -or (& $countLines $supervisorLog 'rewrote .*control API login') -ne 1) { & $fail '(a) the old config was not upgraded on the start' }
+            if (@($newText -split "`r?`n" | Where-Object { $_ -match 'action: (api|metrics|pprof)' }).Count -ne 1) { & $fail '(a) the config grants api, metrics or pprof more than once' }
+        }
+        else { & $fail '(a) the supervisor start did not create relay_api_creds.xml' }
+        $login = if ($cred) { "$($cred.UserName):$secret" } else { 'none:none' }
+
+        # --- (b) the API
+        $routes = @('/v3/config/paths/list', '/v3/config/paths/get/cam1', '/v3/paths/list', '/v3/paths/get/cam1')
+        $acao = 0
+        foreach ($route in $routes) {
+            $anon = & $api $route ''
+            $mine = & $api $route $login
+            $wrong = & $api $route ($login + 'x')
+            foreach ($r in @($anon, $mine, $wrong)) { if ($r.Acao) { $acao++ } }
+            $evidence += ("(b) {0,-28} no login HTTP {1} (password in body {2}), product login HTTP {3}, wrong login HTTP {4} after {5} ms" -f $route, $anon.Code, $anon.Body.Contains($camPw), $mine.Code, $wrong.Code, $wrong.Ms)
+            if ($anon.Code -ne 401 -or $anon.Body.Contains($camPw) -or $mine.Code -ne 200 -or $wrong.Code -ne 401 -or $wrong.Body.Contains($camPw)) { & $fail "(b) $route" }
+        }
+        $evidence += ("(b) responses carrying Access-Control-Allow-Origin (request sent Origin: http://evil.example): {0}" -f $acao)
+        if ($acao -ne 0) { & $fail '(b) a cross-origin permission was sent' }
+
+        # --- (c) anonymous read through the relay
+        # Collected whole: Select-Object -First would stop ffprobe and make its exit code -1.
+        $codec = @(& $ffprobe -v error -rtsp_transport tcp -timeout 5000000 -show_entries stream=codec_name -of csv=p=0 "rtsp://127.0.0.1:$rtspPort/cam1")[0]
+        $evidence += ("(c) ffprobe with no login through the relay: exit {0}, first stream {1}" -f $LASTEXITCODE, $codec)
+        if ($LASTEXITCODE -ne 0 -or $codec -ne 'h264') { & $fail '(c) anonymous read through the relay' }
+
+        # --- (d) the running relay starts refusing the product's login
+        $goodText = [System.IO.File]::ReadAllText($yml)
+        $badText = [regex]::Replace($goodText, 'pass: sha256:\S+', 'pass: sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=')
+        [System.IO.File]::WriteAllText($yml, $badText)
+        $faultAt = [DateTime]::UtcNow
+        $deadline = $faultAt.AddSeconds(30)
+        while ([DateTime]::UtcNow -lt $deadline -and (& $countLines $alertLog '^130 ') -eq 0) { Start-Sleep -Milliseconds 500 }
+        $evidence += ("(d) login refused from {0:HH:mm:ss}; alert raised after {1:N1} s" -f $faultAt.ToLocalTime(), ([DateTime]::UtcNow - $faultAt).TotalSeconds)
+        $old1 = Get-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $supervisor -CameraName 'cam1'
+        if ($old1 -gt 0) { Stop-Process -Id $old1 -Force }
+        $new1 = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $supervisor -CameraName 'cam1' -Not $old1 -TimeoutSeconds 40
+        $directSeen = @{ cam1 = 0; cam2AfterRelay = 0 }; $cam2Relay = $false; $cam2Restarts = @()
+        $until = [DateTime]::UtcNow.AddSeconds(30)
+        while ([DateTime]::UtcNow -lt $until) {
+            $rows = & $readStatus
+            if ($rows['cam1'] -and $rows['cam1'].InputMode -eq 'direct') { $directSeen.cam1++ }
+            if ($rows['cam2']) {
+                if ($rows['cam2'].InputMode -eq 'relay') { $cam2Relay = $true; $cam2Restarts += [int]$rows['cam2'].RestartsLastHour }
+                elseif ($cam2Relay -and $rows['cam2'].InputMode -eq 'direct') { $directSeen.cam2AfterRelay++ }
+            }
+            Start-Sleep -Milliseconds 1000
+        }
+        $rows = & $readStatus
+        $evidence += ("(d) cam1 child {0} killed during the fault, restarted as {1} on '{2}'; cam1 reported direct {3} time(s) in 30 s of 1 s samples" -f $old1, $new1, $rows['cam1'].InputMode, $directSeen.cam1)
+        if ($old1 -le 0 -or $new1 -le 0 -or $rows['cam1'].InputMode -ne 'relay' -or $directSeen.cam1 -ne 0) { & $fail '(d) a recorder went direct, or did not restart, while the login was refused' }
+        $first = if ($cam2Restarts.Count) { $cam2Restarts[0] } else { -1 }; $last = if ($cam2Restarts.Count) { $cam2Restarts[-1] } else { -1 }
+        $evidence += ("(d) cam2 (no stream on its path) moved onto the relay: {0}; restarts in the last hour while on it {1} -> {2} (retrying, not waiting); direct again afterwards {3} time(s)" -f $cam2Relay, $first, $last, $directSeen.cam2AfterRelay)
+        if (-not $cam2Relay -or $last -le $first -or $directSeen.cam2AfterRelay -ne 0) { & $fail '(d) the camera with no stream did not stay on the relay and keep retrying' }
+        $status = Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-Status')
+        $statusText = $status.Output + $status.Error
+        $alerts = @(if (Test-Path -LiteralPath $alertLog) { Get-Content -LiteralPath $alertLog | Where-Object { $_ -match '^130 ' } })
+        $alertLines = @(Get-Content -LiteralPath $supervisorLog | Where-Object { $_ -match 'ALERT' -and $_ -match 'refused' })
+        $evidence += ("(d) {0} alert(s) recorded by the sandbox stub: {1}" -f $alerts.Count, ($alerts -join ' || '))
+        $evidence += ("(d) {0} log line(s) about it in the supervisor log" -f $alertLines.Count)
+        if ($alerts.Count -ne 1 -or $alerts[0] -notmatch '^130 Error ' -or $alertLines.Count -ne 1) { & $fail '(d) not exactly one alert 130 Error and one log line for the episode' }
+        [System.IO.File]::WriteAllText($yml, $goodText)
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ([DateTime]::UtcNow -lt $deadline -and (& $countLines $supervisorLog 'accepts the product''s login again') -eq 0) { Start-Sleep -Milliseconds 500 }
+        $evidence += ("(d) login accepted again: {0} line(s); alerts still {1}" -f (& $countLines $supervisorLog 'accepts the product''s login again'), (& $countLines $alertLog '^130 '))
+        if ((& $countLines $supervisorLog 'accepts the product''s login again') -ne 1) { & $fail '(d) the end of the episode was not logged once' }
+
+        $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $supervisor
+        $supervisor = $null
+        $evidence += ("supervisor stopped through -Stop: ok {0}" -f $stop.Ok)
+        if (-not $stop.Ok) { & $fail 'the sandbox supervisor did not stop cleanly' }
+
+        # --- (e) a standalone relay from the generated file: every path is source: publisher
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = Join-Path $dir 'bin\mediamtx.exe'; $psi.Arguments = ('"{0}"' -f $yml); $psi.WorkingDirectory = Join-Path $dir 'bin'
+        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true; $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+        $standalone = [System.Diagnostics.Process]::Start($psi)
+        $standaloneOut = $standalone.StandardOutput.ReadToEndAsync()
+        Start-Sleep -Seconds 2
+        $publisher = Start-Process -FilePath $ffmpeg -PassThru -WindowStyle Hidden -ArgumentList ("-hide_banner -loglevel error -nostdin -re -f lavfi -i testsrc2=size=320x180:rate=10 -c:v libx264 -preset ultrafast -g 10 -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:$rtspPort/cam1")
+        Start-Sleep -Seconds 4
+        # Collected whole: Select-Object -First would stop ffprobe and make its exit code -1.
+        $codec = @(& $ffprobe -v error -rtsp_transport tcp -timeout 5000000 -show_entries stream=codec_name -of csv=p=0 "rtsp://127.0.0.1:$rtspPort/cam1")[0]
+        $evidence += ("(e) anonymous publish into the generated config's cam1 path, then anonymous read: publisher alive {0}, ffprobe exit {1}, stream {2}" -f (-not $publisher.HasExited), $LASTEXITCODE, $codec)
+        if ($publisher.HasExited -or $LASTEXITCODE -ne 0 -or $codec -ne 'h264') { & $fail '(e) anonymous publish and read' }
+
+        [System.IO.File]::WriteAllText((Join-Path $dir 'relayprobe.ps1'), @'
+$ErrorActionPreference = 'Stop'
+. (Join-Path -Path $PSScriptRoot -ChildPath 'cam.common.ps1')
+$config = Get-CamConfig
+$direct = 'rtsp://127.0.0.1:18554/direct-input'
+function Measure-It([string]$Name, [scriptblock]$Block) {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew(); $value = & $Block; $watch.Stop()
+    '{0}={1}|{2}|{3}' -f $Name, ((@($value) | Sort-Object) -join ','), [int]$watch.ElapsedMilliseconds, (Get-CamRelayApiStatus)
+}
+Measure-It 'ready cam1' { Test-CamRelayPathReady -Config $config -PathName 'cam1' }
+Measure-It 'ready cam2' { Test-CamRelayPathReady -Config $config -PathName 'cam2' }
+Measure-It 'serving' { Get-CamRelayReadyPaths -Config $config }
+Measure-It 'lone cam1' { (Get-CamInputUrl -Config $config -RelayPathName 'cam1' -DirectUrl $direct).Mode }
+Measure-It 'lone cam2' { (Get-CamInputUrl -Config $config -RelayPathName 'cam2' -DirectUrl $direct).Mode }
+$batch = @(Get-CamRelayReadyPaths -Config $config)
+Measure-It 'batch cam2' { (Get-CamInputUrl -Config $config -RelayPathName 'cam2' -DirectUrl $direct -ReadyPaths $batch).Mode }
+Measure-It 'wait cam2' { (Get-CamInputUrl -Config $config -RelayPathName 'cam2' -DirectUrl $direct -ReadyPaths @() -WaitSeconds 2).Mode }
+'@)
+        $probe = {
+            $r = Invoke-CamTestScript -Path (Join-Path $dir 'relayprobe.ps1')
+            $map = @{}
+            foreach ($line in $r.Lines) { if ($line -match '^([a-z0-9 ]+)=([^|]*)\|(\d+)\|(.*)$') { $map[$Matches[1]] = [pscustomobject]@{ Value = $Matches[2]; Ms = [int]$Matches[3]; Api = $Matches[4] } } }
+            if ($map.Count -ne 7) { $script:CamRelayApiEvidence += ('probe output: ' + ($r.Lines -join ' | ')) }
+            return $map
+        }
+        $want = @{
+            right = @{ 'ready cam1' = 'True'; 'ready cam2' = 'False'; 'serving' = 'cam1'; 'lone cam1' = 'relay'; 'lone cam2' = 'direct'; 'batch cam2' = 'direct'; 'wait cam2' = 'direct' }
+            wrong = @{ 'ready cam1' = 'True'; 'ready cam2' = 'True'; 'serving' = 'cam1,cam2'; 'lone cam1' = 'relay'; 'lone cam2' = 'relay'; 'batch cam2' = 'relay'; 'wait cam2' = 'relay' }
+            down  = @{ 'ready cam1' = 'False'; 'ready cam2' = 'False'; 'serving' = ''; 'lone cam1' = 'direct'; 'lone cam2' = 'direct'; 'batch cam2' = 'direct'; 'wait cam2' = 'direct' }
+        }
+        $backup = "$credPath.keep"
+        Copy-Item -LiteralPath $credPath -Destination $backup -Force
+        $cases = @('right', 'wrong', 'missing', 'down')
+        foreach ($case in $cases) {
+            if ($case -eq 'wrong') {
+                (New-Object System.Management.Automation.PSCredential('camrelayapi', (ConvertTo-SecureString ('0' * 64) -AsPlainText -Force))) | Export-Clixml -LiteralPath $credPath
+            }
+            if ($case -eq 'missing') { Remove-Item -LiteralPath $credPath -Force }
+            if ($case -eq 'down') {
+                Copy-Item -LiteralPath $backup -Destination $credPath -Force
+                $standalone.Kill(); [void]$standalone.WaitForExit(10000)
+            }
+            $map = & $probe
+            $expect = $want[$(if ($case -eq 'missing') { 'wrong' } else { $case })]
+            $limit = $(if ($case -eq 'right' -or $case -eq 'missing') { 1500 } else { 2500 })
+            $line = @()
+            foreach ($key in @('ready cam1', 'ready cam2', 'serving', 'lone cam1', 'lone cam2', 'batch cam2', 'wait cam2')) {
+                $got = $map[$key]
+                $bad = (-not $got) -or ($got.Value -ne $expect[$key]) -or ($key -ne 'wait cam2' -and $got.Ms -gt $limit) -or ($key -eq 'wait cam2' -and $got.Ms -gt 4500)
+                $line += ('{0}={1} {2}ms{3}' -f $key, $(if ($got) { $got.Value } else { '?' }), $(if ($got) { $got.Ms } else { '?' }), $(if ($bad) { ' (WANT ' + $expect[$key] + ')' } else { '' }))
+                if ($bad) { & $fail ("(e) {0} login: {1}" -f $case, $key) }
+            }
+            $evidence += ("(e) {0,-7} login, api status '{1}': {2}" -f $case, $(if ($map['serving']) { $map['serving'].Api } else { '?' }), ($line -join '; '))
+        }
+        Move-Item -LiteralPath $backup -Destination $credPath -Force
+        if ($publisher -and -not $publisher.HasExited) { $publisher.Kill(); [void]$publisher.WaitForExit(5000) }
+
+        # --- (f) command lines, files, status
+        $control = Microsoft.PowerShell.Management\Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList ('-NoProfile -Command "Start-Sleep -Seconds 20 # RAPICONTROL-' + $PID + '"')
+        [void]$state.Needles.Add("RAPICONTROL-$PID")
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        while ([DateTime]::UtcNow -lt $deadline -and @($state.Hits | Where-Object { $_ -like "$($control.Id) *" }).Count -eq 0) { Start-Sleep -Milliseconds 100 }
+        $seen = @($state.Hits | Where-Object { $_ -like "$($control.Id) *" }).Count -gt 0
+        Stop-Process -Id $control.Id -Force -ErrorAction SilentlyContinue
+        $state.Stop = $true
+        [void]$sampler.EndInvoke($samplerHandle)
+        $hits = @($state.Hits | Where-Object { $_ -notlike "$($control.Id) *" })
+        $evidence += ("(f) {0} listing sweeps of every process command line; positive control seen: {1}; API secret or Basic token hits: {2} {3}" -f $state.Samples, $seen, $hits.Count, (($hits | Select-Object -First 3) -join '; '))
+        if (-not $seen -or $hits.Count -ne 0 -or $state.Samples -lt 50) { & $fail '(f) a secret reached a command line, or the sweep could not see one' }
+
+        $secrets = @($secret, $token) | Where-Object { $_ }
+        $fileHits = @()
+        $scanned = 0
+        foreach ($file in @(Get-ChildItem -LiteralPath $dir -Recurse -File)) {
+            if ($file.Name -in @('relay_api_creds.xml', 'camera_creds.xml', 'mediamtx.exe') -or $file.Extension -in @('.mkv', '.mp4', '.ts')) { continue }
+            # Shared read: the synthetic camera still holds its log open.
+            $stream = [System.IO.File]::Open($file.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]'ReadWrite, Delete')
+            try { $copy = New-Object System.IO.MemoryStream; $stream.CopyTo($copy); $bytes = $copy.ToArray() } finally { $stream.Dispose() }
+            $scanned++
+            $texts = @([System.Text.Encoding]::UTF8.GetString($bytes), [System.Text.Encoding]::Unicode.GetString($bytes))
+            foreach ($s in @($secrets) + @($camPw)) { foreach ($t in $texts) { if ($t.Contains($s)) { $fileHits += ("{0} carries {1}" -f $file.FullName.Substring($dir.Length), $(if ($s -eq $camPw) { 'the camera password' } else { 'the API secret' })); break } } }
+        }
+        foreach ($s in @($secrets)) { if ($statusText.Contains($s) -or $standaloneOut.Result.Contains($s)) { $fileHits += '-Status or relay output carries the API secret' } }
+        if ($statusText.Contains($camPw)) { $fileHits += '-Status output carries the camera password' }
+        $evidence += ("(f) {0} sandbox file(s) scanned (config, logs, status.json, alerts, console), plus -Status output: {1}" -f $scanned, $(if ($fileHits.Count) { $fileHits -join '; ' } else { 'no secret anywhere' }))
+        if ($fileHits.Count -gt 0 -or $secrets.Count -ne 2) { & $fail '(f) a secret was found in a file or an output' }
+    }
+    catch { & $fail ('threw: ' + $_.Exception.Message + ' at line ' + $_.InvocationInfo.ScriptLineNumber) }
+    finally {
+        $state.Stop = $true
+        if ($sampler) { try { [void]$sampler.EndInvoke($samplerHandle) } catch { }; $sampler.Dispose() }
+        if ($control) { Stop-Process -Id $control.Id -Force -ErrorAction SilentlyContinue }
+        if ($supervisor -and $sandbox) { [void](Stop-CamTestSupervisor -Sandbox $sandbox -Process $supervisor) }
+        foreach ($p in @($publisher, $standalone)) { if ($p -and -not $p.HasExited) { try { $p.Kill() } catch { }; [void]$p.WaitForExit(5000) } }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { & $fail 'a synthetic camera process did not exit' }
+    }
+
+    $left = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'mediamtx.exe' OR Name = 'ffmpeg.exe'" | Where-Object { [string]$_.CommandLine -like "*cam-tests\$name*" -or [string]$_.ExecutablePath -like "*cam-tests\$name*" -or [string]$_.CommandLine -match ":($rtspPort|$camPort)/" })
+    $evidence += $script:CamRelayApiEvidence
+    $evidence += ("{0} sandbox mediamtx/ffmpeg process(es) left" -f $left.Count)
+    if ($left.Count -gt 0) { $script:CamRelayApiOk = $false; foreach ($l in $left) { Stop-Process -Id $l.ProcessId -Force -ErrorAction SilentlyContinue } }
+
+    Complete-CamPruneCheck -Run $Run -Check 'relayapi' -Ok $script:CamRelayApiOk -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $dir; Log = (Join-Path $env:TEMP 'cam-tests\relayapi.none') }) `
+        -Message 'the relay API requires the product''s login (401 and no password without it, no cross-origin permission), an old install upgrades on its next start, anonymous RTSP read and publish still work, a refused login keeps every consumer on the relay with one alert and one log line, and no secret reaches a command line, a file or an output'
 }
 
 
@@ -5743,6 +6096,7 @@ foreach ($check in $Checks) {
         'inputs'     { Invoke-CamCheckInputs     -Run $run }
         'viewer'     { Invoke-CamCheckViewer     -Run $run }
         'viewerpw'   { Invoke-CamCheckViewerPw   -Run $run }
+        'relayapi'   { Invoke-CamCheckRelayApi   -Run $run }
         'selftest'   { Invoke-CamCheckSelfTest   -Run $run }
         'layout'     { Invoke-CamCheckLayout     -Run $run }
         'strip'      { Invoke-CamCheckStrip      -Run $run }
