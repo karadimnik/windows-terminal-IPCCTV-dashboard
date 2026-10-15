@@ -968,7 +968,8 @@ function Invoke-CamCheckCrashSafe {
           1. a killed supervisor is restarted by the NVR host
           2. the kill is recorded as StopKind 'unexpected' with a
              LastUnexpectedStop carrying its timestamp and reason
-          3. the kill raises an alert on the toast and event-log channels
+          3. the kill raises an alert - id 100, Error - recorded by the
+             sandbox alert stub; the real channels are windowclose's to prove
           4. an orderly -Stop is NOT restarted and raises NO alert
 
         Point 4 is the one that decides whether the feature is worth having.
@@ -988,6 +989,7 @@ function Invoke-CamCheckCrashSafe {
     $sandbox = New-CamTestSandbox -Name 'crashsafe' -Cameras @(
         [pscustomobject]@{ Name = 'crashsafe-a'; IP = '10.255.255.11'; Quality = 'main'; Record = $true }
     ) -Config @{ StatusIntervalSeconds = 2; ReconcileSeconds = 2 }
+    $stubLog = Set-CamTestAlertStub -Sandbox $sandbox
 
     $lib = Join-Path -Path $sandbox.Dir -ChildPath 'cam.common.ps1'
     $log = Join-Path -Path $sandbox.Root -ChildPath '_logs\recorder.log'
@@ -1051,6 +1053,9 @@ function Invoke-CamCheckCrashSafe {
         $alertsAfterKill = & $alertLines
         $evidence += ("ALERT lines in the supervisor log: {0} before the kill, {1} after" -f $alertsBefore, $alertsAfterKill)
         if ($alertsAfterKill -le $alertsBefore) { $ok = $false; $evidence += 'FAIL: the kill raised no alert' }
+        $stubbed = @(if (Test-Path -LiteralPath $stubLog) { Get-Content -LiteralPath $stubLog })
+        $evidence += ("alerts recorded by the sandbox stub: {0}" -f (@($stubbed | ForEach-Object { $_.Substring(0, [math]::Min(60, $_.Length)) }) -join ' | '))
+        if (@($stubbed | Where-Object { $_ -like '100 Error the NVR stopped unexpectedly*' }).Count -ne 1) { $ok = $false; $evidence += 'FAIL: the kill did not raise exactly one id 100 Error alert' }
 
         # Now the distinction that keeps alerting worth reading.
         [void](Invoke-CamTestScript -Path $sandbox.Recorder -Arguments @('-Stop'))
@@ -1243,10 +1248,9 @@ function Invoke-CamCheckWindowId {
                    which is the false positive a published handle could
                    otherwise introduce
 
-        Like the windowclose check this raises real toasts and real
-        Application-log entries, two of each, because the test warden runs
-        with -AlertOnWindowClose exactly as the NVR's does. They name the TEST
-        windows, not cam.nvr.
+        The test warden runs with -AlertOnWindowClose exactly as the NVR's
+        does, so each close raises an alert; the sandbox alert stub records
+        them, so no toast or Application-log entry reaches the Operator.
     #>
     param($Run)
 
@@ -1257,6 +1261,7 @@ function Invoke-CamCheckWindowId {
     $sandbox = New-CamTestSandbox -Name 'windowid' -Cameras @(
         [pscustomobject]@{ Name = 'windowid-a'; IP = '10.255.255.12'; Quality = 'main'; Record = $true }
     )
+    [void](Set-CamTestAlertStub -Sandbox $sandbox)
 
     $tiers = @(
         [pscustomobject]@{ Label = 'nvr tier'; Title = 'cam.test.nvrid'; JobName = 'cam.test.nvrid.job' }
@@ -1466,6 +1471,7 @@ function Invoke-CamCheckNvrStart {
     $sandbox = New-CamTestSandbox -Name 'nvrstart' -Cameras @(
         [pscustomobject]@{ Name = 'nvrstart-a'; IP = '10.255.255.13'; Quality = 'main'; Record = $true }
     )
+    [void](Set-CamTestAlertStub -Sandbox $sandbox)
     $config = $sandbox.Config
 
     try {
@@ -2783,8 +2789,9 @@ function Invoke-CamCheckPruneOwner {
         sandboxes. A clean root is claimed on start (the marker appears). A
         root with a foreign top-level entry is NOT claimed: pruning is
         disabled, the refusal names the entry, alerts once over several prune
-        cycles, the bait files are untouched, and the supervisor stays up and
-        keeps (re)starting its camera child.
+        cycles - id 120, Error, recorded by the sandbox alert stub - the bait
+        files are untouched, and the supervisor stays up and keeps
+        (re)starting its camera child.
     #>
     param($Run)
 
@@ -2797,6 +2804,7 @@ function Invoke-CamCheckPruneOwner {
 
     foreach ($kind in @('clean', 'foreign')) {
         $sandbox = New-CamTestSandbox -Name ('pruneowner-' + $kind) -Cameras @(& $camera ('pruneowner-' + $kind) '10.255.255.13') -Config $settings
+        $stubLog = Set-CamTestAlertStub -Sandbox $sandbox
         $sandboxes += [pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP ('cam-tests\pruneowner-' + $kind + '.none')) }
         $log = Join-Path $sandbox.Root '_logs\recorder.log'
         $marker = Get-CamArchiveMarkerPath -Config $sandbox.Config
@@ -2823,7 +2831,8 @@ function Invoke-CamCheckPruneOwner {
             if ($kind -eq 'clean') {
                 $claimed = @($text | Where-Object { $_ -like '*claimed * as this recorder''s archive*' }).Count
                 $evidence += ("clean root: marker written={0}, claim logged={1}, supervisor alive={2}, state {3}" -f (Test-CamArchiveMarker -Config $sandbox.Config), $claimed, $alive, $status.State)
-                if (-not (Test-CamArchiveMarker -Config $sandbox.Config) -or $claimed -ne 1 -or -not $alive) { $ok = $false; $evidence += 'FAIL: a clean root was not claimed on start' }
+                $stubbed = @(if (Test-Path -LiteralPath $stubLog) { Get-Content -LiteralPath $stubLog }).Count
+                if (-not (Test-CamArchiveMarker -Config $sandbox.Config) -or $claimed -ne 1 -or -not $alive -or $stubbed) { $ok = $false; $evidence += ("FAIL: a clean root was not claimed on start, or raised {0} alert(s)" -f $stubbed) }
             }
             else {
                 $alertLines = @($text | Where-Object { $_ -like '*ALERT pruning is disabled*' })
@@ -2836,6 +2845,9 @@ function Invoke-CamCheckPruneOwner {
                 $evidence += ("foreign root: marker written={0}, did-not-claim logged={1}, refusal logged {2}x, alert lines {3}, bait files changed {4}" -f `
                     (Test-Path -LiteralPath $marker), $cycles, $refusals, $alertLines.Count, $changed)
                 $evidence += @($alertLines | Select-Object -First 1)
+                $stubbed = @(if (Test-Path -LiteralPath $stubLog) { Get-Content -LiteralPath $stubLog })
+                $evidence += ("alerts recorded by the sandbox stub: {0}, of them id 120 Error: {1}" -f $stubbed.Count, @($stubbed | Where-Object { $_ -like '120 Error pruning is disabled*' }).Count)
+                if ($stubbed.Count -ne 1 -or @($stubbed | Where-Object { $_ -like '120 Error pruning is disabled*' }).Count -ne 1) { $ok = $false; $evidence += 'FAIL: the stub did not record exactly one id 120 Error alert' }
                 $evidence += ("status: State {0}, Prune.Blocked {1}, LastMessage: {2}" -f $status.State, $status.Prune.Blocked, $status.Prune.LastMessage)
                 $evidence += ("recording continues: supervisor alive={0}, camera child launched as pid {1}, restarts {2}" -f $alive, $row.LastPid, $row.RestartsTotal)
                 if ((Test-Path -LiteralPath $marker) -or $alertLines.Count -ne 1 -or $refusals -ne 1 -or $changed -ne 0) { $ok = $false; $evidence += 'FAIL: the foreign root was claimed, alerted other than once, or a bait file changed' }
