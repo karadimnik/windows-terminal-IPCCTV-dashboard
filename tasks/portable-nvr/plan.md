@@ -167,6 +167,79 @@ Decision **D7** below.
 "Nothing is removed" stands. If the Operator ever wants the old system retired, that is a separate decision
 with its own deprecation period, not a step in this plan.
 
+## Stage 0 results (2026-10-15) and what they change
+
+Full report: `tasks/portable-nvr/spikes/stage0-report.md` (tables in `stage0-tables.md`, raw data in `spikes/data/`).
+Stage 0 is **partial**: the six-tile matrix for Chrome and Edge is complete and valid (UDP); the one-tile numbers ran
+over ICE-TCP by accident and are transport-limited; the UDP rerun and Firefox did not run; the real-camera spike was
+run by the Operator himself (below).
+
+**Measured on this PC (i5-6600K, GTX 1070 Ti):** with hardware decode on, six 2560x1440 tiles cost 65 to 67% of one core
+and use the GTX 1070 Ti's decoder (D3D11), smooth; with it off they are unusable. Six 640x360 tiles cost 53 to 55%
+either way. Today's mpv grid (software decode, as the dashboard runs it) costs 141% at six mains and 38% at six
+sub-streams. Hidden tabs keep decoding at a reduced rate (20 fps down to about 5), so the page must close its
+connections on `visibilitychange`. Absolute CPU is pessimistic (the PC was at 75% before any browser started); the
+comparison between cells is the safer reading. mpv was not tried with hardware decode, so "browser cheaper than mpv" is
+not established, only "browser with hardware decode is no worse".
+
+**Spike C, run by the Operator on the real cameras (2026-10-15):**
+
+| Camera | stream1 | stream2 (sub) | Notes |
+|---|---|---|---|
+| Front Entrance | 2560x1440 Main, 15 fps, 1747 kbps | 640x360 Main, 15 fps, 91 kbps | |
+| Rear Balcony | 2560x1440 High, 14 fps, 1223 kbps | 640x360 High, 14 fps, 95 kbps | High profile |
+| Field Front | 2304x1296 High, 15 fps, 671 kbps | 640x360 High, 15 fps, 116 kbps | High profile |
+| Car Garage | 2304x1296 Main, 15 fps, 1178 kbps | 640x360 Main, 15 fps, 182 kbps | |
+| Workshop Entrance | 2560x1440 Main, 15 fps, 1458 kbps | 640x360 Main, 15 fps, 130 kbps | |
+| Workshop | 2304x1296 High, 16.67 fps, 1701 kbps | **1280x720** High, 16.67 fps, 142 kbps | High profile; larger sub-stream |
+
+All twelve streams: H.264, **no B-frames**, audio `pcm_alaw` 8 kHz mono (on the sub-streams too).
+
+What that settles and what it opens:
+- **D3 is confirmed:** the grid uses `stream2`, the main stream only on focus. Every camera has one. The sub-streams are very
+  low bit rate (91 to 182 kbps), so expect soft pictures at tile size; that is the price of the cheap grid.
+- **Frame rate is 14 to 16.67, not the 20 the Stage 0 clips used.** Stage 0's decode costs are therefore a little
+  conservative.
+- **OPEN, must be proven in Stage 1: H.264 High over WebRTC.** The Stage 0 clips were Main profile; three of six cameras
+  are High. Browsers advertise only certain profile-level-ids for WebRTC H.264. Publish a High-profile clip through the
+  same rig and watch it in Chrome and Edge before trusting the grid.
+- **Camera sessions: it fits exactly, with no spare.** Each camera allows two. The recorder reads `stream1` through the
+  relay (one session); live view reads `stream2` through the relay (the second). While anyone watches live, the phone
+  app has none for that camera. Mitigation to build in Stage 1: the sub-stream relay path starts **on demand**
+  (`sourceOnDemand`), so the second session is held only while a viewer is connected. The old mpv dashboard on the
+  relay shares the recorder's path and adds no session; a direct fallback would be a third and is refused.
+- **The recorder keeps using `stream1`** (unchanged).
+
+## WebRTC access control (design for Stages 1 and 2)
+
+Stage 0 found that MediaMTX's WebRTC read is anonymous today (the relay's `any` user may `read` from any address) and that
+the product's control-API login does not govern it. That is acceptable on loopback only. The design:
+
+1. **`camui` is the only door for signaling.** MediaMTX's WebRTC HTTP listener stays bound to `127.0.0.1`. The browser
+   talks only to `camui` at `/api/live/<camera>/whep` (same origin as the page); `camui` checks the viewer's token (Stage 2)
+   and forwards the request to MediaMTX server-side. The camera name maps to a path through `cameras.json`; an unknown
+   name is a 404. `camui` forwards no arbitrary path, no query string and no `Authorization` header, and it never returns
+   a MediaMTX address, so the browser has no way to name another stream. The SDP answer carries ICE candidates and
+   credentials for that one session and no camera URL.
+2. **Media is protected by the signaling.** Video travels browser to MediaMTX directly over ICE/DTLS-SRTP. A peer only gets
+   media after presenting the one-time ICE username and password issued in the answer to an authenticated signaling
+   request, then completing the DTLS handshake. So for the LAN (Stage 2) the UDP media port is reachable on the LAN
+   address (`webrtcAdditionalHosts` set to it), but a device that never passed `camui`'s token cannot receive video.
+   Verify in a Stage 2 spike that a STUN probe with a wrong username draws no media and no useful response.
+3. **Belt and braces in MediaMTX:** restrict the `any` user's `publish`, `read` and `playback` to loopback
+   (`ips: [127.0.0.1, ::1]`) in the generated config. `camui`'s forwarded calls come from loopback; a misbound listener
+   would then still refuse a LAN client.
+4. **Firewall:** one inbound UDP rule for the media port, on the Private profile only, scoped to the LAN subnet. It is
+   created by an explicit install step with a documented removal, never silently, because creating it triggers a Windows
+   Firewall prompt.
+5. **Tokens:** `camui` already refuses a non-loopback bind without a token. Add constant-time comparison, a per-device token
+   later, rate limiting of failed attempts, `Cache-Control: no-store`, and TLS for the LAN stage (a small proxy or a
+   private overlay network).
+6. **Acceptance for the stage that builds it:** `uileak` extended to every `/api/live/*` response; a device without the token
+   gets 401 on every live endpoint; a direct request to MediaMTX's WebRTC HTTP port from the LAN address is refused; no
+   response or SDP contains a camera URL or credential; `Authorization` never reaches the browser; the wrong-ufrag probe
+   yields no media.
+
 ## Order and what each stage depends on
 
 Stage 0 -> Stage 1 -> (Stage 1b any time) -> Stage 2 -> Stage 4 -> Stage 5, with Stage 3 only after Stage 2 has
@@ -179,7 +252,7 @@ portability before remote access; the order above follows what he asked for.
 |---|---|---|
 | D1 | Where the new code lives | **DECIDED by the Operator:** on the branch `portable-nvr`, started from master, never merged into master, moved to its own repository when finished. |
 | D2 | Name of the new system | He chooses; none is needed before Stage 4. |
-| D3 | Tile policy | Sub-stream in the grid, main stream on focus, subject to Spike B. |
+| D3 | Tile policy | **CONFIRMED by Stage 0 and Spike C:** sub-stream (`stream2`) in the grid, main stream on focus; every camera has a usable sub-stream. |
 | D4 | Order of Stages 2-5 | As listed; portability before the LAN is possible. |
 | D5 | Shadow-run length for Stage 4 | At least one full retention cycle, and across the 25 Oct clock change if possible. |
 | D6 | Keep the PowerShell recorder as a permanent fallback | Yes: it costs nothing and follows "nothing is removed". |
