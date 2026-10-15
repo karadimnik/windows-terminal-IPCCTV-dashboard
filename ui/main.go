@@ -81,17 +81,27 @@ func main() {
 	}
 }
 
-func run(cfg Config, log *slog.Logger) error {
+// newHandler assembles the whole HTTP handler: the static page, the API, and
+// the middleware around them. The token check is outermost so an
+// unauthenticated request learns nothing else.
+func newHandler(cfg Config, log *slog.Logger) (http.Handler, error) {
 	static, err := fs.Sub(staticFiles, "static")
 	if err != nil {
-		return fmt.Errorf("embedded UI: %w", err)
+		return nil, fmt.Errorf("embedded UI: %w", err)
 	}
 
 	mux := http.NewServeMux()
 	NewAPI(cfg, log).Routes(mux)
 	mux.Handle("GET /", versioned(http.FileServerFS(static)))
 
-	handler := requireToken(cfg.Token, logRequests(log, mux))
+	return requireToken(cfg.Token, logRequests(log, newGuard(cfg, log)(mux))), nil
+}
+
+func run(cfg Config, log *slog.Logger) error {
+	handler, err := newHandler(cfg, log)
+	if err != nil {
+		return err
+	}
 
 	// Bind before announcing, so a port already in use fails loudly instead
 	// of leaving a server that is not listening.
