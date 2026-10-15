@@ -983,6 +983,98 @@ function Send-CamAlert {
 }
 
 
+function Set-CamTestSandboxClock {
+    <#
+        Rewires every clock reading of the SANDBOX copies of cam.common.ps1 and
+        cam.recorder.ps1 so a test can move time without touching the machine
+        clock or time zone. Nothing happens until Set-CamTestClockChange names
+        the instant; from then on readings of instants at or after it shift by
+        its delta:
+
+          -Mode local  a daylight-saving change: local readings shift
+                       ([DateTime]::Now, (Get-Date), LastWriteTime,
+                       CreationTime); UTC readings do not, as in a real one.
+          -Mode utc    a step of the clock itself: the seam
+                       Get-CamWallClock and the UTC file times shift too, the
+                       way a file stamped after a real step would read.
+
+        Readings are rewritten in place - [DateTime]::Now and (Get-Date) become
+        Get-CamSimLocal of UtcNow, $x.LastWriteTime(Utc) and
+        $x.CreationTime(Utc) become Get-CamSimLocal / Get-CamSimUtc of the UTC
+        time - and the simulator is appended last, in utc mode with its own
+        Get-CamWallClock.
+        Works on any version of the scripts, which is what lets the same run
+        show the pre-[86] product failing.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Sandbox,
+        [Parameter(Mandatory = $true)][ValidateSet('local', 'utc')][string]$Mode
+    )
+
+    $now = '(Get-CamSimLocal -Utc ([DateTime]::UtcNow))'
+    foreach ($file in @('cam.common.ps1', 'cam.recorder.ps1')) {
+        $path = Join-Path -Path $Sandbox.Dir -ChildPath $file
+        $text = [System.IO.File]::ReadAllText($path)
+        $text = [regex]::Replace($text, '\[DateTime\]::Now\b', $now)
+        $text = [regex]::Replace($text, '\(Get-Date\)', $now)
+        $text = [regex]::Replace($text, '(\$\w+(?:\.\w+)*)\.(LastWriteTime|CreationTime)Utc\b', '(Get-CamSimUtc -Utc ${1}.${2}Utc)')
+        $text = [regex]::Replace($text, '(\$\w+(?:\.\w+)*)\.(LastWriteTime|CreationTime)\b(?!Utc)', '(Get-CamSimLocal -Utc ${1}.${2}Utc)')
+        [System.IO.File]::WriteAllText($path, $text, (New-Object System.Text.UTF8Encoding($false)))
+    }
+
+    $simulator = @'
+
+
+# --- test sandbox only: a simulated clock change, see Set-CamTestSandboxClock ---
+$script:CamSimMode = '{MODE}'
+$script:CamSimAt = $null
+$script:CamSimDelta = 0.0
+function Get-CamSimShift {
+    param([DateTime]$Utc)
+    if ($null -eq $script:CamSimAt) {
+        $file = Join-Path -Path $script:CamLibRoot -ChildPath 'clock.change'
+        if (-not (Test-Path -LiteralPath $file)) { return 0.0 }
+        $parts = ([System.IO.File]::ReadAllText($file)).Trim() -split ' '
+        $script:CamSimAt = [DateTime]::new([int64]$parts[0], [DateTimeKind]::Utc)
+        $script:CamSimDelta = [double]$parts[1]
+    }
+    if ($Utc -ge $script:CamSimAt) { return $script:CamSimDelta }
+    return 0.0
+}
+function Get-CamSimUtc {
+    param([DateTime]$Utc)
+    if ($script:CamSimMode -eq 'utc') { return $Utc.AddSeconds((Get-CamSimShift -Utc $Utc)) }
+    return $Utc
+}
+function Get-CamSimLocal {
+    param([DateTime]$Utc)
+    if ($script:CamSimMode -eq 'utc') { return $Utc.AddSeconds((Get-CamSimShift -Utc $Utc)).ToLocalTime() }
+    return $Utc.ToLocalTime().AddSeconds((Get-CamSimShift -Utc $Utc))
+}
+'@
+    # A step moves the seam; a daylight-saving change leaves the product's
+    # own Get-CamWallClock alone, rewritten above like any other reading.
+    if ($Mode -eq 'utc') { $simulator += "`r`nfunction Get-CamWallClock { return (Get-CamSimUtc -Utc ([DateTime]::UtcNow)) }`r`n" }
+    $common = Join-Path -Path $Sandbox.Dir -ChildPath 'cam.common.ps1'
+    [System.IO.File]::AppendAllText($common, $simulator.Replace('{MODE}', $Mode), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+
+function Set-CamTestClockChange {
+    <# Schedules the simulated change of Set-CamTestSandboxClock: at $AtUtc, by $DeltaSeconds. #>
+    param(
+        [Parameter(Mandatory = $true)]$Sandbox,
+        [Parameter(Mandatory = $true)][DateTime]$AtUtc,
+        [Parameter(Mandatory = $true)][double]$DeltaSeconds
+    )
+
+    $path = Join-Path -Path $Sandbox.Dir -ChildPath 'clock.change'
+    $temp = "$path.tmp"
+    [System.IO.File]::WriteAllText($temp, ("{0} {1}" -f $AtUtc.ToUniversalTime().Ticks, $DeltaSeconds))
+    Move-Item -LiteralPath $temp -Destination $path -Force
+}
+
+
 function New-CamTestSynthSandbox {
     <#
         A sandbox whose cameras are synthetic: each camera's IP is

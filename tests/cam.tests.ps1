@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -4718,6 +4718,179 @@ function Invoke-CamCheckDst {
 }
 
 
+function Invoke-CamTestClockPhase {
+    <#
+        One T2 run: the real sandbox supervisor recording a synthetic camera
+        (SegmentSeconds 6 x StallFactor 2.5 = a 15 s stall limit, status every
+        1 s) while Set-CamTestSandboxClock moves its clock by $Delta seconds a
+        few seconds into the run - a daylight-saving change (-Mode local) or a
+        step of the clock itself (-Mode utc). Measured from outside, on real
+        time: status.json write gaps, the child's pid, watchdog lines, alerts,
+        segments written after the change, and with -Suspend whether the
+        watchdog still kills a stalled child within its limit afterwards.
+        -ScriptDir runs another version of cam.common.ps1 / cam.recorder.ps1,
+        for the red run against the pre-[86] product.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][ValidateSet('local', 'utc')][string]$Mode,
+        [Parameter(Mandatory = $true)][double]$Delta,
+        [int]$ObserveSeconds = 30,
+        [switch]$Suspend,
+        [string]$ScriptDir
+    )
+
+    $camera = 'synth1'
+    $interval = 1
+    $limit = 6 * 2.5
+    $gapLimit = 3 * $interval + 1.5
+    $sandbox = New-CamTestSynthSandbox -Name ('dstloop-' + $Name) -CameraName $camera -Port 18554 `
+        -Config @{ SegmentSeconds = 6; StallFactor = 2.5; StatusIntervalSeconds = $interval; ReconcileSeconds = 2; ArchiveScanSeconds = 5; PruneIntervalSeconds = 10; BackoffStartSeconds = 1 }
+    if ($ScriptDir) {
+        foreach ($file in @('cam.common.ps1', 'cam.recorder.ps1')) { Copy-Item -LiteralPath (Join-Path $ScriptDir $file) -Destination $sandbox.Dir -Force }
+        [void](Set-CamTestAlertStub -Sandbox $sandbox)
+    }
+    Set-CamTestSandboxClock -Sandbox $sandbox -Mode $Mode
+    $camDir = Join-Path -Path $sandbox.Root -ChildPath $camera
+    $statusPath = Get-CamStatusFilePath -Config $sandbox.Config
+    $segments = { @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $camera -Config $sandbox.Config) }
+    $logLines = { if (Test-Path -LiteralPath $sandbox.SupervisorLog) { @(Get-Content -LiteralPath $sandbox.SupervisorLog) } else { @() } }
+
+    $r = [pscustomobject]@{
+        Name = $Name; Mode = $Mode; Delta = $Delta; Ok = $true; Lines = @(); PidChanges = 0; WatchdogLines = @(); Alerts = @()
+        MaxGap = 0.0; FinalAge = 0.0; SegmentsAfter = 0; Alive = $false; ChildAlive = $false; KilledAfter = $null; Sandbox = $sandbox
+    }
+    $synth = $null
+    $process = $null
+    $suspended = 0
+    try {
+        $synth = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port 18554 -PathName $camera
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        $child = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $camera -TimeoutSeconds 20
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ((& $segments).Count -lt 1 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+
+        $at = [DateTime]::UtcNow.AddSeconds(6)
+        Set-CamTestClockChange -Sandbox $sandbox -AtUtc $at -DeltaSeconds $Delta
+        $linesAtChange = $null
+        $lastWrite = (Get-Item -LiteralPath $statusPath).LastWriteTimeUtc
+        $pid0 = $child
+        $end = $at.AddSeconds($ObserveSeconds)
+        while ([DateTime]::UtcNow -lt $end -and -not $process.HasExited) {
+            if ($null -eq $linesAtChange -and [DateTime]::UtcNow -ge $at) { $linesAtChange = (& $logLines).Count }
+            # The status file is replaced by a rename, so it can be missing for an instant.
+            $item = Get-Item -LiteralPath $statusPath -ErrorAction SilentlyContinue
+            $write = $(if ($item) { $item.LastWriteTimeUtc } else { $lastWrite })
+            if ($write -ne $lastWrite) {
+                $gap = ($write - $lastWrite).TotalSeconds
+                if ($gap -gt $r.MaxGap) { $r.MaxGap = $gap }
+                $lastWrite = $write
+            }
+            $now = Get-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $camera
+            if ($now -gt 0 -and $now -ne $pid0) { $r.PidChanges++; $pid0 = $now }
+            Start-Sleep -Milliseconds 100
+        }
+        $r.FinalAge = ([DateTime]::UtcNow - $lastWrite).TotalSeconds
+        if ($r.FinalAge -gt $r.MaxGap) { $r.MaxGap = $r.FinalAge }
+        $r.SegmentsAfter = @(& $segments | Where-Object { $_.CreationTimeUtc -gt $at }).Count
+        $r.WatchdogLines = @(& $logLines | Where-Object { $_ -like '*watchdog*' })
+        $all = & $logLines
+        if ($null -ne $linesAtChange -and $linesAtChange -gt 0 -and $all.Count -gt $linesAtChange) {
+            $r.Lines += ('  log across the change: ' + $all[$linesAtChange - 1])
+            $r.Lines += ('                     ->  ' + $all[$linesAtChange])
+        }
+        $status = Get-CamTestStatusJson -Sandbox $sandbox
+        $r.Lines += ("  status.json UpdatedAt {0} at real {1:o}" -f $status.Snapshot.UpdatedAt, [DateTime]::UtcNow)
+
+        if ($Suspend -and -not $process.HasExited) {
+            $victim = Get-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $camera
+            $before = (& $segments).Count
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            while ((& $segments).Count -eq $before -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+            Start-Sleep -Milliseconds 500
+            $old = Get-Process -Id $victim
+            $suspendedAt = [DateTime]::UtcNow
+            Suspend-CamTestProcess -ProcessId $victim
+            $suspended = $victim
+            $deadline = $suspendedAt.AddSeconds($limit + 10)
+            while ([DateTime]::UtcNow -lt $deadline -and -not $old.HasExited) { Start-Sleep -Milliseconds 100 }
+            if ($old.HasExited) {
+                $r.KilledAfter = ([DateTime]::UtcNow - $suspendedAt).TotalSeconds
+                [void](Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $camera -Not $victim -TimeoutSeconds 15)
+            }
+            $r.WatchdogLines = @(& $logLines | Where-Object { $_ -like '*watchdog*' })
+        }
+        $r.Alive = -not $process.HasExited
+        $r.ChildAlive = ((Get-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $camera) -gt 0)
+    }
+    catch { $r.Ok = $false; $r.Lines += ('  FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($suspended) {
+            $clear = Resume-CamTestProcess -ProcessId $suspended
+            if (-not $clear) { $r.Ok = $false; $r.Lines += ("  FAIL: pid {0} left suspended" -f $suspended) }
+        }
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $r.Ok = $false; $r.Lines += ('  FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($synth -and -not (Stop-CamTestSyntheticCamera -Camera $synth)) { $r.Ok = $false; $r.Lines += '  FAIL: a synthetic camera process did not exit' }
+    }
+    if (Test-Path -LiteralPath $sandbox.AlertLog) { $r.Alerts = @(Get-Content -LiteralPath $sandbox.AlertLog | Where-Object { $_.Trim() }) }
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    if (-not $leak.Ok) { $r.Ok = $false; $r.Lines += ('  FAIL: ' + $leak.Text) }
+
+    $r.Lines = @(("{0}: {1} {2:+0;-0} s - child restarts {3}, watchdog lines {4}, alerts {5}, largest status.json gap {6} s (limit {7} s), segments after the change {8}, supervisor alive {9}, child alive {10}{11}" -f `
+            $Name, $Mode, $Delta, $r.PidChanges, $r.WatchdogLines.Count, $r.Alerts.Count, (Format-CamNumber -Value $r.MaxGap -Format '0.0'), $gapLimit, $r.SegmentsAfter, $r.Alive, $r.ChildAlive, `
+            $(if ($Suspend) { ", stalled child killed {0} s after the suspend" -f $(if ($null -ne $r.KilledAfter) { Format-CamNumber -Value $r.KilledAfter -Format '0.0' } else { 'NEVER' }) } else { '' }))) + $r.Lines
+    foreach ($line in $r.WatchdogLines) { $r.Lines += ('  log: ' + $line) }
+    foreach ($line in $r.Alerts) { $r.Lines += ('  alert: ' + $line) }
+    return $r
+}
+
+
+function Invoke-CamCheckDstLoop {
+    <#
+        T2 [86]: the real supervisor through a simulated daylight-saving change
+        and through steps of the clock itself, with the machine clock and time
+        zone untouched (Set-CamTestSandboxClock moves the SANDBOX copy's
+        readings only).
+
+          fallback / springforward  local readings move -3600 / +3600 s, UTC
+              does not. PASS needs no disturbance at all: no restart, no
+              watchdog line, no alert, status.json never older than
+              3 x StatusIntervalSeconds + 1.5 s, and a child suspended after
+              the change still killed within the 15 s limit (+10 s).
+          step+3600 / step-3600  the clock itself steps, the seam and the file
+              times with it. UTC arithmetic cannot absorb that and does not
+              pretend to: what happens is reported. PASS needs only that the
+              supervisor survives and the camera keeps recording.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $sandboxes = @()
+    foreach ($phase in @(
+            @{ Name = 'fallback'; Mode = 'local'; Delta = -3600; Suspend = $true },
+            @{ Name = 'springforward'; Mode = 'local'; Delta = 3600; Suspend = $true },
+            @{ Name = 'step+3600'; Mode = 'utc'; Delta = 3600; Suspend = $false },
+            @{ Name = 'step-3600'; Mode = 'utc'; Delta = -3600; Suspend = $false })) {
+        $r = Invoke-CamTestClockPhase -Name $phase.Name -Mode $phase.Mode -Delta $phase.Delta -Suspend:$phase.Suspend
+        $sandboxes += [pscustomobject]@{ Dir = $r.Sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\dstloop.none') }
+        $evidence += $r.Lines
+        $phaseOk = $r.Ok -and $r.Alive -and $r.ChildAlive -and $r.SegmentsAfter -ge 1
+        if ($phase.Mode -eq 'local') {
+            $phaseOk = $phaseOk -and $r.PidChanges -eq 0 -and $r.Alerts.Count -eq 0 -and $r.MaxGap -le 4.5 -and `
+                $null -ne $r.KilledAfter -and $r.KilledAfter -le 25 -and $r.WatchdogLines.Count -eq 2
+        }
+        if (-not $phaseOk) { $ok = $false; $evidence += ('FAIL: ' + $phase.Name) }
+    }
+
+    Complete-CamPruneCheck -Run $Run -Check 'dstloop' -Ok $ok -Evidence $evidence -Sandboxes $sandboxes `
+        -Message 'the real supervisor is undisturbed by a simulated fall-back and spring-forward - no restart, no alert, no stale status, the watchdog still kills a stall - and survives a +/-3600 s step of the clock itself'
+}
+
+
 function Invoke-CamCheckDocSwitches {
     <#
         Every -Switch the documentation names must exist. Two rules, over
@@ -4912,6 +5085,7 @@ foreach ($check in $Checks) {
         'logheld'   { Invoke-CamCheckLogHeld   -Run $run }
         'pruneloop' { Invoke-CamCheckPruneLoop -Run $run }
         'dst'       { Invoke-CamCheckDst       -Run $run }
+        'dstloop'   { Invoke-CamCheckDstLoop   -Run $run }
     }
 }
 
