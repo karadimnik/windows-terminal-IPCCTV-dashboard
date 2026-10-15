@@ -2244,7 +2244,11 @@ function Copy-CamTestMasterFile {
     $linux = (& wsl.exe -e wslpath -a -u $repo) | Select-Object -First 1
     if (-not $linux) { return $false }
     if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
-    & cmd.exe /c ('wsl.exe -e git -C "{0}" show "master:{1}" > "{2}"' -f $linux, $Name, $Destination) | Out-Null
+    # cmd.exe prints 'UNC paths are not supported' to stderr when the current directory is a \\wsl.localhost path, and under
+    # ErrorActionPreference Stop that first stderr line aborts the check with the path as its message. Run it from a local folder.
+    Push-Location -LiteralPath $env:TEMP
+    try { & cmd.exe /c ('wsl.exe -e git -C "{0}" show "master:{1}" > "{2}"' -f $linux, $Name, $Destination) 2>$null | Out-Null }
+    finally { Pop-Location }
     return ((Test-Path -LiteralPath $Destination) -and ((Get-Item -LiteralPath $Destination).Length -gt 0))
 }
 
