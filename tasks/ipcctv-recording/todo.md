@@ -1294,3 +1294,12 @@ The Operator approved all four. Documentation only; no code touched.
   `Remove-CamEmptySegment`. STILL OPEN under [24], commissioned next as part B: the 2250 s stall watchdog,
   `MaxRetentionDays` and alerts 121/122 through the real supervisor loop, a logger that never throws even on
   a failed append, `pruneowner` raising a real toast every run, and one soak at production thresholds.
+- **[24] part B progress, 2026-10-15** (branch `executor/runtime-b`, not merged). B1 `stallwatch`: the watchdog
+  judges directory-listing timestamps only (newest closed LastWriteTime, CreationTime of the open file, child
+  start), never a length; a suspended child is killed 15.4 s after its last write at a 15 s limit, a healthy
+  one over 21 rolls peaks at 6.0 s. B3 `logheld`: `Write-CamLog` no longer throws when the append fails (it
+  killed the supervisor within a second); lost lines are counted in one notice. B2 `pruneloop`: retention and
+  alerts 121/122 fire correctly through the real loop. B4: harness alerts stubbed except `windowclose`.
+  FOUND, NOT FIXED, to be commissioned: the supervisor loop runs on local `[DateTime]::Now`, so DST moves
+  every interval by an hour (fall-back 2026-10-25: timers stall 1 h; spring-forward 2027-03-28: the watchdog
+  kills every child and alert 110 fires for every camera). B5 soak not run.

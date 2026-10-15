@@ -35,6 +35,10 @@ $script:CamDefaultLogMaxBytes = 2MB
 # says so once per episode rather than on every line.
 $script:CamLogRotationBlocked = @{}
 
+# Lines Write-CamLog could not append, per log, reported by the next line that
+# does get written: Lines, Since (the first drop's timestamp) and Reason.
+$script:CamLogDropped = @{}
+
 
 function Get-CamLibRoot {
     <# Directory containing this library and the config files beside it. #>
@@ -1396,6 +1400,11 @@ function Write-CamLog {
         AppendAllText opens with FileShare.Read, so two writers in the same
         instant made one of them throw, and two rotating at once dropped a
         whole generation.
+
+        Never throws over the append either. A reader holding the file with
+        no write sharing, a full disk or a vanished directory loses that one
+        line rather than the recorder; the drops are counted and the next line
+        that is written is preceded by one notice saying how many and why.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Path,
@@ -1406,55 +1415,79 @@ function Write-CamLog {
 
     if ($MaxBytes -le 0) { $MaxBytes = $script:CamDefaultLogMaxBytes }
 
-    $dir = Split-Path -Path $Path -Parent
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-        [void](New-Item -ItemType Directory -Path $dir -Force)
-    }
-
     $stamp = ''
     if (-not $NoTimestamp) { $stamp = "$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss zzz')) " }
     $line = $stamp + (Get-CamRedacted -Text $Message)
     $text = $line + [Environment]::NewLine
     $notice = $null
+    $dropNotice = $null
+    $fullPath = $Path
 
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try { $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($fullPath.ToLowerInvariant())) }
-    finally { $sha.Dispose() }
-    $mutex = New-Object System.Threading.Mutex($false, ('Local\cam.log.' + [System.BitConverter]::ToString($hash, 0, 8).Replace('-', '')))
-    $owned = $false
     try {
-        # A writer killed while holding it leaves it abandoned, which still
-        # hands ownership to the next waiter. A timeout means a writer is
-        # stuck; writing unserialised beats losing the line.
-        try { $owned = $mutex.WaitOne(5000) }
-        catch { $owned = ($_.Exception.InnerException -is [System.Threading.AbandonedMutexException]) }
-
-        $info = New-Object System.IO.FileInfo($fullPath)
-        if ($info.Exists -and $info.Length -ge $MaxBytes) {
-            $rolled = "$fullPath.1"
-            try {
-                [System.IO.File]::Delete($rolled)
-                [System.IO.File]::Move($fullPath, $rolled)
-                $script:CamLogRotationBlocked.Remove($fullPath)
-            }
-            catch {
-                if (-not $script:CamLogRotationBlocked.ContainsKey($fullPath)) {
-                    $script:CamLogRotationBlocked[$fullPath] = $true
-                    $reason = $_.Exception.Message
-                    if ($_.Exception.InnerException) { $reason = $_.Exception.InnerException.Message }
-                    $notice = "{0}log rotation blocked: {1} is {2} bytes, over its {3}-byte limit, and could not be renamed to {4}.1 - {5} Writing continues in place and rotation is retried on every write." -f `
-                        $stamp, $info.Name, $info.Length, $MaxBytes, $info.Name, $reason
-                    $text = $notice + [Environment]::NewLine + $text
-                }
-            }
+        $dir = Split-Path -Path $Path -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            [void](New-Item -ItemType Directory -Path $dir -Force)
         }
 
-        [System.IO.File]::AppendAllText($fullPath, $text, (New-Object System.Text.UTF8Encoding($false)))
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($fullPath.ToLowerInvariant())) }
+        finally { $sha.Dispose() }
+        $mutex = New-Object System.Threading.Mutex($false, ('Local\cam.log.' + [System.BitConverter]::ToString($hash, 0, 8).Replace('-', '')))
+        $owned = $false
+        try {
+            # A writer killed while holding it leaves it abandoned, which still
+            # hands ownership to the next waiter. A timeout means a writer is
+            # stuck; writing unserialised beats losing the line.
+            try { $owned = $mutex.WaitOne(5000) }
+            catch { $owned = ($_.Exception.InnerException -is [System.Threading.AbandonedMutexException]) }
+
+            $info = New-Object System.IO.FileInfo($fullPath)
+            if ($info.Exists -and $info.Length -ge $MaxBytes) {
+                $rolled = "$fullPath.1"
+                try {
+                    [System.IO.File]::Delete($rolled)
+                    [System.IO.File]::Move($fullPath, $rolled)
+                    $script:CamLogRotationBlocked.Remove($fullPath)
+                }
+                catch {
+                    if (-not $script:CamLogRotationBlocked.ContainsKey($fullPath)) {
+                        $script:CamLogRotationBlocked[$fullPath] = $true
+                        $reason = $_.Exception.Message
+                        if ($_.Exception.InnerException) { $reason = $_.Exception.InnerException.Message }
+                        $notice = "{0}log rotation blocked: {1} is {2} bytes, over its {3}-byte limit, and could not be renamed to {4}.1 - {5} Writing continues in place and rotation is retried on every write." -f `
+                            $stamp, $info.Name, $info.Length, $MaxBytes, $info.Name, $reason
+                        $text = $notice + [Environment]::NewLine + $text
+                    }
+                }
+            }
+
+            $dropped = $script:CamLogDropped[$fullPath]
+            if ($dropped) {
+                $dropNotice = "{0}log write failed: {1} line(s) dropped from this log since {2} - {3}" -f `
+                    $stamp, $dropped.Lines, $dropped.Since, $dropped.Reason
+                $text = $dropNotice + [Environment]::NewLine + $text
+            }
+
+            [System.IO.File]::AppendAllText($fullPath, $text, (New-Object System.Text.UTF8Encoding($false)))
+            if ($dropped) { $script:CamLogDropped.Remove($fullPath) }
+        }
+        finally {
+            if ($owned) { $mutex.ReleaseMutex() }
+            $mutex.Dispose()
+        }
     }
-    finally {
-        if ($owned) { $mutex.ReleaseMutex() }
-        $mutex.Dispose()
+    catch {
+        # This line is lost. A rotation notice it carried is not: clearing the
+        # episode makes the next write that still cannot rotate say so again.
+        if ($notice) { $script:CamLogRotationBlocked.Remove($fullPath) }
+        $notice = $null
+        $dropNotice = $null
+        $reason = $_.Exception.Message
+        if ($_.Exception.InnerException) { $reason = $_.Exception.InnerException.Message }
+        $dropped = $script:CamLogDropped[$fullPath]
+        if ($dropped) { $dropped.Lines = $dropped.Lines + 1 }
+        else { $script:CamLogDropped[$fullPath] = @{ Lines = 1; Since = [DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss zzz'); Reason = $reason.Trim() } }
     }
 
     # The NVR window is the supervisor's own console, and the Operator asked
@@ -1464,6 +1497,7 @@ function Write-CamLog {
     # line is added. Only the one registered file echoes: the per-camera logs
     # carry raw ffmpeg stderr and would bury it.
     if ($script:CamLogEchoPath -and $Path -eq $script:CamLogEchoPath) {
+        if ($dropNotice) { Write-Host $dropNotice }
         if ($notice) { Write-Host $notice }
         Write-Host $line
     }

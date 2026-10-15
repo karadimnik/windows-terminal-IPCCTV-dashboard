@@ -1113,6 +1113,66 @@ function Get-CamTestSegmentProbe {
     return [pscustomobject]@{ Codecs = $codecs; Start = $start; Duration = $duration; Raw = $json }
 }
 
+function Suspend-CamTestProcess {
+    <#
+        Freezes every thread of one process (NtSuspendProcess), the way a
+        child that keeps its session open but moves no data looks from
+        outside: alive, holding its files, writing nothing. By pid only, and
+        the pid must come from Get-CamTestChildPid so it is the sandbox's own
+        ffmpeg. Every caller must Resume-CamTestProcess in a finally.
+    #>
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    Add-CamTestNtProcessType
+    $process = Get-Process -Id $ProcessId
+    $status = [CamTest.NtProcess]::NtSuspendProcess($process.Handle)
+    if ($status -ne 0) { throw ("NtSuspendProcess({0}) returned 0x{1:X8}" -f $ProcessId, $status) }
+}
+
+
+function Resume-CamTestProcess {
+    <#
+        Undoes Suspend-CamTestProcess. Returns $true when the process is gone
+        or no thread of it is left suspended.
+    #>
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    Add-CamTestNtProcessType
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $process) { return $true }
+    [void][CamTest.NtProcess]::NtResumeProcess($process.Handle)
+    return (-not (Test-CamTestProcessSuspended -ProcessId $ProcessId))
+}
+
+
+function Test-CamTestProcessSuspended {
+    <# True when the process exists and any of its threads is suspended. #>
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+    $process.Refresh()
+    foreach ($thread in $process.Threads) {
+        if ($thread.ThreadState -eq 'Wait' -and $thread.WaitReason -eq 'Suspended') { return $true }
+    }
+    return $false
+}
+
+
+function Add-CamTestNtProcessType {
+    if ('CamTest.NtProcess' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace CamTest {
+    public static class NtProcess {
+        [DllImport("ntdll.dll")] public static extern int NtSuspendProcess(IntPtr processHandle);
+        [DllImport("ntdll.dll")] public static extern int NtResumeProcess(IntPtr processHandle);
+    }
+}
+'@
+}
+
 
 # ---------------------------------------------------------------------------
 # A warden and the window it watches
