@@ -1,0 +1,224 @@
+{
+ "meta": {
+  "run": "B-main6-mpv",
+  "browser": "mpv",
+  "hw": "n/a (software, no --hwdec, as dashboard)",
+  "tiles": "m1,m2,m3,m4,m5,m6",
+  "layout": "3x2 640x540",
+  "warmup_s": 30,
+  "sample_s": 180,
+  "launch_ms": 1792090206524,
+  "root_pids": "90528,11248,93040,90800,93000,89536",
+  "sample_start_ms": 1792090237287,
+  "sample_end_ms": 1792090424471,
+  "mpv": [
+   {
+    "path": "m1",
+    "before": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    },
+    "after": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    }
+   },
+   {
+    "path": "m2",
+    "before": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    },
+    "after": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    }
+   },
+   {
+    "path": "m3",
+    "before": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    },
+    "after": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    }
+   },
+   {
+    "path": "m4",
+    "before": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    },
+    "after": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    }
+   },
+   {
+    "path": "m5",
+    "before": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    },
+    "after": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    }
+   },
+   {
+    "path": "m6",
+    "before": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    },
+    "after": {
+     "width": 2560,
+     "height": 1440,
+     "frame-drop-count": 0,
+     "video-codec": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+     "estimated-vf-fps": null,
+     "decoder-frame-drop-count": 0,
+     "hwdec-current": "no"
+    }
+   }
+  ],
+  "alive_at_end": 6
+ },
+ "cpu": {
+  "n": 49,
+  "cpu_mean": 140.6,
+  "cpu_max": 378.3,
+  "thread_mean": 18.1,
+  "thread_max": 57.2,
+  "ws_mb": 660.3,
+  "sys_cpu": 100.0,
+  "rig_cpu": 12.8,
+  "procs": 6
+ },
+ "gpu": {
+  "n": 41,
+  "mine": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    21.7,
+    24.8
+   ],
+   "NVIDIA GeForce GTX 1070 Ti|copy": [
+    0.1,
+    0.1
+   ]
+  },
+  "all": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    22.7,
+    25.8
+   ]
+  }
+ },
+ "page": {
+  "tiles": {},
+  "vis": [],
+  "errors": []
+ },
+ "verdict": "smooth",
+ "mpv": [
+  {
+   "path": "m1",
+   "vo_drops": 0,
+   "dec_drops": 0,
+   "hwdec": "no",
+   "size": "2560x1440"
+  },
+  {
+   "path": "m2",
+   "vo_drops": 0,
+   "dec_drops": 0,
+   "hwdec": "no",
+   "size": "2560x1440"
+  },
+  {
+   "path": "m3",
+   "vo_drops": 0,
+   "dec_drops": 0,
+   "hwdec": "no",
+   "size": "2560x1440"
+  },
+  {
+   "path": "m4",
+   "vo_drops": 0,
+   "dec_drops": 0,
+   "hwdec": "no",
+   "size": "2560x1440"
+  },
+  {
+   "path": "m5",
+   "vo_drops": 0,
+   "dec_drops": 0,
+   "hwdec": "no",
+   "size": "2560x1440"
+  },
+  {
+   "path": "m6",
+   "vo_drops": 0,
+   "dec_drops": 0,
+   "hwdec": "no",
+   "size": "2560x1440"
+  }
+ ]
+}

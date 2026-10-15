@@ -1,0 +1,186 @@
+{
+ "meta": {
+  "run": "B-sub6-edge-hwoff",
+  "browser": "edge",
+  "hw": "off",
+  "tiles": "s1,s2,s3,s4,s5,s6",
+  "layout": "grid",
+  "probe": false,
+  "warmup_s": 30,
+  "sample_s": 180,
+  "hide_at_s": 0,
+  "profile": "C:\\Users\\user\\AppData\\Local\\Temp\\stage0\\prof-B-sub6-edge-hwoff-714660",
+  "root_pid": 14224,
+  "launch_ms": 1792088854981,
+  "window": "0,0,1920,1080",
+  "sample_start_ms": 1792088884564,
+  "sample_end_ms": 1792089068818,
+  "pids_end": 1,
+  "profile_removed": true
+ },
+ "cpu": {
+  "n": 85,
+  "cpu_mean": 52.9,
+  "cpu_max": 150.5,
+  "thread_mean": 16.4,
+  "thread_max": 36.1,
+  "ws_mb": 550.3,
+  "sys_cpu": 87.3,
+  "rig_cpu": 7.4,
+  "procs": 12
+ },
+ "gpu": {
+  "n": 79,
+  "mine": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    2.6,
+    4.1
+   ]
+  },
+  "all": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    4.9,
+    10.3
+   ]
+  }
+ },
+ "page": {
+  "tiles": {
+   "s1": {
+    "path": "s1",
+    "res": "640x360",
+    "impl": null,
+    "power_eff": null,
+    "fps": 20.0,
+    "dropped": 0,
+    "received": 3641,
+    "decoded": 3635,
+    "freezes": 1,
+    "freeze_s": 0.26,
+    "lost": 0,
+    "ttff_ms": 1741,
+    "jb_ms": 224.9,
+    "dec_ms": 0.98,
+    "render_dropped": 35,
+    "render_total": 3635,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   },
+   "s2": {
+    "path": "s2",
+    "res": "640x360",
+    "impl": null,
+    "power_eff": null,
+    "fps": 20.0,
+    "dropped": 0,
+    "received": 3639,
+    "decoded": 3632,
+    "freezes": 1,
+    "freeze_s": 0.28,
+    "lost": 0,
+    "ttff_ms": 2079,
+    "jb_ms": 241.1,
+    "dec_ms": 0.97,
+    "render_dropped": 22,
+    "render_total": 3632,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   },
+   "s3": {
+    "path": "s3",
+    "res": "640x360",
+    "impl": null,
+    "power_eff": null,
+    "fps": 20.0,
+    "dropped": 0,
+    "received": 3641,
+    "decoded": 3639,
+    "freezes": 0,
+    "freeze_s": 0,
+    "lost": 0,
+    "ttff_ms": 1954,
+    "jb_ms": 256.9,
+    "dec_ms": 0.97,
+    "render_dropped": 2,
+    "render_total": 3639,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   },
+   "s4": {
+    "path": "s4",
+    "res": "640x360",
+    "impl": null,
+    "power_eff": null,
+    "fps": 20.0,
+    "dropped": 0,
+    "received": 3641,
+    "decoded": 3639,
+    "freezes": 0,
+    "freeze_s": 0,
+    "lost": 0,
+    "ttff_ms": 2227,
+    "jb_ms": 230.2,
+    "dec_ms": 0.91,
+    "render_dropped": 5,
+    "render_total": 3639,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   },
+   "s5": {
+    "path": "s5",
+    "res": "640x360",
+    "impl": null,
+    "power_eff": null,
+    "fps": 20.0,
+    "dropped": 0,
+    "received": 3641,
+    "decoded": 3638,
+    "freezes": 0,
+    "freeze_s": 0,
+    "lost": 0,
+    "ttff_ms": 2498,
+    "jb_ms": 224.5,
+    "dec_ms": 0.92,
+    "render_dropped": 2,
+    "render_total": 3638,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   },
+   "s6": {
+    "path": "s6",
+    "res": "640x360",
+    "impl": null,
+    "power_eff": null,
+    "fps": 20.0,
+    "dropped": 0,
+    "received": 3639,
+    "decoded": 3638,
+    "freezes": 0,
+    "freeze_s": 0,
+    "lost": 0,
+    "ttff_ms": 2542,
+    "jb_ms": 241.9,
+    "dec_ms": 0.92,
+    "render_dropped": 3,
+    "render_total": 3638,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   }
+  },
+  "vis": [
+   "visible"
+  ],
+  "errors": [],
+  "restarts": 0,
+  "gather_ms": {
+   "s1": 198,
+   "s3": 175,
+   "s2": 181,
+   "s4": 169,
+   "s5": 164,
+   "s6": 159
+  },
+  "window_s": 182.0
+ },
+ "verdict": "smooth"
+}

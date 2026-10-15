@@ -1,0 +1,85 @@
+{
+ "meta": {
+  "run": "I2-edge-hwon-s1",
+  "browser": "edge",
+  "hw": "on",
+  "tiles": "s1",
+  "layout": "single",
+  "probe": false,
+  "warmup_s": 15,
+  "sample_s": 10,
+  "hide_at_s": 0,
+  "profile": "C:\\Users\\user\\AppData\\Local\\Temp\\stage0\\prof-I2-edge-hwon-s1-64201a",
+  "root_pid": 16176,
+  "launch_ms": 1792092733480,
+  "window": "0,0,1920,1080",
+  "sample_start_ms": 1792092748261,
+  "sample_end_ms": 1792092760793,
+  "pids_end": 1,
+  "profile_removed": true
+ },
+ "cpu": {
+  "n": 5,
+  "cpu_mean": 29.0,
+  "cpu_max": 89.3,
+  "thread_mean": 13.0,
+  "thread_max": 53.6,
+  "ws_mb": 605.4,
+  "sys_cpu": 86.5,
+  "rig_cpu": 2.8,
+  "procs": 17
+ },
+ "gpu": {
+  "n": 5,
+  "mine": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    0.1,
+    0.1
+   ],
+   "NVIDIA GeForce GTX 1070 Ti|videodecode": [
+    0.5,
+    0.6
+   ]
+  },
+  "all": {
+   "NVIDIA GeForce GTX 1070 Ti|videodecode": [
+    0.5,
+    0.6
+   ]
+  }
+ },
+ "page": {
+  "tiles": {
+   "s1": {
+    "path": "s1",
+    "res": "640x360",
+    "impl": "ExternalDecoder (D3D11VideoDecoder)",
+    "power_eff": true,
+    "fps": 20.3,
+    "dropped": 0,
+    "received": 241,
+    "decoded": 243,
+    "freezes": 0,
+    "freeze_s": 0.0,
+    "lost": 0,
+    "ttff_ms": 2051,
+    "jb_ms": 161.2,
+    "dec_ms": 1.81,
+    "render_dropped": 9,
+    "render_total": 243,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   }
+  },
+  "vis": [
+   "visible"
+  ],
+  "errors": [],
+  "restarts": 0,
+  "gather_ms": {
+   "s1": 173
+  },
+  "window_s": 12.0
+ },
+ "verdict": "marginal"
+}

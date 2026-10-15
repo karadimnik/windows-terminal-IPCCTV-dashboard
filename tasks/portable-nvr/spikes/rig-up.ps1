@@ -31,7 +31,9 @@ webrtcAddress: 127.0.0.1:$($Mtx.Whep)
 webrtcEncryption: no
 webrtcAllowOrigins: ['*']
 webrtcLocalUDPAddress: 127.0.0.1:$($Mtx.Udp)
-webrtcLocalTCPAddress: ''
+# ICE over TCP, loopback only: a Chromium page holding a capture permission offers real interface addresses instead of
+# mDNS names, and then connects ONLY over this TCP candidate (UDP from a LAN address to 127.0.0.1 never completes).
+webrtcLocalTCPAddress: 127.0.0.1:$($Mtx.Udp)
 webrtcIPsFromInterfaces: yes
 webrtcIPsFromInterfacesList: ['Loopback Pseudo-Interface 1']
 webrtcAdditionalHosts: []

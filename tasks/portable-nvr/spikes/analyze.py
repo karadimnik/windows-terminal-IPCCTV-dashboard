@@ -66,13 +66,17 @@ def page_block(page, lo, hi):
     return out
 
 def verdict(page):
+    """smooth: every tile >= 19 fps decoded, <= 1% frames dropped by the decoder, <= 2% dropped at render, freezes total <= 0.5% of the window.
+    marginal: >= 15 fps, <= 5% dropped, freezes <= 3% of the window. otherwise unusable."""
     t = list(page.get('tiles', {}).values())
     if not t: return 'no data'
-    worst_fps = min(x['fps'] or 0 for x in t); frz = sum(x['freezes'] for x in t)
+    w = page.get('window_s') or 1
+    worst_fps = min(x['fps'] or 0 for x in t)
     drop = max((x['dropped'] / x['received']) if x['received'] else 1 for x in t)
     rdrop = max((x.get('render_dropped', 0) / x['render_total']) if x.get('render_total') else 0 for x in t)
-    if worst_fps >= 0.95 * EXPECT_FPS and frz == 0 and drop <= 0.01 and rdrop <= 0.02: return 'smooth'
-    if worst_fps >= 0.75 * EXPECT_FPS and frz <= 3 and drop <= 0.05: return 'marginal'
+    frz = max(x['freeze_s'] for x in t) / w
+    if worst_fps >= 19 and drop <= 0.01 and rdrop <= 0.02 and frz <= 0.005: return 'smooth'
+    if worst_fps >= 15 and drop <= 0.05 and frz <= 0.03: return 'marginal'
     return 'unusable'
 
 def summarize(d, run):
@@ -87,6 +91,13 @@ def summarize(d, run):
     else:
         res['cpu'] = cpu_block(cpu, lo, hi); res['gpu'] = gpu_block(gpu, lo, hi); res['page'] = page_block(page, lo, hi)
         res['verdict'] = verdict(res['page'])
+    if 'mpv' in meta:
+        dd = lambda a, b, k: (b.get(k) or 0) - (a.get(k) or 0)
+        res['mpv'] = [dict(path=m['path'], vo_drops=dd(m['before'], m['after'], 'frame-drop-count'), dec_drops=dd(m['before'], m['after'], 'decoder-frame-drop-count'),
+                           hwdec=m['after'].get('hwdec-current'), size=f"{m['after'].get('width')}x{m['after'].get('height')}") for m in meta['mpv']]
+        exp = EXPECT_FPS * (hi - lo) / 1000.0
+        worst = max((x['vo_drops'] + x['dec_drops']) / exp for x in res['mpv'])
+        res['verdict'] = 'smooth' if worst <= 0.01 and meta.get('alive_at_end') == len(res['mpv']) else ('marginal' if worst <= 0.05 else 'unusable')
     lat = [v for x in page if x.get('ev') == 's' and lo <= x['t'] <= hi for t in x['tiles'] for v in t.get('lat', [])]
     r2c = [v for x in page if x.get('ev') == 's' and lo <= x['t'] <= hi for t in x['tiles'] for v in t.get('r2c', [])]
     if lat: res['latency_s'] = dict(n=len(lat), median=round(st.median(lat), 3), p10=round(sorted(lat)[len(lat) // 10], 3), p90=round(sorted(lat)[(9 * len(lat)) // 10], 3))
@@ -105,7 +116,10 @@ def row(res):
     m = res['meta']; p = res.get('page') or res.get('visible', {}).get('page'); c = res.get('cpu') or res.get('visible', {}).get('cpu'); g = res.get('gpu') or res.get('visible', {}).get('gpu')
     t = list(p['tiles'].values()) if p and p.get('tiles') else []
     impl = sorted({str(x['impl']) for x in t}); fps = '/'.join(str(x['fps']) for x in t)
-    drops = '/'.join(str(x['dropped']) for x in t); frz = '/'.join(str(x['freezes']) for x in t)
+    drops = '/'.join(str(x['dropped']) for x in t); frz = '/'.join(f"{x['freezes']}({x['freeze_s']}s)" for x in t)
+    if res.get('mpv'):
+        impl = ['mpv software, hwdec=' + str(res['mpv'][0]['hwdec'])]; fps = '-'
+        drops = '/'.join(str(x['vo_drops'] + x['dec_drops']) for x in res['mpv']); frz = '-'
     return (f"| {m['run']} | {m['browser']} | {m['hw']} | {m['tiles']} | {c['cpu_mean']} ({c['cpu_max']}) | {c['thread_mean']} ({c['thread_max']}) | {c['ws_mb']} | "
             f"{gpu_str(g['mine'])} | {', '.join(impl)} | {fps} | {drops} | {frz} | {res.get('verdict', '')} |")
 

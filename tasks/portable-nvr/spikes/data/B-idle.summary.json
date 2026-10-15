@@ -1,0 +1,39 @@
+{
+ "meta": {
+  "run": "B-idle",
+  "browser": "none",
+  "hw": "-",
+  "tiles": "(rig + PC only)",
+  "layout": "-",
+  "sample_s": 60,
+  "sample_start_ms": 1792087835924,
+  "sample_end_ms": 1792087897754
+ },
+ "cpu": {
+  "n": 30,
+  "cpu_mean": 45.9,
+  "cpu_max": 143,
+  "thread_mean": 29.4,
+  "thread_max": 76.3,
+  "ws_mb": 102.2,
+  "sys_cpu": 74.9,
+  "rig_cpu": 6.3,
+  "procs": 1
+ },
+ "gpu": {
+  "n": 36,
+  "mine": {},
+  "all": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    3.1,
+    4.4
+   ]
+  }
+ },
+ "page": {
+  "tiles": {},
+  "vis": [],
+  "errors": []
+ },
+ "verdict": "no data"
+}

@@ -1,0 +1,76 @@
+{
+ "meta": {
+  "run": "I2-edge-hwoff-s1",
+  "browser": "edge",
+  "hw": "off",
+  "tiles": "s1",
+  "layout": "single",
+  "probe": false,
+  "warmup_s": 15,
+  "sample_s": 10,
+  "hide_at_s": 0,
+  "profile": "C:\\Users\\user\\AppData\\Local\\Temp\\stage0\\prof-I2-edge-hwoff-s1-099c2c",
+  "root_pid": 93424,
+  "launch_ms": 1792092807469,
+  "window": "0,0,1920,1080",
+  "sample_start_ms": 1792092822888,
+  "sample_end_ms": 1792092835618,
+  "pids_end": 1,
+  "profile_removed": true
+ },
+ "cpu": {
+  "n": 5,
+  "cpu_mean": 30.3,
+  "cpu_max": 40.5,
+  "thread_mean": 8.3,
+  "thread_max": 18.1,
+  "ws_mb": 549.0,
+  "sys_cpu": 86.6,
+  "rig_cpu": 2.8,
+  "procs": 17
+ },
+ "gpu": {
+  "n": 5,
+  "mine": {
+   "NVIDIA GeForce GTX 1070 Ti|3d": [
+    0.2,
+    0.2
+   ]
+  },
+  "all": {}
+ },
+ "page": {
+  "tiles": {
+   "s1": {
+    "path": "s1",
+    "res": "640x360",
+    "impl": "FFmpeg",
+    "power_eff": false,
+    "fps": 19.7,
+    "dropped": 0,
+    "received": 200,
+    "decoded": 197,
+    "freezes": 0,
+    "freeze_s": 0,
+    "lost": 0,
+    "ttff_ms": 761,
+    "jb_ms": 293.2,
+    "dec_ms": 0.96,
+    "render_dropped": 0,
+    "render_total": 197,
+    "audio_level_last": 0,
+    "audio_energy_d": 0
+   }
+  },
+  "vis": [
+   "visible"
+  ],
+  "errors": [],
+  "restarts": 0,
+  "gather_ms": {
+   "s1": 179
+  },
+  "window_s": 10.0
+ },
+ "verdict": "smooth"
+}
