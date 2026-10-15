@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -3779,6 +3779,99 @@ function Invoke-CamCheckSegments {
 }
 
 
+function Invoke-CamCheckBackoff {
+    <#
+        A4: the restart backoff and its HealthyResetSeconds reset, with the
+        real supervisor and a synthetic camera, scaled down to
+        BackoffStartSeconds 1, BackoffMaxSeconds 8, HealthyResetSeconds 15.
+
+        Five kills in quick succession must be answered with waits of 1, 2,
+        4, 8 and 8 s - doubling, then capped - and each restart must actually
+        take at least that long. A child then left healthy for longer than
+        15 s and killed must wait 1 s again, and the next quick kill 2 s.
+        RestartsLastHour in status.json counts every one.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $name = 'synth1'
+    $sandbox = New-CamTestSynthSandbox -Name 'backoff' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = 10; StatusIntervalSeconds = 1; ReconcileSeconds = 2; BackoffStartSeconds = 1; BackoffMaxSeconds = 8; HealthyResetSeconds = 15 }
+
+    # quick: kill as soon as the restart is seen; healthy: let it run past
+    # HealthyResetSeconds first. Expected is the wait the supervisor must log.
+    $plan = @(
+        @{ Kind = 'quick'; Expected = 1 }, @{ Kind = 'quick'; Expected = 2 }, @{ Kind = 'quick'; Expected = 4 },
+        @{ Kind = 'quick'; Expected = 8 }, @{ Kind = 'quick'; Expected = 8 },
+        @{ Kind = 'healthy'; Expected = 1 }, @{ Kind = 'quick'; Expected = 2 }
+    )
+
+    $camera = $null
+    $process = $null
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        $child = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -TimeoutSeconds 20
+        $startedAt = [DateTime]::Now
+        $evidence += ("synthetic camera mediamtx pid {0}, publisher pid {1}; supervisor pid {2}; first child pid {3}" -f `
+            $camera.MediaMtx.Id, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id, $child)
+
+        $k = 0
+        foreach ($step in $plan) {
+            $k++
+            if ($step.Kind -eq 'healthy') {
+                $wait = 18 - ([DateTime]::Now - $startedAt).TotalSeconds
+                if ($wait -gt 0) { Start-Sleep -Milliseconds ([int]($wait * 1000)) }
+            }
+            $ranFor = ([DateTime]::Now - $startedAt).TotalSeconds
+            $killedAt = [DateTime]::Now
+            $gone = Stop-CamTestChildHard -ProcessId $child
+            $next = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -Not $child -TimeoutSeconds 30
+            $took = ([DateTime]::Now - $killedAt).TotalSeconds
+            $startedAt = [DateTime]::Now
+
+            $line = @(Get-Content -LiteralPath $sandbox.SupervisorLog | Where-Object { $_ -match "for $name; restart #$k in (\d+)s$" }) | Select-Object -Last 1
+            $logged = -1
+            if ($line -match 'after (\d+)s for .+ in (\d+)s$') { $logged = [int]$Matches[2] }
+            $verdict = 'ok'
+            # The supervisor ticks once a second and status.json is read once
+            # a second, so a restart is seen up to about 3 s after its wait.
+            if (-not $gone -or $next -le 0 -or $logged -ne $step.Expected -or $took -lt ($step.Expected - 0.5) -or $took -gt ($step.Expected + 4)) {
+                $ok = $false; $verdict = 'FAIL'
+            }
+            $evidence += ("kill {0} ({1,-7} ran {2,4}s): pid {3} -> {4}; logged wait {5}s, expected {6}s, restart seen after {7}s  {8}" -f `
+                $k, $step.Kind, (Format-CamNumber -Value $ranFor -Format '0.0'), $child, $next, $logged, $step.Expected, (Format-CamNumber -Value $took -Format '0.0'), $verdict)
+            if ($line) { $evidence += ('  log: ' + $line) }
+            if ($next -le 0) { break }
+            $child = $next
+        }
+
+        Start-Sleep -Seconds 2
+        $row = @((Get-CamTestStatusJson -Sandbox $sandbox).Snapshot.Cameras)[0]
+        $evidence += ("status.json: RestartsLastHour {0}, RestartsTotal {1}, Alive {2}, LastError '{3}'" -f $row.RestartsLastHour, $row.RestartsTotal, $row.Alive, $row.LastError)
+        if ([int]$row.RestartsLastHour -ne $plan.Count -or -not $row.Alive) { $ok = $false; $evidence += ("FAIL: RestartsLastHour should be {0} with the child alive" -f $plan.Count) }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $evidence += $leak.Text
+    if (-not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'backoff' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\backoff.none') }) `
+        -Message 'restart waits double from BackoffStartSeconds to BackoffMaxSeconds, reset after HealthyResetSeconds of health, and RestartsLastHour counts them'
+}
+
+
 function Invoke-CamCheckDocSwitches {
     <#
         Every -Switch the documentation names must exist. Two rules, over
@@ -3967,6 +4060,7 @@ foreach ($check in $Checks) {
         'doclinks' { Invoke-CamCheckDocLinks -Run $run }
         'logrotate' { Invoke-CamCheckLogRotate -Run $run }
         'segments'  { Invoke-CamCheckSegments  -Run $run }
+        'backoff'   { Invoke-CamCheckBackoff   -Run $run }
     }
 }
 
