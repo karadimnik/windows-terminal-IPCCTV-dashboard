@@ -4217,6 +4217,7 @@ function Invoke-CamCheckSoak {
         }
         if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
     }
+    & $tickLogs
     $evidence += ("run: {0} s of recording, ended {1}; supervisor died during the run: {2}; stop took {3} s, clean {4}" -f [int]$runSeconds, $endClock, $died, (& $num $stopSeconds '0.0'), $stopOk)
     if ($died) { $ok = $false; $evidence += 'FAIL: the supervisor exited before the run ended' }
 
@@ -4266,13 +4267,20 @@ function Invoke-CamCheckSoak {
             $evidence += ("  roll at {0} ({1} s in, {2} s after the previous): .1 is {3} B (limit {4}), new file {5} B when first seen; last line of .1 to first of the new file {6}" -f $event.Local, [int]$event.Elapsed, [int]($event.Elapsed - $previous), $event.Before, $max, $event.After, $gapText)
             $evidence += ('    last of .1:  ' + $event.LastOld.Substring(0, [math]::Min(170, $event.LastOld.Length)))
             $evidence += ('    first of new: ' + $event.FirstNew.Substring(0, [math]::Min(170, $event.FirstNew.Length)))
+            if ($key -eq 'cam' -and $event.LastOld -match 'previous: (\d+),' -and $event.FirstNew -match 'previous: (\d+),') {
+                # The synthetic camera repeats a timestamp every 2nd frame at 30 fps: consecutive warnings are 66.7 ms apart.
+                $before = [double]([regex]::Match($event.LastOld, 'previous: (\d+),').Groups[1].Value)
+                $after = [double]([regex]::Match($event.FirstNew, 'previous: (\d+),').Groups[1].Value)
+                $evidence += ("    timestamps in the warnings across the roll: {0} -> {1}, step {2} (expected 66.7 when no warning is lost; a lost one would read 133 or more)" -f $before, $after, ($after - $before))
+                if (($after - $before) -lt 55 -or ($after - $before) -gt 80) { $ok = $false; $evidence += '    FAIL: a warning was lost or repeated across the roll' }
+            }
             $previous = $event.Elapsed
             if ($event.Before -lt $max -or $event.Before -gt ($max + 4096) -or -not $oldStamp -or -not $newStamp -or ($newStamp - $oldStamp).TotalSeconds -gt 3) { $ok = $false; $evidence += '    FAIL: the roll was not at the limit, or the lines either side are not adjacent' }
         }
         if ($key -eq 'cam') {
             $camBytes = $events.Count * 1L * $max + (New-Object System.IO.FileInfo($camLog)).Length
             $first = $(if ($events.Count) { $events[0].Elapsed } else { $runSeconds })
-            $evidence += ("  {0} grew to {1} B in {2} s: {3} B/s overall; first 2 MB-limit roll after {4} s" -f $label, $camBytes, [int]$runSeconds, (Format-CamNumber -Value ($camBytes / $runSeconds) -Format '0'), $(if ($events.Count) { [int]$first } else { 'none' }))
+            $evidence += ("  {0} grew to {1} B in {2} s: {3} B/s overall; first limit roll after {4} s" -f $label, $camBytes, [int]($runSeconds + $stopSeconds), (Format-CamNumber -Value ($camBytes / ($runSeconds + $stopSeconds)) -Format '0'), $(if ($events.Count) { [int]$first } else { 'none' }))
         }
         if ($events.Count -lt 1) { $ok = $false; $evidence += "FAIL: $label never rolled" }
     }
@@ -4284,14 +4292,14 @@ function Invoke-CamCheckSoak {
     $missing = $padState.N - $unique.Count
     $evidence += ("recorder.log was padded by this process through Write-CamLog: {0} numbered line(s) written, {1} found across recorder.log.1 + recorder.log, {2} missing, {3} duplicated" -f $padState.N, $unique.Count, $missing, ($numbers.Count - $unique.Count))
     if ($padState.N -lt 1 -or $missing -ne 0 -or $numbers.Count -ne $unique.Count -or ($unique.Count -and $unique[-1] -ne $padState.N)) { $ok = $false; $evidence += 'FAIL: padding lines were lost or duplicated around the recorder.log roll' }
-    $own = @(@($recLog + '.1', $recLog) | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { [System.IO.File]::ReadAllLines($_) } | Where-Object { $_ -notlike '*soak padding*' })
+    $own = @(@(($recLog + '.1'), $recLog) | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { [System.IO.File]::ReadAllLines($_) } | Where-Object { $_ -notlike '*soak padding*' })
     $evidence += ("supervisor's own lines in recorder.log (+.1), {0}:" -f $own.Count)
     $evidence += @($own | Select-Object -First 40 | ForEach-Object { '  ' + $_.Substring(0, [math]::Min(230, $_.Length)) })
 
     # 3. restarts, alerts, stalls
     $row = @($final.Snapshot.Cameras)[0]
     $restartLines = @($own | Where-Object { $_ -match 'restart #' -or $_ -match 'exited' })
-    $stallLines = @($own | Where-Object { $_ -match '(?i)stall|watchdog' })
+    $stallLines = @($own | Where-Object { $_ -match '(?i)\bstall|watchdog' })
     $alerts = 0
     if (Test-Path -LiteralPath $sandbox.AlertLog) { $alerts = @(Get-Content -LiteralPath $sandbox.AlertLog).Count }
     $evidence += ("restarts: RestartsTotal {0}, RestartsLastHour {1}, child pid(s) seen {2}, restart/exit log lines {3}; stall or watchdog lines {4}; alerts recorded by the stub {5}; final status State {6}, LastError '{7}'" -f $row.RestartsTotal, $row.RestartsLastHour, (@($pids) -join ','), $restartLines.Count, $stallLines.Count, $alerts, $final.Snapshot.State, $row.LastError)
@@ -4299,7 +4307,7 @@ function Invoke-CamCheckSoak {
 
     # 4. status.json
     $limit = Get-CamTestCadenceLimit -IntervalSeconds $sandbox.Config.StatusIntervalSeconds
-    $evidence += ("status.json: {0} distinct updates seen, longest gap between updates {1} s (at {2}; interval {3} s, harness limit {4} s), samples not running {5}, unreadable polls {6}" -f $statusSeen.Updates, (Format-CamNumber -Value $statusSeen.MaxGap -Format '0.0'), $statusSeen.GapAt, $sandbox.Config.StatusIntervalSeconds, $limit, $statusSeen.NotRunning, $statusSeen.Unreadable)
+    $evidence += ("status.json: {0} distinct updates seen, longest gap between updates {1} s (at {2}; interval {3} s, harness limit {4} s), samples not running {5}, unreadable polls {6}" -f $statusSeen.Updates, (Format-CamNumber -Value $statusSeen.MaxGap -Format '0.0'), $statusSeen.GapAt, $sandbox.Config.StatusIntervalSeconds, (Format-CamNumber -Value $limit -Format '0.0'), $statusSeen.NotRunning, $statusSeen.Unreadable)
     if ($statusSeen.MaxGap -gt $limit -or $statusSeen.NotRunning) { $ok = $false; $evidence += 'FAIL: status.json went stale or left the running state' }
 
     # 5. longevity
