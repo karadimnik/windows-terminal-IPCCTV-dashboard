@@ -1462,7 +1462,10 @@ function Test-CamRestreamer {
     }
 
     $ready = @(Get-CamRelayReadyPaths -Config $Config)
-    if ($ready.Count -eq 0) {
+    if ((Get-CamRelayApiStatus) -eq 'denied') {
+        Add-CamTestResult -Check 'restreamer serving' -Status 'FAIL' -Detail ("the control API at {0} refused the product's login: consumers are kept on the relay but readiness is not visible. Restart with cam.ps1 -Stop and -Start" -f [string]$Config.RelayApiBase)
+    }
+    elseif ($ready.Count -eq 0) {
         Add-CamTestResult -Check 'restreamer serving' -Status 'INFO' -Detail ("not reachable at {0}: consumers will use the direct camera inputs" -f [string]$Config.RelayApiBase)
     }
     else {
@@ -2018,7 +2021,43 @@ function New-CamRelayEntry {
     # Path name -> camera, read from cameras.json at every start so an
     # -Enable or an IP change is picked up by the next restart.
     $entry.PathMap = $null
+    # True from the first refused control-API login until the next accepted
+    # one: the episode Update-CamRelayLoginEpisode alerts on once.
+    $entry.LoginRefused = $false
     return $entry
+}
+
+
+function Update-CamRelayLoginEpisode {
+    <#
+        Alerts ONCE per episode of the control API refusing the product's
+        login, judged from this process's most recent API answer.
+
+        A refused login is a configuration fault, not a dead relay (see
+        Invoke-CamRelayApi): every consumer is kept on the relay, which serves
+        RTSP without a login, but whether each path is serving can no longer
+        be seen. The alert's ALERT line in the supervisor log is the one log
+        line; nothing more until an accepted login ends the episode. A relay
+        that goes down meanwhile does not end it, so a restart loop cannot
+        repeat the alert. Neither line carries the login.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$SupervisorLog
+    )
+
+    $status = Get-CamRelayApiStatus
+    if ($status -eq 'denied' -and -not $Entry.LoginRefused) {
+        $Entry.LoginRefused = $true
+        [void](Send-CamAlert -Title "the restreamer refused the recorder's login" `
+                -Message ("The MediaMTX control API at {0} refused the product's login (HTTP 401). Viewers and recorders are kept on the relay, but whether each camera is being served cannot be seen. Restart with cam.ps1 -Stop and -Start: the restreamer start rewrites its config to the stored login." -f [string]$Config.RelayApiBase) `
+                -EventId 130 -EntryType 'Error' -LogPath $SupervisorLog -LogMaxBytes ([int]$Config.LogMaxBytes))
+    }
+    elseif ($status -eq 'ok' -and $Entry.LoginRefused) {
+        $Entry.LoginRefused = $false
+        Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message "the restreamer's control API accepts the product's login again"
+    }
 }
 
 
@@ -3555,7 +3594,10 @@ function Invoke-CamSupervisor {
                 if (-not $candidate.Process -and $now -ge $candidate.NextStartAt) { $pendingStart = $true; break }
             }
             $relayReady = $null
-            if ($relay -and ($statusDue -or $pendingStart)) { $relayReady = @(Get-CamRelayReadyPaths -Config $Config) }
+            if ($relay -and ($statusDue -or $pendingStart)) {
+                $relayReady = @(Get-CamRelayReadyPaths -Config $Config)
+                Update-CamRelayLoginEpisode -Entry $relay -Config $Config -SupervisorLog $supervisorLog
+            }
 
             # Until when a child may be held back from starting, waiting for its
             # own relay path. It is the RESTREAMER'S age that decides, because

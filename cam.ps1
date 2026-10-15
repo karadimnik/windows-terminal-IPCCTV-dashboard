@@ -241,6 +241,7 @@ function Get-CamComponentState {
     $readyPaths = @()
     if (Get-CamRelayEnabled -Config $Config) {
         try { $readyPaths = @(Get-CamRelayReadyPaths -Config $Config) } catch { $readyPaths = @() }
+        $relayApi = Get-CamRelayApiStatus
     }
 
     # By the handle its warden published, not by the title it is showing. A
@@ -276,6 +277,7 @@ function Get-CamComponentState {
         GridWindows     = $gridWindow.Count
         HealthWindows   = @(Get-CamTerminalWindow -Title 'cam.health').Count
         ReadyPaths      = $readyPaths
+        RelayApi        = $relayApi
     }
 }
 
@@ -357,7 +359,13 @@ function Show-CamStatus {
     }
     else {
         Write-Host ("  mediamtx     {0} process(es)" -f $State.Relay.Count)
-        Write-Host ("  serving      {0} path(s): {1}" -f $State.ReadyPaths.Count, (($State.ReadyPaths | Sort-Object) -join ', '))
+        if ($State.RelayApi -eq 'denied') {
+            Write-Host "  serving      unknown: the control API REFUSED the product's login, so every consumer is kept on the relay." -ForegroundColor Red
+            Write-Host '               Run .\cam.recorder.ps1 -InstallRestreamer, then .\cam.ps1 -Stop and -Start.' -ForegroundColor Yellow
+        }
+        else {
+            Write-Host ("  serving      {0} path(s): {1}" -f $State.ReadyPaths.Count, (($State.ReadyPaths | Sort-Object) -join ', '))
+        }
     }
 
     Write-CamSection 'dashboard'

@@ -2138,12 +2138,15 @@ function Get-CamAlertEventIdList {
                deletable is left, so the disk is filling
           122  the age rule's circuit breaker held a run that would have
                deleted more than MaxAgePruneFraction of the archive
+          130  the restreamer's control API refused the product's login, so
+               readiness is not visible and every consumer is kept on the
+               relay
 
         103 is its own ID rather than another 100 because the log is where the
         Operator reads back what happened, and "somebody closed the window" and
         "the supervisor died" need different answers from him.
     #>
-    return @(100, 101, 102, 103, 110, 120, 121, 122)
+    return @(100, 101, 102, 103, 110, 120, 121, 122, 130)
 }
 
 
