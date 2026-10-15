@@ -1317,3 +1317,10 @@ The Operator approved all four. Documentation only; no code touched.
       and `%z`. A watchdog-only fix is WRONG: at fall-back its input scan is frozen by the local status timer
       and it would false-kill healthy children after about 37.5 minutes. Also widen the 3 s status-gap
       assertions in the new runtime checks (one flaked at 3.7 s under load) to a multiple of the status interval.
+      Implemented 2026-10-15 on `executor/dst-utc` (not merged): `Get-CamWallClock` returns UTC and every
+      interval, age and deadline in `cam.common.ps1`, `cam.recorder.ps1` and `cam.ps1` reads it; file times feed
+      arithmetic only as `*Utc`; `Format-CamTimestamp` keeps the local+offset text and `Get-CamDateTimeOrNull`
+      reads it as an instant. Harness checks `dst` (T1, red against the old logic at both transitions), `dstloop`
+      (T2, the real supervisor through a simulated fall-back and spring-forward and a +/-3600 s clock step) and
+      `clocklint` (T3). Status-gap limits are now 3 x interval + 1.5 s. A real transition has not been observed
+      live; a step of the UTC clock itself is still not absorbed (docs/limitations.md item 14).
