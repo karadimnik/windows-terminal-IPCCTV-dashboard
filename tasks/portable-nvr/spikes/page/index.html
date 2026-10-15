@@ -1,0 +1,132 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>stage0 tiles</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;font:12px Consolas,monospace}
+  #g{display:grid;width:100vw;height:100vh;gap:0}
+  .t{position:relative;background:#111;overflow:hidden;min-width:0;min-height:0}
+  .t video{width:100%;height:100%;object-fit:contain;background:#000;display:block}
+  .l{position:absolute;right:4px;bottom:2px;color:#0f0;background:#0008;padding:0 3px}
+</style>
+<div id="g"></div>
+<script>
+// Query: tiles=m1,m2,..  layout=grid(3x2)|focus(3x3, first tile spans 2x2)|single(1x1)  run=<id>  mtx=<whep base>
+//        probe=1 (decode the burned-in frame barcode for a latency estimate)  unmute=<seconds> (unmute tile 0 once)
+const q = new URLSearchParams(location.search);
+const RUN = q.get('run') || 'adhoc';
+const PATHS = (q.get('tiles') || 'm1').split(',');
+const LAYOUT = q.get('layout') || 'grid';
+const MTX = q.get('mtx') || 'http://127.0.0.1:18889';
+const PROBE = q.get('probe') === '1';
+const CAP = q.get('cap') === '1';   // hold a fake audio capture so Chromium exposes decoderImplementation in getStats
+const UNMUTE = parseFloat(q.get('unmute') || '0');
+const CLIP_S = 30, FPS = 20;
+let T0 = {};
+const g = document.getElementById('g');
+if (LAYOUT === 'focus') { g.style.gridTemplate = 'repeat(3,1fr)/repeat(3,1fr)'; } else if (LAYOUT === 'single') { g.style.gridTemplate = '1fr/1fr'; } else { g.style.gridTemplate = 'repeat(2,1fr)/repeat(3,1fr)'; }
+const post = (o) => fetch('/stats?run=' + encodeURIComponent(RUN), { method: 'POST', body: JSON.stringify(o) }).catch(() => {});
+const tiles = PATHS.map((p, i) => {
+  const d = document.createElement('div'); d.className = 't';
+  if (LAYOUT === 'focus' && i === 0) { d.style.gridColumn = 'span 2'; d.style.gridRow = 'span 2'; }
+  const v = document.createElement('video'); v.muted = true; v.autoplay = true; v.playsInline = true;
+  const l = document.createElement('div'); l.className = 'l'; l.textContent = p;
+  d.append(v, l); g.append(d);
+  return { path: p, i, video: v, pc: null, lat: [], r2c: [], ttff: null, up: false };
+});
+
+function iceDone(pc, ms) {
+  return new Promise(res => {
+    if (pc.iceGatheringState === 'complete') return res();
+    const to = setTimeout(res, ms);
+    pc.addEventListener('icegatheringstatechange', () => { if (pc.iceGatheringState === 'complete') { clearTimeout(to); res(); } });
+  });
+}
+async function start(t) {
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [] }); t.pc = pc;
+    pc.addTransceiver('video', { direction: 'recvonly' });
+    pc.addTransceiver('audio', { direction: 'recvonly' });
+    pc.ontrack = ev => { if (t.video.srcObject !== ev.streams[0]) t.video.srcObject = ev.streams[0]; };
+    if (t.i === 0) pc.onicecandidate = ev => post({ ev: 'cand', c: ev.candidate ? ev.candidate.candidate : 'end', t: Date.now() });
+    pc.onconnectionstatechange = () => {
+      post({ ev: 'conn', path: t.path, state: pc.connectionState, t: Date.now() });
+      if (pc.connectionState === 'failed' && t.pc === pc) { t.up = false; pc.close(); post({ ev: 'restart', path: t.path, t: Date.now() }); setTimeout(() => start(t), 500); }
+    };
+    const t1 = performance.now();
+    await pc.setLocalDescription(await pc.createOffer());
+    await iceDone(pc, 2000);
+    const gather = performance.now() - t1;
+    const r = await fetch(MTX + '/' + t.path + '/whep', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+    if (r.status !== 201) throw new Error('WHEP HTTP ' + r.status + ' ' + (await r.text()).slice(0, 120));
+    await pc.setRemoteDescription({ type: 'answer', sdp: await r.text() });
+    const t2 = performance.now();
+    t.video.requestVideoFrameCallback(() => {
+      t.ttff = performance.now() - t1;
+      post({ ev: 'ttff', path: t.path, ms: Math.round(t.ttff), gather_ms: Math.round(gather), signalling_ms: Math.round(t2 - t1), t: Date.now() });
+    });
+    if (PROBE) probeLoop(t);
+    t.up = true;
+  } catch (e) { post({ ev: 'error', path: t.path, msg: String(e), t: Date.now() }); setTimeout(() => start(t), 2000); }
+}
+const cv = document.createElement('canvas'); cv.width = 16; cv.height = 1;
+const cx = cv.getContext('2d', { willReadFrequently: true });
+function probeLoop(t) {
+  const cb = (now, meta) => {
+    try {
+      const v = t.video, w = v.videoWidth, h = v.videoHeight;
+      if (w && T0[t.path]) {
+        cx.drawImage(v, 0, 0, w, h / 18, 0, 0, 16, 1);
+        const d = cx.getImageData(0, 0, 16, 1).data;
+        const bit = k => d[k * 4 + 1] > 128 ? 1 : 0;
+        if (bit(0) === 1 && bit(11) === 0) {
+          let n = 0; for (let b = 0; b < 10; b++) n |= bit(b + 1) << b;
+          const wall = Date.now();
+          const phase = ((wall - T0[t.path]) / 1000) % CLIP_S;
+          let lat = phase - n / FPS; lat = ((lat + CLIP_S / 2) % CLIP_S + CLIP_S) % CLIP_S - CLIP_S / 2;
+          t.lat.push(lat);
+          if (meta.receiveTime) t.r2c.push(now - meta.receiveTime);
+        }
+      }
+    } catch (e) {}
+    v_rvfc(t, cb);
+  };
+  v_rvfc(t, cb);
+}
+function v_rvfc(t, cb) { t.video.requestVideoFrameCallback(cb); }
+
+const VF = ['framesReceived','framesDecoded','framesDropped','framesPerSecond','decoderImplementation','powerEfficientDecoder','jitterBufferDelay','jitterBufferEmittedCount','totalDecodeTime','totalInterFrameDelay','totalProcessingDelay','freezeCount','totalFreezesDuration','pauseCount','frameWidth','frameHeight','packetsLost','packetsReceived','bytesReceived','keyFramesDecoded','nackCount','pliCount','jitter'];
+const AF = ['audioLevel','totalAudioEnergy','totalSamplesReceived','totalSamplesDuration','concealedSamples','jitterBufferDelay','jitterBufferEmittedCount','packetsLost','packetsReceived'];
+const pick = (r, keys) => { const o = {}; if (!r) return o; for (const k of keys) if (r[k] !== undefined) o[k] = r[k]; return o; };
+async function sample(t) {
+  const o = { path: t.path, up: t.up, muted: t.video.muted, vw: t.video.videoWidth, vh: t.video.videoHeight, cur: t.video.currentTime };
+  try { const q = t.video.getVideoPlaybackQuality(); o.vq = { total: q.totalVideoFrames, dropped: q.droppedVideoFrames }; } catch (e) {}
+  if (t.pc) {
+    try {
+      let v, a, cp;
+      (await t.pc.getStats()).forEach(r => {
+        if (r.type === 'inbound-rtp' && r.kind === 'video') v = r;
+        if (r.type === 'inbound-rtp' && r.kind === 'audio') a = r;
+        if (r.type === 'candidate-pair' && (r.nominated || r.state === 'succeeded')) cp = r;
+      });
+      o.v = pick(v, VF); o.a = pick(a, AF);
+      if (cp && cp.currentRoundTripTime !== undefined) o.rtt = cp.currentRoundTripTime;
+    } catch (e) { o.err = String(e); }
+  }
+  if (t.lat.length) { o.lat = t.lat.splice(0); }
+  if (t.r2c.length) { o.r2c = t.r2c.splice(0); }
+  return o;
+}
+async function tick() {
+  const all = await Promise.all(tiles.map(sample));
+  post({ ev: 's', t: Date.now(), vis: document.visibilityState, tiles: all });
+}
+fetch('/t0.json').then(r => r.json()).catch(() => ({})).then(j => { T0 = j; });
+post({ ev: 'start', t: Date.now(), ua: navigator.userAgent, layout: LAYOUT, tiles: PATHS, w: innerWidth, h: innerHeight, dpr: devicePixelRatio });
+(async () => {
+  if (CAP) { try { window.capStream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e) { post({ ev: 'error', path: '-', msg: 'cap ' + e, t: Date.now() }); } }
+  tiles.forEach((t, i) => setTimeout(() => start(t), i * 150));
+})();
+setInterval(tick, 2000);
+if (UNMUTE > 0) setTimeout(() => { tiles[0].video.muted = false; tiles[0].video.volume = 1; post({ ev: 'unmute', t: Date.now() }); }, UNMUTE * 1000);
+document.addEventListener('visibilitychange', () => post({ ev: 'vis', state: document.visibilityState, t: Date.now() }));
+</script>
