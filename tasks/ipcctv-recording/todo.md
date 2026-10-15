@@ -1360,7 +1360,7 @@ The Operator approved all four. Documentation only; no code touched.
       `loadfile`, then unsets the pipe so nothing can reconnect to read the `path` back. A failed hand-over never falls
       back to the command line. Check `viewerpw`: password on 0 of 104 process-listing sweeps, red against the old
       function. Audit of the remaining exposures: [89], and the ffmpeg direct path below.
-- [ ] **[89]** SECURITY, found by the [88] audit and reproduced 2026-10-15: MediaMTX's control API (`api: yes`, no
+- [x] **[89]** DONE 2026-10-15 on branch `executor/relay-api-auth` (not merged; design in `relay-api-auth.md`, check `relayapi`). SECURITY, found by the [88] audit and reproduced 2026-10-15: MediaMTX's control API (`api: yes`, no
       `authMethod`, loopback) returns a camera's full `rtsp://user:PASSWORD@...` source from `/v3/config/paths/list` and
       `/v3/config/paths/get/<name>` to ANY local process or Windows account; the routes the product uses
       (`/v3/paths/*`) do not leak it. No `Access-Control-Allow-Origin` is sent, so an ordinary web page cannot read it

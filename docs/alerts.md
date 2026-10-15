@@ -12,11 +12,12 @@ An unexpected stop alerts on three channels, and an orderly `cam.ps1 -Stop` rais
 | `120` | Error | pruning is disabled: `RootPath` is unsafe or not the recorder's own archive, so the disk will fill |
 | `121` | Error | pruning is blocked: free space is below `ReserveGB` and nothing deletable is left, so the disk is filling. Once per episode; recording continues |
 | `122` | Error | the age rule's circuit breaker held a run that would have deleted more than `MaxAgePruneFraction` of the archive. Once per episode; the free-space rule still runs |
+| `130` | Error | the relay's control API refused the product's login, so which cameras it is serving cannot be seen; every consumer is kept on the relay. Once per episode; restart with `cam.ps1 -Stop` and `-Start` |
 
 Registering a custom event source writes to `HKLM` and needs elevation, so by default the entries go out under the always-registered `Application` source. `.\cam.recorder.ps1 -InstallEventSource`, run elevated once ([Install and uninstall](../README.md#install-and-uninstall)), registers the `IPCCTV` source instead, with `EventCreate.exe` as the message resource so `.Message` renders. Everything works without it; that is what the prefix is for. Reading them back:
 
 ```powershell
-Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 100,101,102,103,110,120,121,122 } |
+Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 100,101,102,103,110,120,121,122,130 } |
   Select-Object TimeCreated, Id, LevelDisplayName, ProviderName,
     @{ n = 'Text'; e = { if ($_.Message) { $_.Message } else { [string]$_.Properties[0].Value } } } |
   Where-Object { $_.Text -like 'IPCCTV: *' }
