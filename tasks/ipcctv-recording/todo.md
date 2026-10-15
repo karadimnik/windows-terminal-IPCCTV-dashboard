@@ -118,7 +118,7 @@ srt/moq - transport fan-out only, never a media server, never a recorder.
   becomes their second consumer. They are grouped under one section header for a clean cut-and-paste.
 
 **Open, carried forward:**
-- [ ] **[23]** Operator to run camera-facing `-SelfTest` (checks b/c/d) with the dashboard CLOSED.
+- [x] **[23]** Operator to run DONE 2026-10-15, reported "done ok" by the Operator (camera-facing -SelfTest).  camera-facing `-SelfTest` (checks b/c/d) with the dashboard CLOSED.
       Never executed - the Phase B agent was forbidden from touching cameras.
 - [ ] **[24]** Untested over time: log rotation at `LogMaxBytes`, the 900 s production segment path,
       `HealthyResetSeconds` backoff reset, the real 2250 s stall threshold, `MaxRetentionDays`.
@@ -298,11 +298,11 @@ archive. Reduced to a 256-colour palette, 894 KB instead of 2.4 MB, strip text u
 
 ## Carried forward after Phase D
 
-- [ ] **[29]** TECHNICAL DEBT, unchanged and now due: `cam.recorder.ps1` is 3,432 lines. The feature
+- [x] **[29]** TECHNICAL DEBT, unchanged and now due: PRIORITY LOWERED by the Operator 2026-10-15: "very low priority, especially if we switch architecture and make it OS independent". Do not commission.  `cam.recorder.ps1` is 3,432 lines. The feature
       is complete and green, so the split can be commissioned.
 - [ ] **[32]** `Restreamer.Paths` still counts CONFIGURED paths, not READY ones. Documented as README
       limitation 14 rather than fixed.
-- [ ] **[23]/[24]** The long-run paths named in [24] remain unexercised: log rotation at
+- [x] **[23]/[24]** The long-run paths named in [24] remain unexercised: [23] DONE by the Operator 2026-10-15; the [24] long-run paths have since been exercised in a sandbox (parts A and B); only the production-values soak remains.  log rotation at
       `LogMaxBytes`, the full 900 s segment, `HealthyResetSeconds`, the 2250 s stall watchdog,
       `MaxRetentionDays`. README limitation 7 says so plainly.
 
@@ -1331,3 +1331,13 @@ The Operator approved all four. Documentation only; no code touched.
       alert 110; backward: timers frozen until the clock catches up) - a monotonic Stopwatch would absorb it, not built;
       a warden created inside the repeated hour reads 1 h old so -Status loses the window name for that hour (recording
       unaffected). One flaky phase seen once by the agent (dstloop step-3600, Access denied on a test file rename).
+
+- [ ] **[87]** DIRECTION, Operator 2026-10-15, not yet decided: a browser-based monitor in place of mpv panes, which
+      would also make the viewer OS independent and make [29] largely moot. His reasoning for the mpv password
+      exposure (a pane that falls back to a direct connection puts the camera password on mpv's command line):
+      "cannot be fixed in this architecture, but a browser monitor probably can; unless there is nothing more
+      robust than mpv; even if mpv had an API that would do". Earlier research already cleared the technical traps
+      for MediaMTX WebRTC live view: no B-frames (7 I / 165 P / 0 B, profile Main) and 8 kHz G.711 (RFC 7874 makes
+      PCMA mandatory). It is the plan's V3. TO DO: (a) test whether mpv's JSON IPC (`--input-ipc-server`, then
+      `loadfile`) keeps the URL off the process command line - an in-architecture fix; (b) interview the Operator
+      on the browser direction before any build: scope, which OS, what to keep of the grid and health strip.
