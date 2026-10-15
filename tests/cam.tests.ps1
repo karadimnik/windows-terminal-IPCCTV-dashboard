@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -3872,6 +3872,142 @@ function Invoke-CamCheckBackoff {
 }
 
 
+function Invoke-CamCheckLogRotateLive {
+    <#
+        A2: rotation inside the real supervisor at LogMaxBytes 8192, recording
+        a synthetic camera whose stream makes ffmpeg warn as the real cameras
+        do, with LogRepeatSuppressSeconds 0 so the camera log grows.
+
+        - free: recorder.log and the camera's log both roll while recording
+          continues and status.json keeps updating;
+        - held: a reader holds recorder.log without delete sharing while the
+          supervisor crosses the limit (and a Get-Content -Wait follows the
+          camera log). The supervisor stays up, logs the blocked rotation
+          once, keeps writing; the first write after the reader lets go rolls.
+        - throughout: no gap between segments beyond SegmentSeconds.
+
+        recorder.log is padded through Write-CamLog from this process - a
+        second writer, as the NVR host is - to just under the limit, so the
+        crossing itself is always the supervisor's own write.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $name = 'synth1'
+    $max = 8192
+    $sandbox = New-CamTestSynthSandbox -Name 'logrotatelive' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = 10; StatusIntervalSeconds = 1; ReconcileSeconds = 2; LogMaxBytes = $max; LogRepeatSuppressSeconds = 0; PruneIntervalSeconds = 1; BackoffStartSeconds = 1 }
+    $recLog = $sandbox.SupervisorLog
+    $camLog = Join-Path -Path $sandbox.Root -ChildPath "_logs\$name.log"
+    $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
+
+    $watch = @{ Phase = 'free'; RecSize = 0; CamSize = 0; Rolls = @{}; LastUpdate = $null; MaxStatusGap = 0.0; Died = $false }
+    $sample = {
+        foreach ($pair in @(@('rec', $recLog, 'RecSize'), @('cam', $camLog, 'CamSize'))) {
+            $info = New-Object System.IO.FileInfo($pair[1])
+            if (-not $info.Exists) { continue }
+            if ($info.Length -lt $watch[$pair[2]]) { $key = $watch.Phase + ':' + $pair[0]; $watch.Rolls[$key] = 1 + [int]$watch.Rolls[$key] }
+            $watch[$pair[2]] = $info.Length
+        }
+        $status = Get-CamTestStatusJson -Sandbox $sandbox
+        if ($status) {
+            $updated = [DateTime]::Parse([string]$status.Snapshot.UpdatedAt)
+            if ($watch.LastUpdate -and $updated -gt $watch.LastUpdate) {
+                $gap = ($updated - $watch.LastUpdate).TotalSeconds
+                if ($gap -gt $watch.MaxStatusGap) { $watch.MaxStatusGap = $gap }
+            }
+            if (-not $watch.LastUpdate -or $updated -gt $watch.LastUpdate) { $watch.LastUpdate = $updated }
+        }
+        if ($process.HasExited) { $watch.Died = $true }
+    }
+    $rolls = { param($phase, $what) [int]$watch.Rolls["${phase}:$what"] }
+    $pad = {
+        param([int]$Below)
+        $i = 0
+        while ((New-Object System.IO.FileInfo($recLog)).Length -lt ($max - $Below)) { $i++; Write-CamLog -Path $recLog -Message ("test padding {0:D4} {1}" -f $i, ('.' * 60)) -MaxBytes $max }
+        return $i
+    }
+    $countIn = { param($path, $like) if (Test-Path -LiteralPath $path) { @(Get-Content -LiteralPath $path | Where-Object { $_ -like $like }).Count } else { 0 } }
+
+    $camera = $null
+    $process = $null
+    $reader = $null
+    $tailer = $null
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name -NonMonotonic
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        $evidence += ("synthetic camera mediamtx pid {0}, publisher pid {1} (non-monotonic video); supervisor pid {2}" -f `
+            $camera.MediaMtx.Id, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id)
+
+        # free
+        $padded = & $pad 1500
+        $deadline = [DateTime]::Now.AddSeconds(75)
+        while ([DateTime]::Now -lt $deadline -and -not ((& $rolls 'free' 'rec') -ge 1 -and (& $rolls 'free' 'cam') -ge 2)) { & $sample; Start-Sleep -Milliseconds 250 }
+        $evidence += ("free: {0} padding line(s); recorder.log rolled {1}x, {2}.log rolled {3}x; files now recorder.log {4} B + .1 {5} B, {2}.log {6} B + .1 {7} B; supervisor alive {8}" -f `
+            $padded, (& $rolls 'free' 'rec'), $name, (& $rolls 'free' 'cam'), (Get-Item $recLog).Length, (Get-Item "$recLog.1").Length, (Get-Item $camLog).Length, (Get-Item "$camLog.1").Length, (-not $watch.Died))
+        $evidence += ("  {0}.log.1 starts: {1}" -f $name, ([string](@(Get-Content -LiteralPath "$camLog.1" -TotalCount 1))[0]).Substring(0, 120))
+        if ((& $rolls 'free' 'rec') -lt 1 -or (& $rolls 'free' 'cam') -lt 2 -or $watch.Died) { $ok = $false; $evidence += 'FAIL: a log did not roll inside the running supervisor, or the supervisor died' }
+
+        # held
+        $watch.Phase = 'held'
+        $reader = [System.IO.File]::Open($recLog, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $tailer = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command', "Get-Content -LiteralPath '$camLog' -Wait")
+        [void]$tailer.Handle
+        $padded = & $pad 300
+        $heldUntil = [DateTime]::Now.AddSeconds(20)
+        while ([DateTime]::Now -lt $heldUntil) { & $sample; Start-Sleep -Milliseconds 250 }
+        $heldSize = (Get-Item -LiteralPath $recLog).Length
+        $notices = & $countIn $recLog '*log rotation blocked*'
+        $reader.Dispose()
+        $reader = $null
+        $watch.Phase = 'released'
+        $deadline = [DateTime]::Now.AddSeconds(10)
+        while ([DateTime]::Now -lt $deadline -and (& $rolls 'released' 'rec') -lt 1) { & $sample; Start-Sleep -Milliseconds 250 }
+        $noticeLine = $null
+        if (Test-Path -LiteralPath "$recLog.1") { $noticeLine = @(Get-Content -LiteralPath "$recLog.1" | Where-Object { $_ -like '*log rotation blocked*' }) | Select-Object -First 1 }
+        $echoed = & $countIn $sandbox.ConsoleLog '*log rotation blocked*'
+        $evidence += ("held: FileShare.ReadWrite reader on recorder.log for 20 s ({0} padding line(s) to {1} B below the limit), Get-Content -Wait tailer pid {2} on {3}.log" -f $padded, 300, $tailer.Id, $name)
+        $evidence += ("  recorder.log rolled {0}x while held and grew to {1} B; blocked notices {2}; {3}.log rolled {4}x meanwhile; supervisor alive {5}; notice echoed to the console {6}x" -f `
+            (& $rolls 'held' 'rec'), $heldSize, $notices, $name, (& $rolls 'held' 'cam'), (-not $watch.Died), $echoed)
+        $evidence += ("  released: recorder.log rolled {0}x within 10 s; recorder.log.1 holds: {1}" -f (& $rolls 'released' 'rec'), $noticeLine)
+        if ((& $rolls 'held' 'rec') -ne 0 -or $heldSize -le $max -or $notices -ne 1 -or (& $rolls 'held' 'cam') -lt 1 -or $watch.Died -or (& $rolls 'released' 'rec') -lt 1 -or -not $noticeLine) {
+            $ok = $false; $evidence += 'FAIL: with recorder.log held the supervisor died, rolled anyway, logged other than one notice, or did not roll once released'
+        }
+
+        $evidence += ("status.json: longest gap between updates {0} s (StatusIntervalSeconds 1); last update {1}" -f (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'), $watch.LastUpdate.ToString('HH:mm:ss'))
+        if ($watch.MaxStatusGap -gt 3) { $ok = $false; $evidence += 'FAIL: status.json stopped updating' }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($tailer -and -not $tailer.HasExited) { try { $tailer.Kill() } catch { }; [void]$tailer.WaitForExit(10000) }
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $files = Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config
+    $gaps = @()
+    for ($i = 1; $i -lt $files.Count; $i++) { $gaps += ((Get-CamTestSegmentTime -Name $files[$i].Name) - (Get-CamTestSegmentTime -Name $files[$i - 1].Name)).TotalSeconds }
+    $largest = ($gaps | Measure-Object -Maximum).Maximum
+    $empty = @($files | Select-Object -First ($files.Count - 1) | Where-Object { $_.Length -eq 0 }).Count
+    $restarts = & $countIn $recLog '*restart #*'
+    $evidence += ("segments: {0} across the run, largest start-to-start gap {1} s, {2} empty closed, {3} child restart(s) logged" -f $files.Count, $largest, $empty, $restarts)
+    if ($files.Count -lt 5 -or $largest -gt 12 -or $empty -or $restarts) { $ok = $false; $evidence += 'FAIL: recording had a gap, an empty segment or a restart around a roll' }
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $evidence += $leak.Text
+    if (-not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'logrotatelive' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\logrotatelive.none') }) `
+        -Message 'inside the real supervisor both logs roll while recording continues, and a held recorder.log only delays its rotation'
+}
+
+
 function Invoke-CamCheckDocSwitches {
     <#
         Every -Switch the documentation names must exist. Two rules, over
@@ -4061,6 +4197,7 @@ foreach ($check in $Checks) {
         'logrotate' { Invoke-CamCheckLogRotate -Run $run }
         'segments'  { Invoke-CamCheckSegments  -Run $run }
         'backoff'   { Invoke-CamCheckBackoff   -Run $run }
+        'logrotatelive' { Invoke-CamCheckLogRotateLive -Run $run }
     }
 }
 
