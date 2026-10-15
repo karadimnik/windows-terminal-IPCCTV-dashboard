@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -3360,6 +3360,225 @@ function Invoke-CamCheckInstallSandbox {
 }
 
 
+function Get-CamTestNumberedLines {
+    <#
+        The numbered lines a log-rotation check wrote ("<tag> <00001> xxx"),
+        in file order, from each of $Path that exists, plus how many
+        "log rotation blocked" notices those files hold.
+    #>
+    param([Parameter(Mandatory = $true)][string[]]$Path)
+
+    $lines = New-Object System.Collections.ArrayList
+    $notices = 0
+    foreach ($file in $Path) {
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        foreach ($text in [System.IO.File]::ReadAllLines($file)) {
+            if ($text -match ' (?<tag>[A-Za-z]+) (?<n>\d{5}) x+$') {
+                [void]$lines.Add([pscustomobject]@{ Tag = $Matches['tag']; N = [int]$Matches['n'] })
+            }
+            elseif ($text -like '*log rotation blocked*') { $notices++ }
+        }
+    }
+    return [pscustomobject]@{ Lines = $lines.ToArray(); Notices = $notices }
+}
+
+
+function Get-CamTestNumberGaps {
+    <#
+        For one tag, the numbers missing between the first surviving line and
+        $Last - the lines lost OTHER than the older generations rotation drops
+        by design - and the range that was dropped before the first survivor.
+    #>
+    param([object[]]$Lines, [string]$Tag, [int]$Last)
+
+    $numbers = @($Lines | Where-Object { $_.Tag -eq $Tag } | ForEach-Object { $_.N })
+    if ($numbers.Count -eq 0) { return [pscustomobject]@{ First = 0; Missing = $Last; Disordered = 0; Dropped = "1-$Last" } }
+    $seen = @{}
+    $disordered = 0
+    for ($i = 0; $i -lt $numbers.Count; $i++) {
+        $seen[$numbers[$i]] = $true
+        if ($i -gt 0 -and $numbers[$i] -le $numbers[$i - 1]) { $disordered++ }
+    }
+    $first = $numbers[0]
+    $missing = @($first..$Last | Where-Object { -not $seen.ContainsKey($_) }).Count
+    return [pscustomobject]@{
+        First      = $first
+        Missing    = $missing
+        Disordered = $disordered
+        Dropped    = $(if ($first -gt 1) { "1-$($first - 1)" } else { 'none' })
+    }
+}
+
+
+function Invoke-CamCheckLogRotate {
+    <#
+        A1: Write-CamLog's rotation at MaxBytes 4096, in-process and across
+        processes.
+
+        - One writer: it rolls exactly on the write that finds the file at or
+          over the limit, never otherwise; <log>.1 is the generation just
+          before <log>; at most two files exist; the numbered lines across
+          both are contiguous, older generations being dropped by design.
+        - Locked: a reader holds the log without delete sharing, as an editor
+          or tail tool does and as Get-Content -Wait does whenever its poll is
+          inside the file. The rename fails. That used to THROW out of
+          Write-CamLog, which ended the supervisor loop and lost the line.
+          Now no write throws, every line lands in the unrotated file, the
+          blocked rotation is logged once for the episode, and the first write
+          after the reader lets go rotates.
+        - A real Get-Content -Wait tailing the log while it rolls.
+        - Two writer processes on one log, as the supervisor and the NVR host
+          share recorder.log: neither throws and no line is lost.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $max = 4096
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\logrotate'
+    if (Test-Path -LiteralPath $dir) { Remove-CamTestTree -Path $dir }
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+    $pad = 'x' * 40
+    $write = {
+        param([string]$Path, [string]$Tag, [int]$N)
+        try { Write-CamLog -Path $Path -Message ("{0} {1:D5} {2}" -f $Tag, $N, $pad) -MaxBytes $max; return '' }
+        catch { return $_.Exception.Message }
+    }
+
+    # --- one writer
+    $log = Join-Path -Path $dir -ChildPath 'seq.log'
+    $count = 300
+    $rolls = 0
+    $wrong = @()
+    $throws = 0
+    $mostFiles = 0
+    for ($i = 1; $i -le $count; $i++) {
+        $before = 0
+        if (Test-Path -LiteralPath $log) { $before = (Get-Item -LiteralPath $log).Length }
+        if (& $write $log 'seq' $i) { $throws++ }
+        $after = (Get-Item -LiteralPath $log).Length
+        $rolled = ($after -lt $before)
+        if ($rolled) { $rolls++ }
+        if ($rolled -ne ($before -ge $max)) { $wrong += ("write {0}: size before {1}, rolled {2}" -f $i, $before, $rolled) }
+        $files = @(Get-ChildItem -LiteralPath $dir -Filter 'seq.log*' -File).Count
+        if ($files -gt $mostFiles) { $mostFiles = $files }
+    }
+    $older = Get-CamTestNumberedLines -Path "$log.1"
+    $newer = Get-CamTestNumberedLines -Path $log
+    $all = @($older.Lines) + @($newer.Lines)
+    $gaps = Get-CamTestNumberGaps -Lines $all -Tag 'seq' -Last $count
+    $seam = "{0} -> {1}" -f @($older.Lines)[-1].N, @($newer.Lines)[0].N
+    $evidence += ("one writer: {0} lines, {1} rolls, {2} write(s) rolled other than exactly at the crossing, {3} throw(s), at most {4} file(s)" -f $count, $rolls, $wrong.Count, $throws, $mostFiles)
+    $evidence += ("  seq.log.1 holds {0}-{1}, seq.log holds {2}-{3} (seam {4}); dropped by design: lines {5} ({6} older generation(s)); missing after the first survivor: {7}" -f `
+        @($older.Lines)[0].N, @($older.Lines)[-1].N, @($newer.Lines)[0].N, @($newer.Lines)[-1].N, $seam, $gaps.Dropped, ($rolls - 1), $gaps.Missing)
+    $evidence += @($wrong | Select-Object -First 3)
+    if ($rolls -lt 3 -or $wrong.Count -or $throws -or $mostFiles -gt 2 -or $gaps.Missing -or $gaps.Disordered -or
+        (@($older.Lines)[-1].N + 1) -ne @($newer.Lines)[0].N -or @($newer.Lines)[-1].N -ne $count) {
+        $ok = $false; $evidence += 'FAIL: rotation did not roll once per crossing into a contiguous previous generation'
+    }
+
+    # --- locked: a reader without delete sharing holds the full log
+    $log = Join-Path -Path $dir -ChildPath 'lock.log'
+    $i = 0
+    while (-not (Test-Path -LiteralPath $log) -or (Get-Item -LiteralPath $log).Length -lt $max) { $i++; [void](& $write $log 'fill' $i) }
+    $reader = [System.IO.File]::Open($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $failures = @()
+    try { for ($n = 1; $n -le 5; $n++) { $problem = & $write $log 'lock' $n; if ($problem) { $failures += ("write {0}: {1}" -f $n, $problem) } } }
+    finally { $reader.Dispose() }
+    $held = Get-CamTestNumberedLines -Path $log
+    $heldLines = @($held.Lines | Where-Object { $_.Tag -eq 'lock' }).Count
+    $heldSize = (Get-Item -LiteralPath $log).Length
+    $rolledWhileHeld = Test-Path -LiteralPath "$log.1"
+    $problem = & $write $log 'lock' 6
+    $afterOld = Get-CamTestNumberedLines -Path "$log.1"
+    $afterNew = Get-CamTestNumberedLines -Path $log
+    $evidence += ("locked (FileShare.ReadWrite reader on a {0}-byte log): {1} of 5 writes threw, {2} of 5 lines in lock.log, grew to {3} bytes, rolled while held={4}, blocked notices {5}" -f `
+        $max, $failures.Count, $heldLines, $heldSize, $rolledWhileHeld, $held.Notices)
+    $evidence += @($failures | Select-Object -First 2)
+    $evidence += ("  reader released, next write: threw={0}, lock.log.1 holds {1} lock line(s) + {2} notice(s), lock.log holds {3}" -f `
+        [bool]$problem, @($afterOld.Lines | Where-Object { $_.Tag -eq 'lock' }).Count, $afterOld.Notices, ((@($afterNew.Lines) | ForEach-Object { "$($_.Tag) $($_.N)" }) -join ', '))
+    if ($failures.Count -or $heldLines -ne 5 -or $rolledWhileHeld -or $held.Notices -ne 1 -or $problem -or
+        @($afterOld.Lines | Where-Object { $_.Tag -eq 'lock' }).Count -ne 5 -or @($afterNew.Lines).Count -ne 1 -or $afterNew.Notices -ne 0) {
+        $ok = $false; $evidence += 'FAIL: a locked log threw, lost a line, rotated while held, logged the episode other than once, or did not rotate once released'
+    }
+
+    # --- a real Get-Content -Wait following the log while it rolls
+    $log = Join-Path -Path $dir -ChildPath 'tail.log'
+    [void](& $write $log 'tail' 1)
+    $tailer = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
+        -ArgumentList @('-NoProfile', '-Command', "Get-Content -LiteralPath '$log' -Wait")
+    [void]$tailer.Handle
+    $count = 3000
+    $failures = 0
+    $firstFailure = ''
+    try {
+        Start-Sleep -Seconds 3
+        for ($i = 2; $i -le $count; $i++) {
+            $problem = & $write $log 'tail' $i
+            if ($problem) { $failures++; if (-not $firstFailure) { $firstFailure = "write ${i}: $problem" } }
+            if ($i % 50 -eq 0) { Start-Sleep -Milliseconds 30 }
+        }
+    }
+    finally {
+        if (-not $tailer.HasExited) { try { $tailer.Kill() } catch { }; [void]$tailer.WaitForExit(10000) }
+    }
+    $tail = Get-CamTestNumberedLines -Path "$log.1", $log
+    $gaps = Get-CamTestNumberGaps -Lines $tail.Lines -Tag 'tail' -Last $count
+    $evidence += ("Get-Content -Wait tailer pid {0} (exited {1}): {2} writes, {3} threw, {4} missing after the first survivor ({5}), {6} blocked notice(s) in the surviving files" -f `
+        $tailer.Id, $tailer.HasExited, $count, $failures, $gaps.Missing, $gaps.First, $tail.Notices)
+    if ($firstFailure) { $evidence += ('  first: ' + $firstFailure) }
+    if ($failures -or $gaps.Missing -or $gaps.Disordered -or -not $tailer.HasExited) { $ok = $false; $evidence += 'FAIL: writing under a Get-Content -Wait reader threw or lost lines' }
+
+    # --- two writer processes on one log
+    $writer = Join-Path -Path $dir -ChildPath 'writer.ps1'
+    [System.IO.File]::WriteAllText($writer, @'
+param([string]$Lib, [string]$Log, [string]$Tag, [int]$Count, [string]$Go, [int]$MaxBytes)
+$ErrorActionPreference = 'Stop'
+. $Lib
+while (-not (Test-Path -LiteralPath $Go)) { Start-Sleep -Milliseconds 10 }
+$errors = 0; $first = ''
+for ($i = 1; $i -le $Count; $i++) {
+    try { Write-CamLog -Path $Log -Message ("{0} {1:D5} {2}" -f $Tag, $i, ('x' * 40)) -MaxBytes $MaxBytes }
+    catch { $errors++; if (-not $first) { $first = "write ${i}: " + $_.Exception.Message } }
+}
+"errors=$errors $first"
+'@)
+    $lib = Join-Path -Path (Get-CamTestRepo) -ChildPath 'cam.common.ps1'
+    foreach ($round in @(@{ Name = 'stress'; Count = 400 }, @{ Name = 'exact'; Count = 40 })) {
+        $log = Join-Path -Path $dir -ChildPath ($round.Name + '.log')
+        $go = Join-Path -Path $dir -ChildPath ($round.Name + '.go')
+        $writers = @()
+        foreach ($tag in @('A', 'B')) {
+            $writers += Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
+                -RedirectStandardOutput (Join-Path $dir "$($round.Name)-$tag.out") `
+                -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$writer`"", '-Lib', "`"$lib`"", '-Log', "`"$log`"",
+                    '-Tag', $tag, '-Count', $round.Count, '-Go', "`"$go`"", '-MaxBytes', $max)
+        }
+        foreach ($process in $writers) { [void]$process.Handle }
+        Start-Sleep -Seconds 3
+        [System.IO.File]::WriteAllText($go, 'go')
+        foreach ($process in $writers) {
+            if (-not $process.WaitForExit(120000)) { try { $process.Kill() } catch { }; $ok = $false; $evidence += "FAIL: writer pid $($process.Id) did not finish" }
+        }
+        $reports = @('A', 'B' | ForEach-Object { ([string](Get-Content -LiteralPath (Join-Path $dir "$($round.Name)-$_.out") -Raw)).Trim() })
+        $lines = Get-CamTestNumberedLines -Path "$log.1", $log
+        $a = Get-CamTestNumberGaps -Lines $lines.Lines -Tag 'A' -Last $round.Count
+        $b = Get-CamTestNumberGaps -Lines $lines.Lines -Tag 'B' -Last $round.Count
+        $files = @(Get-ChildItem -LiteralPath $dir -Filter "$($round.Name).log*" -File).Count
+        $evidence += ("two writers, {0} x {1} lines: A {2}; B {3}; files {4}; surviving A from {5}, B from {6}; missing A {7}, B {8}; out of order A {9}, B {10}" -f `
+            $round.Count, 2, $reports[0], $reports[1], $files, $a.First, $b.First, $a.Missing, $b.Missing, $a.Disordered, $b.Disordered)
+        $bad = ($reports[0] -notlike 'errors=0*' -or $reports[1] -notlike 'errors=0*' -or $files -gt 2 -or $a.Missing -or $b.Missing -or $a.Disordered -or $b.Disordered)
+        # Under 2 x MaxBytes in all, so nothing may be dropped even by design.
+        if ($round.Name -eq 'exact' -and ($a.First -ne 1 -or $b.First -ne 1 -or $files -ne 2)) { $bad = $true }
+        if ($bad) { $ok = $false; $evidence += ("FAIL: concurrent writers ({0}) threw or lost a line" -f $round.Name) }
+    }
+
+    Complete-CamPruneCheck -Run $Run -Check 'logrotate' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $dir; Log = (Join-Path $env:TEMP 'cam-tests\logrotate.none') }) `
+        -Message 'Write-CamLog rolls once per crossing into one previous generation, never throws or loses a line on a locked log, and two writer processes lose nothing'
+}
+
+
 function Invoke-CamCheckDocSwitches {
     <#
         Every -Switch the documentation names must exist. Two rules, over
@@ -3546,6 +3765,7 @@ foreach ($check in $Checks) {
         'installsandbox' { Invoke-CamCheckInstallSandbox -Run $run }
         'docswitches' { Invoke-CamCheckDocSwitches -Run $run }
         'doclinks' { Invoke-CamCheckDocLinks -Run $run }
+        'logrotate' { Invoke-CamCheckLogRotate -Run $run }
     }
 }
 
