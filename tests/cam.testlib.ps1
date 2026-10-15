@@ -2529,3 +2529,73 @@ function Stop-CamTestMediaMtx {
     if (-not $Process.HasExited) { try { $Process.Kill(); [void]$Process.WaitForExit(5000) } catch { } }
     if ($Process.LogStream) { try { $Process.LogStream.Dispose() } catch { } }
 }
+
+
+function Start-CamTestCommandLineSampler {
+    <#
+        Records every DISTINCT process command line this machine shows, from now
+        until Stop-CamTestCommandLineSampler, in a background runspace. What it
+        saw is searched afterwards, so the needles need not be known yet (the
+        product creates its secret during the run). A process that lives
+        between two looks is missed - the positive control proves what it does
+        catch.
+    #>
+    $state = [hashtable]::Synchronized(@{ Stop = $false; Looks = 0; Seen = [hashtable]::Synchronized(@{}) })
+    $shell = [powershell]::Create()
+    [void]$shell.AddScript({
+        param($state)
+        while (-not $state.Stop) {
+            try {
+                foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, CommandLine)) {
+                    $line = [string]$p.CommandLine
+                    if ($line -and -not $state.Seen.ContainsKey($line)) { $state.Seen[$line] = ('{0} pid {1}' -f $p.Name, $p.ProcessId) }
+                }
+                $state.Looks++
+            } catch { }
+            Start-Sleep -Milliseconds 120
+        }
+    }).AddArgument($state)
+    return [pscustomobject]@{ Shell = $shell; Handle = $shell.BeginInvoke(); State = $state }
+}
+
+
+function Stop-CamTestCommandLineSampler {
+    <# Stops the sampler; returns the distinct command lines (as line, who) and how many looks it took. #>
+    param([Parameter(Mandatory = $true)]$Sampler)
+
+    $Sampler.State.Stop = $true
+    [void]$Sampler.Handle.AsyncWaitHandle.WaitOne(10000)
+    try { $Sampler.Shell.Dispose() } catch { }
+    $seen = @($Sampler.State.Seen.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Line = [string]$_.Key; Who = [string]$_.Value } })
+    return [pscustomobject]@{ Seen = $seen; Looks = [int]$Sampler.State.Looks }
+}
+
+
+function Find-CamTestNeedleInFiles {
+    <# Files under $Root (except $Exclude) whose bytes hold any needle, as ASCII or UTF-16, as 'path: needle label'. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][hashtable]$Needles,
+        [string[]]$Exclude = @()
+    )
+
+    $hits = @()
+    $count = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+        if ($Exclude -contains $file.FullName -or $file.Length -gt 200MB) { continue }
+        $count++
+        try { $bytes = [System.IO.File]::ReadAllBytes($file.FullName) } catch {
+            try {
+                $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite'); $buffer = New-Object byte[] $stream.Length
+                [void]$stream.Read($buffer, 0, $buffer.Length); $stream.Dispose(); $bytes = $buffer
+            } catch { continue }
+        }
+        $ascii = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
+        $wide = [System.Text.Encoding]::Unicode.GetString($bytes)
+        foreach ($label in $Needles.Keys) {
+            $needle = [string]$Needles[$label]
+            if ($ascii.Contains($needle) -or $wide.Contains($needle)) { $hits += ('{0}: {1}' -f $file.FullName.Substring($Root.Length).TrimStart('\'), $label) }
+        }
+    }
+    return [pscustomobject]@{ Hits = @($hits); Files = $count }
+}

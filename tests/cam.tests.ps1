@@ -6527,6 +6527,87 @@ function Invoke-CamCheckLiveSecret {
         try { [void](Get-CamLiveCredential -Config $config) } catch { $message = $_.Exception.Message }
         $evidence += ("(c) a damaged file is refused: {0}" -f $message)
         if (-not $message) { & $fail 'a damaged secret file was accepted' }
+
+        # (e) a real run: sweeps of every command line, every file the run produced, and the -Status output
+        if (-not (Test-CamTestPortFree -Port 18080)) { throw 'TCP port 18080 is already in use; the run needs it free.' }
+        $sampler = Start-CamTestCommandLineSampler
+        $rig = $null; $server = $null; $decoy = $null
+        try {
+            $cameras = @([pscustomobject]@{ Name = 'Cam One'; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = $true })
+            $rig = Start-CamTestLiveRig -Name 'livesecret-run' -Cameras $cameras -CameraPath @('stream1', 'stream2')
+            $runSecretPath = [string]$rig.Sandbox.Config.LiveSecretPath
+            $runSecret = ([System.IO.File]::ReadAllText($runSecretPath)).Trim()
+            $evidence += ("(e) the supervisor created the secret itself at {0} ({1} hex characters)" -f $runSecretPath.Replace($rig.Dir, '<rig>'), $runSecret.Length)
+            if ($runSecret -notmatch '^[0-9a-f]{64}$') { & $fail 'the supervisor did not create a 64-hex secret' }
+            $acl = Get-CamTestIcacls -Path $runSecretPath
+            $evidence += ('(e) icacls on the supervisor-created secret: ' + (($acl | ForEach-Object { $_.Trim() }) -join ' | '))
+            $aceCount = @($acl | Where-Object { $_ -match '\(F\)|\(R\)|\(M\)|\(I\)' }).Count
+            if ($aceCount -ne 1 -or @($acl | Where-Object { $_ -match '\(I\)|SYSTEM|Administrators|Users|Everyone' }).Count) { & $fail 'the supervisor-created secret file has more than the current user in its ACL' }
+
+            # traffic that uses the login: the page server adds it to a WHEP request (a bad offer, so it is the login that is exercised)
+            $server = Start-CamTestLiveServer -Prefix 'http://127.0.0.1:18080/' -PageFile (Join-Path (Get-CamTestRepo) 'tests\live\page.html') -DataDir $rig.DataDir `
+                -WhepBase "http://127.0.0.1:$($rig.WhepPort)" -SecretFile $runSecretPath
+            $viaProxy = Invoke-CamLiveHttp -Url 'http://127.0.0.1:18080/whep/camonesub' -Method POST -Headers @{ 'Content-Type' = 'application/sdp' } -Body "v=0`r`n"
+            $evidence += ("(e) a WHEP request through the page server (adds the login): HTTP {0} (400 = authenticated, offer rejected; 401 would be a refused login)" -f $viaProxy.Code)
+            if ($viaProxy.Code -eq 401 -or $viaProxy.Code -eq 0) { & $fail 'the login the supervisor generated was not accepted through the page server' }
+
+            # -Status as the Operator runs it, from a sandbox copy of cam.ps1
+            foreach ($file in @('cam.ps1', 'mpv.cam.autolayout.autorestart.ps1')) { Copy-Item -LiteralPath (Join-Path (Get-CamTestRepo) $file) -Destination $rig.Sandbox.Dir -Force }
+            $local = Join-Path -Path $rig.Dir -ChildPath 'localappdata'
+            [void](New-Item -ItemType Directory -Path $local -Force)
+            $statusRun = Invoke-CamTestScript -Path (Join-Path $rig.Sandbox.Dir 'cam.ps1') -Arguments @('-Status') -Environment @{ LOCALAPPDATA = $local }
+            $liveLines = @($statusRun.Lines | Where-Object { $_ -match '(?i)live view|mediamtx  |paths   ' })
+            $evidence += ("(e) cam.ps1 -Status: exit {0}, {1} lines; the live view section:" -f $statusRun.ExitCode, $statusRun.Lines.Count)
+            $evidence += @($liveLines | ForEach-Object { '      ' + $_ })
+            if ($statusRun.ExitCode -ne 0 -or -not ($statusRun.Lines -match '=== live view|live view')) { & $fail '-Status did not run or has no live view section' }
+
+            # positive control: a decoy whose command line really carries the secret, started while the sampler runs
+            $decoy = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList @('-NoProfile', '-Command', "Start-Sleep -Seconds 5 # $runSecret")
+            [void]$decoy.Handle
+            Start-Sleep -Seconds 4
+            $decoyPid = $decoy.Id
+
+            if ($server -and -not $server.HasExited) { try { $server.Kill(); [void]$server.WaitForExit(5000) } catch { } }
+            $notes = @(Stop-CamTestLiveRig -Rig $rig)
+            $evidence += $notes
+            $rigStopped = $true
+        }
+        finally {
+            if ($server -and -not $server.HasExited) { try { $server.Kill(); [void]$server.WaitForExit(5000) } catch { } }
+            if ($decoy -and -not $decoy.HasExited) { try { $decoy.Kill() } catch { } }
+            $sweep = Stop-CamTestCommandLineSampler -Sampler $sampler
+            if ($rig -and -not $rigStopped) { $evidence += @(Stop-CamTestLiveRig -Rig $rig) }
+        }
+
+        $header = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes('camlive:' + $runSecret))
+        $needles = @{ 'the secret' = $runSecret; 'the Basic header value' = $header; 'camlive:<secret>' = ('camlive:' + $runSecret) }
+        $lineHits = @($sweep.Seen | Where-Object { $l = $_.Line; @($needles.Values | Where-Object { $l.Contains($_) }).Count })
+        $decoyHits = @($lineHits | Where-Object { $_.Who -eq ('powershell.exe pid {0}' -f $decoyPid) })
+        $realHits = @($lineHits | Where-Object { $_.Who -ne ('powershell.exe pid {0}' -f $decoyPid) })
+        $evidence += ("(e) command-line sweep: {0} looks over the whole run, {1} distinct command lines seen (supervisor, relay, live instance, recorder, ffmpeg, page server, synthetic camera...)" -f $sweep.Looks, $sweep.Seen.Count)
+        $evidence += ("(e) positive control - a decoy powershell (pid {0}) carrying the secret in its command line: caught {1} time(s)" -f $decoyPid, $decoyHits.Count)
+        $evidence += ("(e) hits for the secret, 'camlive:<secret>' or the Basic header value on any OTHER command line: {0}" -f $realHits.Count)
+        foreach ($h in $realHits) { $evidence += ('      ' + $h.Who + ' ' + $h.Line.Replace($runSecret, '<SECRET>')) }
+        if ($decoyHits.Count -lt 1) { & $fail 'the command-line sweep did not catch the planted decoy, so a clean sweep proves nothing' }
+        if ($realHits.Count) { & $fail 'the secret or the Basic header was on a process command line' }
+        $camLines = @($sweep.Seen | Where-Object { $_.Line -match 'mediamtx-live\.yml|live\\server\.ps1' -and $_.Line -notmatch 'Start-Sleep' } | ForEach-Object { $_.Who + ': ' + ($_.Line -replace '\s+', ' ') })
+        $evidence += ('(e) command lines that mention the live instance (the secret appears only as a FILE PATH): ' + (($camLines | Select-Object -First 4 | ForEach-Object { $_.Substring(0, [math]::Min(200, $_.Length)) }) -join ' || '))
+
+        $planted = Join-Path -Path $rig.Dir -ChildPath 'planted-control.txt'
+        [System.IO.File]::WriteAllText($planted, "planted: $runSecret")
+        $scan = Find-CamTestNeedleInFiles -Root $rig.Dir -Needles $needles -Exclude @($runSecretPath)
+        $controlHit = @($scan.Hits | Where-Object { $_ -like 'planted-control.txt*' })
+        $fileHits = @($scan.Hits | Where-Object { $_ -notlike 'planted-control.txt*' })
+        $statusLeak = @($statusRun.Lines | Where-Object { $l = $_; @($needles.Values | Where-Object { $l.Contains($_) }).Count })
+        $evidence += ("(e) file sweep of everything the run wrote ({0} files: generated configs, status.json, supervisor and recorder and liveview logs, console logs, alerts, page-server logs, archive): positive control file flagged {1} needle(s); real hits {2}" -f $scan.Files, $controlHit.Count, $fileHits.Count)
+        foreach ($h in $fileHits) { $evidence += ('      ' + $h) }
+        $evidence += ("(e) the -Status output holds the secret or header: {0}" -f $statusLeak.Count)
+        if ($controlHit.Count -lt 1) { & $fail 'the file sweep did not flag the planted control file' }
+        if ($fileHits.Count) { & $fail 'the secret or the Basic header is in a file other than the secret file' }
+        if ($statusLeak.Count) { & $fail 'the -Status output holds the secret' }
+        $liveYml = Get-Content -LiteralPath (Join-Path $rig.Dir 'live\mediamtx-live.yml') -Raw
+        $evidence += ("(e) the generated live config holds a sha256 pass line only: {0}; any user: {1}" -f ($liveYml -match 'pass: sha256:'), ($liveYml -match '(?m)user:\s*any'))
+        Remove-CamTestTree -Path $rig.Dir
     }
     catch { & $fail ('check aborted: ' + $_.Exception.Message) }
     finally {
