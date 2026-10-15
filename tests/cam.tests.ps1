@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -49,7 +49,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -4150,6 +4150,165 @@ function Invoke-CamCheckStallWatch {
         -Message 'the stall watchdog kills a suspended child about StallFactor x SegmentSeconds after its last segment write, and never a healthy one'
 }
 
+function Invoke-CamCheckLogHeld {
+    <#
+        B3: Write-CamLog never throws when the APPEND fails, and the real
+        supervisor survives its logs being held with no sharing at all.
+
+        - function: with the log open FileShare.None, five writes return
+          without throwing and lose their lines, as does a write whose folder
+          cannot be created; the first write after the holder lets go is
+          preceded by exactly one notice counting the five, and why.
+        - supervisor: recorder.log and the camera's log are held FileShare.None
+          for 20 s while the synthetic camera makes ffmpeg warn and the child
+          is killed, so both logs have lines to lose. The supervisor stays up,
+          restarts the child, keeps status.json updating and keeps recording;
+          once released, each log carries one drop notice.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $holdOpen = {
+        param([string]$Path)
+        $deadline = [DateTime]::Now.AddSeconds(5)
+        while ($true) {
+            try { return [System.IO.File]::Open($Path, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None) }
+            catch { if ([DateTime]::Now -ge $deadline) { throw }; Start-Sleep -Milliseconds 20 }
+        }
+    }
+    $noticeLike = '*log write failed: * line(s) dropped from this log since *'
+
+    # function
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\logheld-function'
+    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+    $log = Join-Path -Path $dir -ChildPath 'held.log'
+    $blocker = Join-Path -Path $dir -ChildPath 'not-a-folder'
+    [System.IO.File]::WriteAllText($blocker, 'a file where a log folder would go')
+    $noFolder = Join-Path -Path $blocker -ChildPath 'logs\x.log'
+    $throws = 0
+    $holder = $null
+    try {
+        Write-CamLog -Path $log -Message 'before 1'
+        Write-CamLog -Path $log -Message 'before 2'
+        $holder = & $holdOpen $log
+        for ($i = 1; $i -le 5; $i++) { try { Write-CamLog -Path $log -Message "held $i" } catch { $throws++ } }
+        $holder.Dispose()
+        $holder = $null
+        $folderThrew = $false
+        try { Write-CamLog -Path $noFolder -Message 'nowhere to go' } catch { $folderThrew = $true }
+        Write-CamLog -Path $log -Message 'after'
+        Write-CamLog -Path $log -Message 'after 2'
+        $lines = @(Get-Content -LiteralPath $log)
+        $notices = @($lines | Where-Object { $_ -like $noticeLike })
+        $evidence += ("function: 5 writes with the log held FileShare.None threw {0}x; a write whose folder is a file threw {1}; file now {2} line(s): {3}" -f `
+            $throws, $folderThrew, $lines.Count, (@($lines | ForEach-Object { if ($_.Length -gt 26) { $_.Substring(26) } else { $_ } }) -join ' | '))
+        $shape = ($lines.Count -eq 5 -and $lines[0] -like '*before 1' -and $lines[1] -like '*before 2' -and $notices.Count -eq 1 -and `
+            $lines[2] -like '*log write failed: 5 line(s) dropped*' -and $lines[2] -like '*being used by another process*' -and $lines[3] -like '*after' -and $lines[4] -like '*after 2')
+        if ($throws -or $folderThrew -or -not $shape) { $ok = $false; $evidence += 'FAIL: Write-CamLog threw, or the file is not the two lines, one notice counting 5, then the two lines after' }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: function phase threw: ' + $_.Exception.Message) }
+    finally { if ($holder) { $holder.Dispose() } }
+
+    # supervisor
+    $port = 18554
+    $name = 'synth1'
+    $sandbox = New-CamTestSynthSandbox -Name 'logheld' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = 10; StatusIntervalSeconds = 1; ReconcileSeconds = 2; LogRepeatSuppressSeconds = 0; BackoffStartSeconds = 1 }
+    $recLog = $sandbox.SupervisorLog
+    $camLog = Join-Path -Path $sandbox.Root -ChildPath "_logs\$name.log"
+    $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
+    $watch = @{ LastUpdate = $null; MaxStatusGap = 0.0; Died = $false }
+    $sample = {
+        $status = Get-CamTestStatusJson -Sandbox $sandbox
+        if ($status) {
+            $updated = [DateTime]::Parse([string]$status.Snapshot.UpdatedAt)
+            if ($watch.LastUpdate -and $updated -gt $watch.LastUpdate) {
+                $gap = ($updated - $watch.LastUpdate).TotalSeconds
+                if ($gap -gt $watch.MaxStatusGap) { $watch.MaxStatusGap = $gap }
+            }
+            if (-not $watch.LastUpdate -or $updated -gt $watch.LastUpdate) { $watch.LastUpdate = $updated }
+        }
+        if ($process.HasExited) { $watch.Died = $true }
+    }
+
+    $camera = $null
+    $process = $null
+    $held = @()
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name -NonMonotonic
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        $child = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -TimeoutSeconds 20
+        $deadline = [DateTime]::Now.AddSeconds(20)
+        while (-not (Test-Path -LiteralPath $camLog) -and [DateTime]::Now -lt $deadline) { Start-Sleep -Milliseconds 200 }
+        $evidence += ("supervisor: synthetic camera mediamtx pid {0}, publisher pid {1} (non-monotonic video); supervisor pid {2}; child pid {3}" -f `
+            $camera.MediaMtx.Id, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id, $child)
+
+        $held += & $holdOpen $recLog
+        $held += & $holdOpen $camLog
+        $heldAt = [DateTime]::Now
+        $camBefore = $held[1].Length
+        $killed = $false
+        while (([DateTime]::Now - $heldAt).TotalSeconds -lt 20) {
+            & $sample
+            if (-not $killed -and ([DateTime]::Now - $heldAt).TotalSeconds -ge 5) { $killed = Stop-CamTestChildHard -ProcessId $child }
+            Start-Sleep -Milliseconds 250
+        }
+        $recHeld = $held[0].Length
+        $camHeld = $held[1].Length
+        foreach ($stream in $held) { $stream.Dispose() }
+        $held = @()
+        $releasedAt = [DateTime]::Now
+        $next = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -Not $child -TimeoutSeconds 10
+        # A line to carry each notice: the camera log gets ffmpeg's warnings,
+        # recorder.log the next event, which a second kill provides.
+        if ($next -gt 0) { [void](Stop-CamTestChildHard -ProcessId $next) }
+        $deadline = [DateTime]::Now.AddSeconds(15)
+        $recNotice = $null
+        $camNotice = $null
+        while ([DateTime]::Now -lt $deadline -and -not ($recNotice -and $camNotice)) {
+            & $sample
+            $recNotice = @(Get-Content -LiteralPath $recLog | Where-Object { $_ -like $noticeLike })
+            $camNotice = @(Get-Content -LiteralPath $camLog | Where-Object { $_ -like $noticeLike })
+            if (-not $recNotice.Count) { $recNotice = $null }
+            if (-not $camNotice.Count) { $camNotice = $null }
+            Start-Sleep -Milliseconds 250
+        }
+        $created = { param($from, $to) @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config | Where-Object { $_.CreationTime -gt $from -and $_.CreationTime -lt $to }).Count }
+        $duringHold = & $created $heldAt $releasedAt
+        $deadline = [DateTime]::Now.AddSeconds(20)
+        while ((& $created $releasedAt ([DateTime]::MaxValue)) -lt 1 -and [DateTime]::Now -lt $deadline) { & $sample; Start-Sleep -Milliseconds 250 }
+        $afterHold = & $created $releasedAt ([DateTime]::MaxValue)
+        $shutdown = @(Get-Content -LiteralPath $recLog | Where-Object { $_ -like '*supervisor shutting down*' }).Count
+        $evidence += ("  held recorder.log ({0} B) and {1}.log ({2} B) FileShare.None for 20 s, child pid {3} killed at +5 s: lengths unchanged {4}; supervisor alive {5}; restarted as pid {6}; status.json longest gap {7} s" -f `
+            $recHeld, $name, $camBefore, $child, ($camHeld -eq $camBefore), (-not $watch.Died), $next, (Format-CamNumber -Value $watch.MaxStatusGap -Format '0.0'))
+        $evidence += ("  recorder.log: {0}" -f $(if ($recNotice) { (@($recNotice) -join ' | ') } else { 'no drop notice' }))
+        $evidence += ("  {0}.log: {1}" -f $name, $(if ($camNotice) { (@($camNotice) -join ' | ') } else { 'no drop notice' }))
+        $evidence += ("  segments created during the hold: {0}, after the release: {1}; 'supervisor shutting down' lines: {2}" -f $duringHold, $afterHold, $shutdown)
+        if ($watch.Died -or -not $killed -or $next -le 0 -or @($recNotice).Count -ne 1 -or @($camNotice).Count -ne 1 -or $watch.MaxStatusGap -gt 3 -or $duringHold -lt 1 -or $afterHold -lt 1 -or $shutdown) {
+            $ok = $false; $evidence += 'FAIL: with its logs held the supervisor died, stopped updating or recording, or did not report the dropped lines once'
+        }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        foreach ($stream in $held) { $stream.Dispose() }
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $evidence += $leak.Text
+    if (-not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'logheld' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $dir; Log = (Join-Path $env:TEMP 'cam-tests\logheld.none') }, [pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\logheld.none') }) `
+        -Message 'Write-CamLog never throws when the append fails, counts the lost lines once, and the supervisor survives its logs held exclusively'
+}
+
 
 function Invoke-CamCheckDocSwitches {
     <#
@@ -4342,6 +4501,7 @@ foreach ($check in $Checks) {
         'backoff'   { Invoke-CamCheckBackoff   -Run $run }
         'logrotatelive' { Invoke-CamCheckLogRotateLive -Run $run }
         'stallwatch' { Invoke-CamCheckStallWatch -Run $run }
+        'logheld'   { Invoke-CamCheckLogHeld   -Run $run }
     }
 }
 
