@@ -1375,3 +1375,8 @@ The Operator approved all four. Documentation only; no code touched.
   start after it rewrites `C:\mediamtx\mediamtx.yml` with the auth block and creates the login; not yet run against the
   real cameras. Trade-off, by design: while the relay refuses the product's login, consumers stay on the relay, so a camera
   whose path has no stream is not recorded until the login is fixed (alert 130 says so) instead of falling back to direct.
+
+- **Testing preference (Operator, 2026-10-15): no more stress or endurance tests; feasibility (functionality) tests only.**
+  Dropped as a result: the 60-minute quiet-camera soak that was to settle the supervisor memory observation under [24]
+  (the observation stays recorded, worst case about 2 MB a day at real log rates), and the quiet-PC UDP rerun of the
+  portable project's one-tile spike. A functionality check for something new is still expected.
