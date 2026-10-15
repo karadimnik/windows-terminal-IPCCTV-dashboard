@@ -6440,6 +6440,106 @@ function Invoke-CamCheckLiveCfg {
 }
 
 
+function Get-CamTestIcacls {
+    <# icacls output for one path, as lines (the path itself dropped from the first line). #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $lines = @(& icacls.exe $Path 2>&1 | ForEach-Object { [string]$_ } | Where-Object { $_.Trim().Length -gt 0 })
+    return @($lines | ForEach-Object { $_.Replace($Path, '<file>') } | Where-Object { $_ -notmatch '^Successfully processed' })
+}
+
+
+function Invoke-CamCheckLiveSecret {
+    <#
+        [Stage 1A] The live login's secret: where it lives, who can read it,
+        and that it appears nowhere else.
+
+        (a) created by the product when missing: 64 hex characters, ASCII, no
+            newline, at the path the config names (default under
+            %LOCALAPPDATA%\IPCCTV, not the repository share);
+        (b) its access control lists only the current user and nothing is
+            inherited - icacls output shown. Positive control: an ordinary file
+            made in the same folder lists other accounts, so the inspection can
+            tell the two apart;
+        (c) a second call reuses the file (not rewritten), a damaged file is
+            refused, and the config text holds only the sha256.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $fail = { param([string]$Text) $script:CamLiveSecretOk = $false; $script:CamLiveSecretEvidence += ('FAIL ' + $Text) }
+    $script:CamLiveSecretOk = $true
+    $script:CamLiveSecretEvidence = @()
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livesecret'
+    if (Test-Path -LiteralPath $dir) { Remove-CamTestTree -Path $dir }
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+
+    try {
+        $defaultPath = Get-CamLiveSecretPath -Config (Get-CamConfig -Path (Join-Path $dir 'none.json'))
+        $wantDefault = Join-Path (Join-Path $env:LOCALAPPDATA 'IPCCTV') 'live_view_secret.txt'
+        $evidence += ("(a) default secret path: {0} (expected {1}); on the WSL share: {2}" -f $defaultPath, $wantDefault, $defaultPath.StartsWith('\\'))
+        if ($defaultPath -ne $wantDefault) { & $fail 'the default secret path is not %LOCALAPPDATA%\IPCCTV\live_view_secret.txt' }
+
+        $secretPath = Join-Path -Path $dir -ChildPath 'live_view_secret.txt'
+        $config = @{ LiveSecretPath = $secretPath }
+        $before = Get-CamLiveCredential -Config $config
+        $cred = Get-CamLiveCredential -Config $config -Create
+        $bytes = [System.IO.File]::ReadAllBytes($secretPath)
+        $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+        $format = ($null -eq $before -and $cred.UserName -eq 'camlive' -and $bytes.Length -eq 64 -and $text -match '^[0-9a-f]{64}$' -and $cred.GetNetworkCredential().Password -ceq $text)
+        $evidence += ("(a) before: {0}; after Create: user {1}, file {2} bytes, 64 lowercase hex, no newline: {3}; no .tmp left: {4}" -f `
+            $(if ($null -eq $before) { 'no credential, nothing created without -Create' } else { 'CREATED WITHOUT -Create' }), $cred.UserName, $bytes.Length, $format, -not (Test-Path -LiteralPath "$secretPath.tmp"))
+        if (-not $format) { & $fail 'the secret file is not 64 hex characters of ASCII with no newline' }
+
+        $stamp = (Get-Item -LiteralPath $secretPath).LastWriteTimeUtc
+        $again = Get-CamLiveCredential -Config $config -Create
+        $reused = ($again.GetNetworkCredential().Password -ceq $text -and (Get-Item -LiteralPath $secretPath).LastWriteTimeUtc -eq $stamp)
+        $evidence += ("(c) a second -Create reuses the file (same secret, not rewritten): {0}" -f $reused)
+        if (-not $reused) { & $fail 'a second -Create replaced the secret' }
+
+        # (b) who may read it
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $acl = Get-CamTestIcacls -Path $secretPath
+        $evidence += '(b) icacls on the secret file:'
+        $evidence += @($acl | ForEach-Object { '      ' + $_ })
+        $aces = @($acl | ForEach-Object { if ($_ -match '^\s*<file>\s+(.+)$') { $Matches[1] } elseif ($_ -match '^\s+(\S.*:\(.*)$') { $Matches[1] } } | Where-Object { $_ })
+        $others = @($aces | Where-Object { $_ -notlike "$me*" })
+        $inherited = @($aces | Where-Object { $_ -match '\(I\)' })
+        $broad = @($aces | Where-Object { $_ -match '(?i)Everyone|\\Users|Authenticated Users|BUILTIN|NT AUTHORITY|SYSTEM|Administrators' })
+        $onlyMe = ($aces.Count -eq 1 -and $others.Count -eq 0 -and $inherited.Count -eq 0 -and $broad.Count -eq 0 -and $aces[0] -match '\(F\)')
+        $evidence += ("(b) entries: {0}; other accounts: {1}; inherited: {2}; only {3} with full control: {4}" -f $aces.Count, $others.Count, $inherited.Count, $me, $onlyMe)
+        if (-not $onlyMe) { & $fail 'the secret file is readable by an account other than the current user' }
+
+        $controlPath = Join-Path -Path $dir -ChildPath 'ordinary.txt'
+        [System.IO.File]::WriteAllText($controlPath, 'ordinary')
+        $controlAcl = Get-CamTestIcacls -Path $controlPath
+        $controlAces = @($controlAcl | ForEach-Object { if ($_ -match '^\s*<file>\s+(.+)$') { $Matches[1] } elseif ($_ -match '^\s+(\S.*:\(.*)$') { $Matches[1] } } | Where-Object { $_ })
+        $controlOthers = @($controlAces | Where-Object { $_ -notlike "$me*" })
+        $evidence += '(b) positive control - icacls on an ordinary file made in the same folder:'
+        $evidence += @($controlAcl | ForEach-Object { '      ' + $_ })
+        $evidence += ("(b) the control lists {0} other entr(ies), so the inspection can see other accounts: {1}" -f $controlOthers.Count, ($controlOthers.Count -gt 0))
+        if ($controlOthers.Count -eq 0) { & $fail 'the positive control file shows no other accounts, so the ACL inspection proves nothing' }
+
+        # (c) damaged file refused
+        [System.IO.File]::WriteAllText($secretPath, 'not hex')
+        $message = ''
+        try { [void](Get-CamLiveCredential -Config $config) } catch { $message = $_.Exception.Message }
+        $evidence += ("(c) a damaged file is refused: {0}" -f $message)
+        if (-not $message) { & $fail 'a damaged secret file was accepted' }
+    }
+    catch { & $fail ('check aborted: ' + $_.Exception.Message) }
+    finally {
+        if ($script:CamLiveSecretOk) { try { Remove-CamTestTree -Path $dir } catch { } }
+        else { $script:CamLiveSecretEvidence += "left for inspection: $dir" }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'livesecret' -Status $(if ($script:CamLiveSecretOk) { 'PASS' } else { 'FAIL' }) `
+        -Message 'the live secret is made by the product, readable only by the current account, and never reused or rewritten by accident' `
+        -Evidence ($evidence + $script:CamLiveSecretEvidence)
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -6494,6 +6594,7 @@ foreach ($check in $Checks) {
         'dstloop'   { Invoke-CamCheckDstLoop   -Run $run }
         'clocklint' { Invoke-CamCheckClockLint -Run $run }
         'livecfg'   { Invoke-CamCheckLiveCfg   -Run $run }
+        'livesecret' { Invoke-CamCheckLiveSecret -Run $run }
         'soak'      { Invoke-CamCheckSoak      -Run $run -DryRun:$SoakDryRun }
     }
 }

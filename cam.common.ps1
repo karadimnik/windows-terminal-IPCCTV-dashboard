@@ -1793,6 +1793,84 @@ $($lines -join "`n")
 }
 
 
+function Get-CamLiveSecretPath {
+    <#
+        Where the live login's secret lives: LiveSecretPath, or by default
+        %LOCALAPPDATA%\IPCCTV\live_view_secret.txt. Local and per user on
+        purpose - the repository normally sits on the WSL share, which holds
+        no NTFS access control at all (icacls answers "Incorrect function"),
+        so a file there could not be kept from other accounts.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Config.LiveSecretPath)) { return [string]$Config.LiveSecretPath }
+    return (Join-Path -Path (Get-CamAutostartDir) -ChildPath 'live_view_secret.txt')
+}
+
+
+function Get-CamLiveCredential {
+    <#
+        The live login (user camlive, the secret as password), or $null when
+        there is no secret file yet and -Create was not given.
+
+        The secret is 32 random bytes as 64 hex characters in a plain ASCII
+        file with no newline, so camui (Go, standard library only) can read it
+        with os.ReadFile. It is created with an access control list that
+        names only the current Windows user and no inherited entry, set at the
+        moment the file is created (never a window in which it is readable by
+        others), then moved into place atomically. DPAPI like
+        relay_api_creds.xml would also keep other accounts out, but Go cannot
+        open an Export-Clixml blob without a CLIXML parser and CryptUnprotectData.
+
+        The secret is registered for redaction. Never put it on a command
+        line, in the generated config (only its sha256 goes there) or in any
+        log or status output.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [switch]$Create
+    )
+
+    $path = Get-CamLiveSecretPath -Config $Config
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        if (-not $Create) { return $null }
+
+        $dir = Split-Path -Path $path -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+
+        $bytes = New-Object byte[] 32
+        $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $random.GetBytes($bytes) } finally { $random.Dispose() }
+        $hex = (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
+
+        $security = New-Object System.Security.AccessControl.FileSecurity
+        $security.SetAccessRuleProtection($true, $false)
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $me, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)))
+
+        $temp = "$path.tmp"
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+        $stream = New-Object System.IO.FileStream($temp, [System.IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::None, $security)
+        try {
+            $data = [System.Text.Encoding]::ASCII.GetBytes($hex)
+            $stream.Write($data, 0, $data.Length)
+        }
+        finally { $stream.Dispose() }
+        Move-CamFileAtomic -TempPath $temp -Path $path
+    }
+
+    $secret = ([System.IO.File]::ReadAllText($path)).Trim()
+    if ($secret -notmatch '^[0-9a-f]{64}$') {
+        throw "The live-view secret file '$path' does not hold 64 hex characters. Delete it and the supervisor creates a new one at its next start."
+    }
+    Register-CamSecret -Value $secret
+    return (New-Object System.Management.Automation.PSCredential($script:CamLiveUser, (ConvertTo-SecureString $secret -AsPlainText -Force)))
+}
+
+
 # ---------------------------------------------------------------------------
 # Paths and the ffmpeg command
 # ---------------------------------------------------------------------------
