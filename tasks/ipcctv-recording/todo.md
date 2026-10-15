@@ -1303,3 +1303,17 @@ The Operator approved all four. Documentation only; no code touched.
   FOUND, NOT FIXED, to be commissioned: the supervisor loop runs on local `[DateTime]::Now`, so DST moves
   every interval by an hour (fall-back 2026-10-25: timers stall 1 h; spring-forward 2027-03-28: the watchdog
   kills every child and alert 110 fires for every camera). B5 soak not run.
+
+- [ ] **[86]** **DEADLINE 2026-10-25 04:00 -> 03:00 (this machine, GTB Standard Time; next 2027-03-28 03:00 -> 04:00).**
+      DST breaks the supervisor loop because it runs on local `[DateTime]::Now` and local file times, and
+      `DateTime` arithmetic ignores the offset. Re-measured 2026-10-15: a real 600 s gap reads +4200 s at
+      spring-forward and -3000 s at fall-back; through `ToUniversalTime()` it is 600 s in both. Effects (the
+      first measured, the rest read from the code): fall-back stalls every interval timer for an hour (status
+      writes, reconcile, archive scan, prune), leaving `status.json` stale and the watchdog blind, and a
+      restart scheduled in the last 60 s before the change is blocked for an hour; spring-forward makes the
+      watchdog kill every healthy child (3600 > 2250) and raises a false alert 110 for every camera.
+      Decided with the Operator 2026-10-15: UTC for all interval and elapsed arithmetic through one clock
+      seam; `LastWriteTimeUtc`/`CreationTimeUtc` for file times; local time kept for display, segment names
+      and `%z`. A watchdog-only fix is WRONG: at fall-back its input scan is frozen by the local status timer
+      and it would false-kill healthy children after about 37.5 minutes. Also widen the 3 s status-gap
+      assertions in the new runtime checks (one flaked at 3.7 s under load) to a multiple of the status interval.
