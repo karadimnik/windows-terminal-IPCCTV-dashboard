@@ -1283,3 +1283,14 @@ The Operator approved all four. Documentation only; no code touched.
       1,500-2,000 words (what it is, quick reference, install/uninstall, where to look); the reference material
       moves verbatim into docs/ with links. Nothing lost, proven by a sentence-level check; `docswitches` stays
       green. [75] lesson: a size target given in lines passed at -3 lines while words grew; give word counts.
+
+- **[24] progress, 2026-10-15.** Part A DONE and merged locally (not pushed): log rotation, the segment path
+  (scaled 900 s -> 10 s) and the backoff / `HealthyResetSeconds` reset have fired in a sandbox against a
+  synthetic camera (`logrotate`, `segments`, `backoff`, `logrotatelive`). Two product bugs found and fixed:
+  (1) `Write-CamLog` threw when a reader held a log open at the rotation threshold, which ended the real
+  supervisor (exit 1 / 21) and left `status.json` saying `running`; now serialised by a per-file mutex, never
+  throws over rotation, retries on the next write, logs one notice per episode. (2) A child that died on its
+  own left a 0-byte segment until the next supervisor-initiated stop; the child-exit branch now calls
+  `Remove-CamEmptySegment`. STILL OPEN under [24], commissioned next as part B: the 2250 s stall watchdog,
+  `MaxRetentionDays` and alerts 121/122 through the real supervisor loop, a logger that never throws even on
+  a failed append, `pruneowner` raising a real toast every run, and one soak at production thresholds.
