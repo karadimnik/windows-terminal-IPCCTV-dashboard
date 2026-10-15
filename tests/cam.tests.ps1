@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'relay', 'viewer', 'viewerpw', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -54,7 +54,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -2006,6 +2006,296 @@ function Invoke-CamCheckViewer {
     Add-CamTestResult -Run $Run -Check 'viewer' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
         -Message 'the encoded pane script parses and still fits the command line, mpv receives the arguments it always did, and a pane on direct returns to the relay on the first poll while a pane on the relay watches nothing' `
         -Evidence $evidence
+}
+
+
+function Invoke-CamCheckViewerPw {
+    <#
+        The camera password stays off every command line. Invoke-CamViewer
+        runs for real - the real mpv through the console wrapper the pane uses,
+        hidden (--vo=null) - against a synthetic camera that REQUIRES a fake
+        user and password to read, so a wrong or absent credential would fail.
+
+        Process listings are taken continuously, by every process on the
+        machine and not only mpv's, for the whole run; every Start-Process the
+        function makes is recorded as well, because a listing can miss a
+        process that lives a few milliseconds. A control process that does
+        carry the password proves the listing can see one.
+
+        (a) mpv receives the stream and plays it - a script inside mpv writes
+            playback-time, estimated-vf-fps, core-idle and video-codec to a file;
+        (b) the password appears on no command line at any time;
+        (c) the stream stops, mpv exits by itself and the function returns
+            $false - the restart-loop contract;
+        (d) the relay becoming ready mid-run stops mpv and returns $true;
+        (e) a failed hand-over - the pipe never appears, mpv dies before it
+            does, mpv answers with an error, mpv never answers - returns $false
+            promptly, leaves no process behind, logs no URL and never starts a
+            process whose command line carries the password.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18554
+    $apiPort = 18557
+    $name = 'cam1'
+    $user = 'viewuser'
+    $pw = 'FAKEVPW' + [guid]::NewGuid().ToString('N').Substring(0, 12)
+    $url = "rtsp://${user}:${pw}@127.0.0.1:$port/$name"
+    $mpvPath = 'C:\mpv\mpv.com'
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\viewerpw'
+    $forward = $dir.Replace('\', '/')
+    if (Test-Path -LiteralPath $dir) { Remove-CamTestTree -Path $dir }
+    [void](New-Item -ItemType Directory -Path $dir -Force)
+
+    # What runs inside mpv, so playback is observed from mpv itself.
+    $probe = "$forward/probe.txt"
+    [System.IO.File]::WriteAllText((Join-Path $dir 'probe.lua'), @'
+local out = mp.get_opt('probeout')
+mp.add_periodic_timer(0.5, function()
+  local f = io.open(out, 'w')
+  if f then
+    f:write(table.concat({ mp.get_property('playback-time') or '', mp.get_property('estimated-vf-fps') or '',
+      mp.get_property('core-idle') or '', mp.get_property('video-codec') or '' }, '|'))
+    f:close()
+  end
+end)
+'@)
+    $mpvArgs = @('--no-border', '--no-audio', '--profile=low-latency', '--rtsp-transport=tcp', '--correct-pts=no', '--network-timeout=3',
+        '--demuxer-lavf-o=timeout=5000000', '--msg-level=all=error', '--force-window=no', '--vo=null', '--ao=null', '--no-terminal',
+        "--script=$forward/probe.lua", "--script-opts=probeout=$probe")
+
+    # A stand-in for a mpv whose pipe never comes, and one whose pipe answers badly.
+    [System.IO.File]::WriteAllText((Join-Path $dir 'fakempv.ps1'), @'
+param($mode)
+$pipe = ($args | Where-Object { $_ -like '--input-ipc-server=*' }) -replace '^--input-ipc-server=', ''
+$server = New-Object System.IO.Pipes.NamedPipeServerStream($pipe, [System.IO.Pipes.PipeDirection]::InOut)
+$server.WaitForConnection()
+$reader = New-Object System.IO.StreamReader($server)
+$null = $reader.ReadLine()
+if ($mode -eq 'reject') {
+    $writer = New-Object System.IO.StreamWriter($server); $writer.AutoFlush = $true
+    $writer.WriteLine('{"error":"invalid parameter","request_id":1}')
+}
+Start-Sleep -Seconds 60
+'@)
+
+    $started = New-Object System.Collections.ArrayList
+    $recording = @{ On = $false }
+    # Every process Invoke-CamViewer starts, with the exact argument text. The pid, not
+    # the object: the function disposes the Process it was handed.
+    function Start-Process {
+        $text = (@($args | ForEach-Object { [string]$_ }) -join ' ')
+        $process = Microsoft.PowerShell.Management\Start-Process @args
+        if ($recording.On) { [void]$started.Add([pscustomobject]@{ Text = $text; ProcessId = $process.Id }) }
+        if ($process) { $process }
+    }
+
+    $sampler = $null; $samplerHandle = $null; $api = $null; $apiHandle = $null
+    $state = [hashtable]::Synchronized(@{ Stop = $false; Samples = 0; Hits = (New-Object System.Collections.ArrayList); Seen = (New-Object System.Collections.Generic.HashSet[int]); MpvLines = (New-Object System.Collections.ArrayList); Blind = 0 })
+    $apiState = [hashtable]::Synchronized(@{ Stop = $false; Requests = 0; ReadyAt = [DateTime]::MaxValue; Listening = $false })
+    $camera = $null
+    $baselineMpv = @(Get-Process -Name mpv -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    $control = $null
+    $config = Get-CamConfigDefault
+    $config.RelayApiBase = "http://127.0.0.1:$apiPort"
+    $config.RelayProbeTimeoutMs = 800
+    $config.ViewerPromoteCheckSeconds = 1
+    $readProbe = { try { [System.IO.File]::ReadAllText((Join-Path $dir 'probe.txt')) } catch { '' } }
+    $captureRun = {
+        param($Choice, $Path, [string]$Exe, [string[]]$Arguments, [int]$IpcMs)
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
+        $all = @(Invoke-CamViewer -Config $config -Choice $Choice -RelayPathName $Path -MpvPath $Exe -MpvArgs $Arguments -IpcTimeoutMs $IpcMs 6>&1)
+        $watch.Stop()
+        [pscustomobject]@{
+            Result  = @($all | Where-Object { $_ -is [bool] })[0]
+            Log     = @($all | Where-Object { $_ -is [System.Management.Automation.InformationRecord] } | ForEach-Object { [string]$_.MessageData })
+            Seconds = $watch.Elapsed.TotalSeconds
+        }
+    }
+
+    try {
+        foreach ($p in @($port, $apiPort)) {
+            if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." }
+        }
+
+        # --- (a) (b) (c): a credentialed direct URL, then the stream stops
+        $camera = Start-CamTestSyntheticCamera -Dir $dir -Port $port -PathName $name -ReadUser $user -ReadPass $pw
+
+        # Before the sampler starts: ffprobe has to carry the password to ask.
+        $probeExe = Join-Path -Path (Split-Path -Parent (Get-CamConfigDefault).FfmpegPath) -ChildPath 'ffprobe.exe'
+        $refusal = @()
+        foreach ($case in @(@('no credential', "rtsp://127.0.0.1:$port/$name", $false), @('wrong password', "rtsp://${user}:wrong@127.0.0.1:$port/$name", $false), @('right credential', $url, $true))) {
+            & $probeExe -v quiet -rtsp_transport tcp -timeout 5000000 -show_entries stream=codec_name $case[1] | Out-Null
+            $accepted = ($LASTEXITCODE -eq 0)
+            $refusal += ("{0}: {1}" -f $case[0], $(if ($accepted) { 'accepted' } else { 'refused' }))
+            if ($accepted -ne $case[2]) { $ok = $false; $evidence += ('FAIL: the synthetic camera did not behave as an authenticated one: ' + $case[0]) }
+        }
+        $evidence += ('synthetic camera on 127.0.0.1:{0} requires {1} and a password to read - {2}' -f $port, $user, ($refusal -join '; '))
+
+
+        # the listing sampler: a separate runspace, so it keeps looking while Invoke-CamViewer blocks
+        $sampler = [powershell]::Create()
+        [void]$sampler.AddScript({
+            param($needle, $state)
+            while (-not $state.Stop) {
+                $blind = 0
+                try {
+                    foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, CommandLine)) {
+                        $line = [string]$p.CommandLine
+                        if (-not $line) { $blind++; continue }
+                        if ($line.Contains($needle)) { if ($state.Seen.Add([int]$p.ProcessId)) { [void]$state.Hits.Add([pscustomobject]@{ ProcessId = [int]$p.ProcessId; Name = $p.Name; Line = $line.Replace($needle, '<PW>') }) } }
+                        elseif ($p.Name -like 'mpv*' -and $state.MpvLines.Count -lt 4 -and -not $state.MpvLines.Contains($line)) { [void]$state.MpvLines.Add($line) }
+                    }
+                }
+                catch { }
+                $state.Blind = $blind
+                $state.Samples++
+                Start-Sleep -Milliseconds 20
+            }
+        }).AddArgument($pw).AddArgument($state)
+        $samplerHandle = $sampler.BeginInvoke()
+
+        # control: a process that does carry the password must be seen
+        $control = Microsoft.PowerShell.Management\Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
+            -ArgumentList ('-NoProfile -Command "Start-Sleep -Seconds 20 # ' + $pw + '"')
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        while (@($state.Hits | Where-Object { $_.ProcessId -eq $control.Id }).Count -eq 0 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+        $seen = @($state.Hits | Where-Object { $_.ProcessId -eq $control.Id }).Count -gt 0
+        Stop-Process -Id $control.Id -Force -ErrorAction SilentlyContinue
+        $evidence += ("listing control: a process carrying the password was seen by the sampler: {0} ({1} listing sweeps so far)" -f $seen, $state.Samples)
+        if (-not $seen) { $ok = $false; $evidence += 'FAIL: the process listing cannot see a command line carrying the password, so (b) would prove nothing' }
+        $state.Hits.Clear()
+
+        $apiState.ReadyAt = [DateTime]::MaxValue
+        $api = [powershell]::Create()
+        [void]$api.AddScript({
+            param($apiPort, $apiState)
+            $listener = New-Object System.Net.HttpListener
+            $listener.Prefixes.Add("http://127.0.0.1:$apiPort/")
+            $listener.Start()
+            $apiState.Listening = $true
+            try {
+                while (-not $apiState.Stop) {
+                    $next = $listener.GetContextAsync()
+                    while (-not $next.Wait(200)) { if ($apiState.Stop) { return } }
+                    $context = $next.Result
+                    $apiState.Requests++
+                    $ready = ([DateTime]::UtcNow -ge $apiState.ReadyAt)
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"name":"cam1","ready":' + $ready.ToString().ToLowerInvariant() + '}')
+                    $context.Response.ContentType = 'application/json'
+                    $context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
+                    $context.Response.Close()
+                }
+            }
+            finally { $listener.Stop() }
+        }).AddArgument($apiPort).AddArgument($apiState)
+        $apiHandle = $api.BeginInvoke()
+
+        $recording.On = $true
+        $controller = [powershell]::Create()
+        [void]$controller.AddScript({
+            param($probeFile, $publisherIds, $out)
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline -and -not $out.Seen) {
+                try { $text = [System.IO.File]::ReadAllText($probeFile) } catch { $text = '' }
+                $field = $text.Split('|')
+                $time = 0.0
+                if ($field.Count -ge 4 -and [double]::TryParse($field[0], [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$time) -and $time -ge 2) { $out.Seen = $text }
+                else { Start-Sleep -Milliseconds 200 }
+            }
+            foreach ($id in $publisherIds) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+            $out.KilledAt = [DateTime]::UtcNow
+        }).AddArgument($probe).AddArgument(@($camera.Publishers | ForEach-Object { $_.Id })).AddArgument(($controlState = [hashtable]::Synchronized(@{ Seen = ''; KilledAt = $null })))
+        $controllerHandle = $controller.BeginInvoke()
+        $apiState.ReadyAt = [DateTime]::MaxValue
+        $choice = [pscustomobject]@{ Mode = 'direct'; Url = $url; WaitedSeconds = 0 }
+        $one = & $captureRun $choice $name $mpvPath $mpvArgs 8000
+        $controller.EndInvoke($controllerHandle); $controller.Dispose()
+        $exitedAfter = if ($controlState.KilledAt) { ([DateTime]::UtcNow - $controlState.KilledAt).TotalSeconds } else { -1 }
+        $field = ([string]$controlState.Seen).Split('|')
+        $evidence += ("(a) mpv playing before the stream was stopped, read from inside mpv: playback-time {0} s, estimated-vf-fps {1}, core-idle {2}, video-codec {3}" -f $field[0], $field[1], $field[2], $field[3])
+        if ($field.Count -lt 4 -or [double]::Parse($field[0], [cultureinfo]::InvariantCulture) -lt 2 -or $field[2] -ne 'no' -or $field[3] -notlike '*H.264*') {
+            $ok = $false; $evidence += 'FAIL (a): mpv did not receive and play the stream'
+        }
+        $evidence += ("(c) publisher stopped at playback-time {0}; Invoke-CamViewer returned {1} {2:N1} s after it (mpv exited on its own; the relay watch polled the control API {3} time(s))" -f $field[0], $one.Result, $exitedAfter, $apiState.Requests)
+        if ($one.Result -ne $false -or $exitedAfter -lt 0 -or $exitedAfter -gt 20) { $ok = $false; $evidence += 'FAIL (c): mpv did not exit and return $false when the stream stopped' }
+        if ($apiState.Requests -lt 1) { $ok = $false; $evidence += 'FAIL (c): the relay watch never asked the control API' }
+        [void](Stop-CamTestSyntheticCamera -Camera $camera); $camera = $null
+
+        # --- (d): the relay becomes ready mid-run
+        Remove-Item -LiteralPath (Join-Path $dir 'probe.txt') -Force -ErrorAction SilentlyContinue
+        $recording.On = $false
+        $camera = Start-CamTestSyntheticCamera -Dir $dir -Port $port -PathName $name -ReadUser $user -ReadPass $pw
+        $recording.On = $true
+        $apiState.Requests = 0
+        $apiState.ReadyAt = [DateTime]::UtcNow.AddSeconds(7)
+        $two = & $captureRun $choice $name $mpvPath $mpvArgs 8000
+        $field = (& $readProbe).Split('|')
+        $evidence += ("(d) relay path became ready 7 s into the run: Invoke-CamViewer returned {0} after {1:N1} s ({2} control-API poll(s)); last playback-time {3} s, core-idle {4}" -f $two.Result, $two.Seconds, $apiState.Requests, $field[0], $field[2])
+        if ($two.Result -ne $true -or $two.Seconds -lt 6 -or $two.Seconds -gt 20) { $ok = $false; $evidence += 'FAIL (d): the pane was not taken back to the relay promptly' }
+        if ($field.Count -lt 4 -or $field[0] -eq '') { $ok = $false; $evidence += 'FAIL (d): mpv was not playing when the relay became ready' }
+        [void](Stop-CamTestSyntheticCamera -Camera $camera); $camera = $null
+
+        # --- (e): the hand-over fails; each stand-in is a process that never plays anything
+        $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        $fake = Join-Path $dir 'fakempv.ps1'
+        $cases = @(
+            @{ Label = 'the pipe never appears'; Args = @('-NoProfile', '-Command', 'Start-Sleep -Seconds 60 #'); Ipc = 2000; Max = 6 },
+            @{ Label = 'mpv dies before the pipe is up'; Args = @('-NoProfile', '-Command', 'exit 3 #'); Ipc = 8000; Max = 4 },
+            @{ Label = 'mpv answers with an error'; Args = @('-NoProfile', '-File', $fake, 'reject'); Ipc = 2000; Max = 8 },
+            @{ Label = 'mpv never answers'; Args = @('-NoProfile', '-File', $fake, 'silent'); Ipc = 2000; Max = 8 })
+        foreach ($case in $cases) {
+            $before = $started.Count
+            $r = & $captureRun $choice $name $ps $case.Args $case.Ipc
+            $mine = @($started | Select-Object -Skip $before)
+            $left = @($mine | Where-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }).Count
+            $logText = $r.Log -join ' | '
+            $leaked = ($logText -match [regex]::Escape($pw)) -or ($logText -match 'rtsp://')
+            $evidence += ("(e) {0}: returned {1} after {2:N1} s (limit {3} s); {4} process(es) started, {5} left running; log: {6}" -f $case.Label, $r.Result, $r.Seconds, $case.Max, $mine.Count, $left, $(if ($r.Log.Count -eq 1) { $logText } else { "$($r.Log.Count) lines" }))
+            if ($r.Result -ne $false -or $r.Seconds -gt $case.Max -or $left -ne 0 -or $r.Log.Count -ne 1 -or $leaked) {
+                $ok = $false; $evidence += ('FAIL (e): ' + $case.Label)
+            }
+        }
+        $recording.On = $false
+
+        # (b) over everything that was started and every listing taken
+        Start-Sleep -Milliseconds 300
+        $state.Stop = $true
+        [void]$sampler.EndInvoke($samplerHandle)
+        $argHits = @($started | Where-Object { $_.Text.Contains($pw) })
+        $listHits = @($state.Hits | Where-Object { $_.ProcessId -ne $control.Id })
+        $evidence += ("(b) {0} process listing sweep(s) of every process ({1} unreadable command lines per sweep, system processes): the password was on {2} command line(s); {3} Start-Process call(s) recorded, {4} carried it as an argument" -f `
+            $state.Samples, $state.Blind, $listHits.Count, $started.Count, $argHits.Count)
+        foreach ($line in @($state.MpvLines)) { $evidence += ('    listing: ' + $line) }
+        foreach ($hit in @($listHits | Select-Object -First 3)) { $evidence += ("    PASSWORD IN LISTING: pid {0} {1}: {2}" -f $hit.ProcessId, $hit.Name, $hit.Line) }
+        foreach ($call in @($argHits | Select-Object -First 3)) { $evidence += ('    PASSWORD IN ARGUMENT: ' + $call.Text.Replace($pw, '<PW>')) }
+        if ($listHits.Count -gt 0 -or $argHits.Count -gt 0) { $ok = $false; $evidence += 'FAIL (b): the camera password reached a command line' }
+        if ($state.Samples -lt 20) { $ok = $false; $evidence += 'FAIL (b): too few listings were taken to mean anything' }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        $recording.On = $false
+        $state.Stop = $true; $apiState.Stop = $true
+        foreach ($s in @(@($sampler, $samplerHandle), @($api, $apiHandle))) {
+            if ($s[0]) { try { [void]$s[0].EndInvoke($s[1]) } catch { }; $s[0].Dispose() }
+        }
+        if ($control) { Stop-Process -Id $control.Id -Force -ErrorAction SilentlyContinue }
+        foreach ($item in @($started)) {
+            Stop-Process -Id $item.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    # nothing left that this check started: mpv by pid, against the baseline
+    $stray = @(Get-Process -Name mpv -ErrorAction SilentlyContinue | Where-Object { $baselineMpv -notcontains $_.Id })
+    $evidence += ("{0} mpv process(es) left that were not running before the check" -f $stray.Count)
+    if ($stray.Count -gt 0) { $ok = $false; foreach ($s in $stray) { Stop-Process -Id $s.Id -Force -ErrorAction SilentlyContinue } }
+
+    Complete-CamPruneCheck -Run $Run -Check 'viewerpw' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $dir; Log = (Join-Path $env:TEMP 'cam-tests\viewerpw.none') }) `
+        -Message 'a credentialed direct URL never reaches a command line: mpv plays it, exits and returns on stream loss, still goes back to the relay, and a failed hand-over returns false without a process, a log line or an argument carrying the password'
 }
 
 
@@ -5452,6 +5742,7 @@ foreach ($check in $Checks) {
         'cameralist' { Invoke-CamCheckCameraList -Run $run }
         'inputs'     { Invoke-CamCheckInputs     -Run $run }
         'viewer'     { Invoke-CamCheckViewer     -Run $run }
+        'viewerpw'   { Invoke-CamCheckViewerPw   -Run $run }
         'selftest'   { Invoke-CamCheckSelfTest   -Run $run }
         'layout'     { Invoke-CamCheckLayout     -Run $run }
         'strip'      { Invoke-CamCheckStrip      -Run $run }
