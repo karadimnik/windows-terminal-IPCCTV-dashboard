@@ -25,9 +25,11 @@ E:\cameras\
   Front_Entrance\Front_Entrance_20261011_223649+0300.mkv
   Rear_Balcony\  Rear_Balcony_20261011_223649+0300.mkv
   _state\status.json        what the health strip and -Status read
-  _logs\recorder.log        the supervisor log, rotated at LogMaxBytes
+  _logs\recorder.log        the supervisor log, rotated at LogMaxBytes; a reader holding it
+                            open only delays the rotation (logged once), never recording
   _logs\restreamer.log      MediaMTX output, redacted
-  _logs\<Camera>.log        per-camera ffmpeg output, redacted
+  _logs\<Camera>.log        per-camera ffmpeg output, relayed by the supervisor, redacted,
+                            rotated the same way
 ```
 
 Two details in there are not preferences:
