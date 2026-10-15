@@ -23,7 +23,7 @@ Nothing here is identified by image name or window title. Every process is class
 
 | Command | What it does |
 | --- | --- |
-| `.\cam.recorder.ps1 -InstallRestreamer` / `-RemoveRestreamer` | Generates the MediaMTX config from `cameras.json`, one path per camera and no credential, and checks the binary is in place; or deletes it, and recording and viewing continue on the direct camera inputs. |
+| `.\cam.recorder.ps1 -InstallRestreamer` / `-RemoveRestreamer` | Generates the MediaMTX config from `cameras.json`, one path per camera and no credential, creates the control API login `relay_api_creds.xml` (DPAPI-protected; the config holds only its hash) when it does not exist yet, and checks the binary is in place; or deletes it, and recording and viewing continue on the direct camera inputs. |
 | `.\cam.recorder.ps1 -InstallAutostart` / `-RemoveAutostart` | Registers or removes `IPCCTV-Recorder` and its launcher. A supervisor already running keeps running. |
 | `.\cam.ps1 -InstallDashboardAutostart` / `-RemoveDashboardAutostart` | Registers or removes `IPCCTV-Dashboard` and its launcher. A dashboard that is open stays open. |
 | `.\cam.ps1 -InstallUi` / `-RemoveUi` | Registers or removes `IPCCTV-Ui` and its launcher. It refuses to install when `camui.exe` has not been built, and it does not start the UI - it prints `Start-ScheduledTask -TaskName IPCCTV-Ui`, which does. A `camui` that is running stays running, and the removal prints the pid serving it. |

@@ -841,6 +841,16 @@ function Start-CamTestSyntheticCamera {
         # ffmpeg warn "Non-monotonic DTS" the way these cameras make it warn,
         # so the per-camera log has something to grow on.
         [switch]$NonMonotonic,
+        # With -NonMonotonic, every Nth video frame repeats the previous
+        # timestamp; and the publisher's frame rate. Together they set how fast
+        # the recorder's ffmpeg warns, so a soak can fill a 2 MB camera log.
+        [ValidateRange(2, 100)][int]$NonMonotonicEvery = 5,
+        [ValidateRange(5, 120)][int]$FrameRate = 15,
+        # With both, reading needs this user and password (a wrong or absent
+        # one is refused); publishing stays open on loopback so the
+        # publishers need none. Fake credentials only.
+        [string]$ReadUser,
+        [string]$ReadPass,
         [int]$TimeoutSeconds = 20
     )
 
@@ -853,8 +863,14 @@ function Start-CamTestSyntheticCamera {
     $yml = @(
         'logLevel: info', 'logDestinations: [stdout]', 'api: no', 'metrics: no', 'pprof: no', 'playback: no',
         'rtsp: yes', 'rtspTransports: [tcp]', "rtspAddress: 127.0.0.1:$Port",
-        'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'moq: no', 'paths:'
-    ) + @($PathName | ForEach-Object { "  ${_}: {}" })
+        'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'moq: no'
+    )
+    if ($ReadUser -and $ReadPass) {
+        $yml += @('authMethod: internal', 'authInternalUsers:',
+            '  - user: any', "    pass:", "    ips: ['127.0.0.1']", '    permissions:', '      - action: publish',
+            "  - user: $ReadUser", "    pass: $ReadPass", '    ips: []', '    permissions:', '      - action: read')
+    }
+    $yml = $yml + @('paths:') + @($PathName | ForEach-Object { "  ${_}: {}" })
     [System.IO.File]::WriteAllText($config, (($yml -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
 
     $camera = [pscustomobject]@{
@@ -866,20 +882,22 @@ function Start-CamTestSyntheticCamera {
     }
 
     try {
-        $camera.MediaMtx = Start-Process -FilePath 'C:\mediamtx\mediamtx.exe' -ArgumentList @("`"$config`"") -PassThru -WindowStyle Hidden `
+        # A local working directory: started from the repository share MediaMTX
+        # writes files there, and it must never depend on the caller's folder.
+        $camera.MediaMtx = Start-Process -FilePath 'C:\mediamtx\mediamtx.exe' -ArgumentList @("`"$config`"") -PassThru -WindowStyle Hidden -WorkingDirectory $work `
             -RedirectStandardOutput $log -RedirectStandardError "$log.err"
         [void]$camera.MediaMtx.Handle
 
         $ffmpeg = (Get-CamConfigDefault).FfmpegPath
         foreach ($name in $PathName) {
             $publish = @('-hide_banner', '-loglevel', 'error', '-nostdin',
-                '-re', '-f', 'lavfi', '-i', 'testsrc2=size=640x360:rate=15',
+                '-re', '-f', 'lavfi', '-i', "testsrc2=size=640x360:rate=$FrameRate",
                 '-re', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=8000',
                 '-map', '0:v', '-map', '1:a',
                 '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
-                '-g', '15', '-keyint_min', '15', '-sc_threshold', '0',
+                '-g', "$FrameRate", '-keyint_min', "$FrameRate", '-sc_threshold', '0',
                 '-c:a', 'pcm_alaw', '-ar', '8000', '-ac', '1')
-            if ($NonMonotonic) { $publish += '-bsf:v', 'setts=ts=if(eq(mod(N\,5)\,4)\,PREV_OUTPTS\,PTS)' }
+            if ($NonMonotonic) { $publish += '-bsf:v', ('setts=ts=if(eq(mod(N\,{0})\,{1})\,PREV_OUTPTS\,PTS)' -f $NonMonotonicEvery, ($NonMonotonicEvery - 1)) }
             $publish += @('-f', 'rtsp', '-rtsp_transport', 'tcp', "rtsp://127.0.0.1:$Port/$name")
             $publisherLog = Join-Path -Path $work -ChildPath "publish-$name.err"
             # Retried until MediaMTX is listening: a publisher that connects

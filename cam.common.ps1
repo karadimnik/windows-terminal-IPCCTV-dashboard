@@ -22,6 +22,12 @@ if (-not $script:CamLibRoot) { $script:CamLibRoot = (Get-Location).Path }
 # Literal strings that must never reach a log, a status file or the console.
 $script:CamSecrets = New-Object System.Collections.ArrayList
 
+# The relay control API's Basic authorization header value, loaded once from
+# relay_api_creds.xml by the first API call that finds the file; and what the
+# most recent call in this process got back: ok, denied or down.
+$script:CamRelayApiAuthorization = $null
+$script:CamRelayApiStatus = $null
+
 # Filenames that NTFS accepts but Win32 reserves as device names.
 $script:CamReservedNames = @(
     'CON', 'PRN', 'AUX', 'NUL',
@@ -187,6 +193,70 @@ function Get-CamCredential {
     Register-CamSecret -Value $cred.GetNetworkCredential().Password
 
     return $cred
+}
+
+
+function Get-CamRelayApiCredential {
+    <#
+        The product's own login for the restreamer's control API, or $null when
+        there is none yet and -Create was not given.
+
+        Generated, never chosen: 32 random bytes as 64 hex characters, user
+        camrelayapi, written with Export-Clixml so the password is protected
+        by DPAPI for this Windows user exactly like camera_creds.xml. Only its
+        SHA-256 goes into mediamtx.yml (see Get-CamRelayApiPassHash). -Create
+        writes the file only when it is missing, so a second call, a second
+        -InstallRestreamer or a restreamer restart reuses the same login.
+
+        The password is registered for redaction; the user name is not a
+        secret and is deliberately left out, because the redactor would
+        otherwise blank every word that happened to match it.
+    #>
+    param(
+        [string]$Path,
+        [switch]$Create
+    )
+
+    if (-not $Path) { $Path = Join-Path -Path $script:CamLibRoot -ChildPath 'relay_api_creds.xml' }
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        if (-not $Create) { return $null }
+
+        $bytes = New-Object byte[] 32
+        $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $random.GetBytes($bytes) } finally { $random.Dispose() }
+        $secure = New-Object System.Security.SecureString
+        foreach ($byte in $bytes) { foreach ($char in $byte.ToString('x2').ToCharArray()) { $secure.AppendChar($char) } }
+
+        $temp = "$Path.tmp"
+        New-Object System.Management.Automation.PSCredential('camrelayapi', $secure) | Export-Clixml -LiteralPath $temp
+        Move-CamFileAtomic -TempPath $temp -Path $Path
+    }
+
+    $cred = Import-Clixml -LiteralPath $Path
+    if (-not ($cred -is [System.Management.Automation.PSCredential])) {
+        throw "'$Path' does not contain a PSCredential."
+    }
+    Register-CamSecret -Value $cred.GetNetworkCredential().Password
+    return $cred
+}
+
+
+function Get-CamRelayApiPassHash {
+    <#
+        The form MediaMTX documents for a hashed internal password: sha256:
+        followed by the base64 of the SHA-256 of the password. A hash of 256
+        random bits cannot be reversed or guessed, so the generated config can
+        hold it in place of the password.
+    #>
+    param([Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($Credential.GetNetworkCredential().Password))
+    }
+    finally { $sha.Dispose() }
+    return ('sha256:' + [Convert]::ToBase64String($digest))
 }
 
 
@@ -705,17 +775,61 @@ function Get-CamRelayHostPort {
 }
 
 
-function Get-CamRelayApiJson {
+function Get-CamRelayApiAuthorization {
     <#
-        GETs one route from the MediaMTX control API and returns the parsed
-        object, or $null for every failure - relay down, path unknown, timeout,
-        garbage. A reachability probe must never throw into a caller that is
-        about to start a recording.
+        The Authorization header value for the control API, or $null while
+        relay_api_creds.xml does not exist. Read once per process and then
+        kept; a missing file is looked for again on the next call, so a
+        consumer started before the supervisor created it picks it up.
 
-        HttpWebRequest rather than Invoke-RestMethod: this needs a sub-second
-        timeout (Invoke-RestMethod's -TimeoutSec is whole seconds) and must
-        ignore any system proxy, which would otherwise be asked to route a
-        loopback call.
+        The base64 token is registered for redaction as well as the password:
+        it decodes to the password, so it is the same secret.
+    #>
+    if ($null -eq $script:CamRelayApiAuthorization) {
+        $credential = Get-CamRelayApiCredential
+        if ($credential) {
+            $token = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(
+                    $credential.UserName + ':' + $credential.GetNetworkCredential().Password))
+            Register-CamSecret -Value $token
+            $script:CamRelayApiAuthorization = 'Basic ' + $token
+        }
+    }
+    return $script:CamRelayApiAuthorization
+}
+
+
+function Invoke-CamRelayApi {
+    <#
+        GETs one route from the MediaMTX control API. Returns Status and Data:
+
+          ok      the API answered 2xx with JSON; Data is the parsed object
+          denied  the relay is running but refused the product's login
+          down    anything else - not running, path unknown, timeout, garbage
+
+        Never throws: a reachability probe must not break a caller that is
+        about to start a recording. Every call records its Status for
+        Get-CamRelayApiStatus.
+
+        WHY DENIED IS ITS OWN ANSWER. A refused login is a configuration fault,
+        not a dead relay: RTSP needs no login, so the relay is still serving.
+        If it read as down, every consumer would take a DIRECT camera input -
+        the password back on ffmpeg's command line, and the camera's second
+        session gone to a recorder while the relay holds the first.
+
+        Why the second, anonymous request. MediaMTX answers a WRONG login only
+        after a random pause of up to 4 s (brute-force damping), so with this
+        probe's budget a wrong login usually looks like a timeout. A request
+        with no login at all is refused at once. So a credentialed request
+        that runs out of time is asked again without one: an immediate 401
+        proves the relay is alive and wanted a login the product did not
+        satisfy. Measured on v1.21.2, 2026-10-15: wrong login 704-3784 ms, no
+        login 0-1 ms, right login under 10 ms.
+
+        The login goes in an Authorization header on this process's own
+        request, never on a command line. HttpWebRequest rather than
+        Invoke-RestMethod: this needs a sub-second timeout (Invoke-RestMethod's
+        -TimeoutSec is whole seconds) and must ignore any system proxy, which
+        would otherwise be asked to route a loopback call.
     #>
     param(
         [Parameter(Mandatory = $true)]$Config,
@@ -727,34 +841,76 @@ function Get-CamRelayApiJson {
     if ($timeout -lt 100) { $timeout = 100 }
 
     $uri = "{0}/{1}" -f ([string]$Config.RelayApiBase).TrimEnd('/'), $Route.TrimStart('/')
+    $authorization = Get-CamRelayApiAuthorization
 
-    try {
-        $request = [System.Net.HttpWebRequest]::Create($uri)
-        $request.Method = 'GET'
-        $request.Proxy = $null
-        $request.Timeout = $timeout
-        $request.ReadWriteTimeout = $timeout
-
-        $response = $request.GetResponse()
+    $send = {
+        param([string]$Header)
+        $answer = [pscustomobject]@{ Status = 'down'; Data = $null; TimedOut = $false }
         try {
-            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
-            try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
-        }
-        finally { $response.Dispose() }
+            $request = [System.Net.HttpWebRequest]::Create($uri)
+            $request.Method = 'GET'
+            $request.Proxy = $null
+            $request.Timeout = $timeout
+            $request.ReadWriteTimeout = $timeout
+            if ($Header) { $request.Headers['Authorization'] = $Header }
 
-        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-        return (ConvertFrom-Json -InputObject $text)
+            $response = $request.GetResponse()
+            try {
+                $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+                try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            }
+            finally { $response.Dispose() }
+
+            if (-not [string]::IsNullOrWhiteSpace($text)) {
+                $answer.Data = ConvertFrom-Json -InputObject $text
+                $answer.Status = 'ok'
+            }
+        }
+        catch [System.Net.WebException] {
+            $failure = $_.Exception
+            if ($failure.Response) {
+                $code = [int]$failure.Response.StatusCode
+                $failure.Response.Dispose()
+                if ($code -eq 401 -or $code -eq 403) { $answer.Status = 'denied' }
+            }
+            elseif ($failure.Status -eq [System.Net.WebExceptionStatus]::Timeout) { $answer.TimedOut = $true }
+        }
+        catch { }
+        return $answer
     }
-    catch { return $null }
+
+    $answer = & $send $authorization
+    if ($answer.TimedOut -and $authorization) {
+        $anonymous = & $send $null
+        if ($anonymous.Status -ne 'down') { $answer = $anonymous }
+    }
+
+    $script:CamRelayApiStatus = $answer.Status
+    return [pscustomobject]@{ Status = $answer.Status; Data = $answer.Data }
+}
+
+
+function Get-CamRelayApiStatus {
+    <#
+        What the most recent control-API call in this process got back: ok,
+        denied, down, or $null before the first one. Lets a status display or
+        the supervisor say "the login was refused" without a second call.
+    #>
+    return $script:CamRelayApiStatus
 }
 
 
 function Test-CamRelayPathReady {
     <#
-        True only when MediaMTX is up AND this camera's path is actually
-        serving. The narrower question matters: a plain TCP connect to 8554
-        would pass while the camera behind the path is unreachable, and the
-        consumer would then sit on a dead relay instead of going direct.
+        True when MediaMTX is up AND this camera's path is actually serving.
+        The narrower question matters: a plain TCP connect to 8554 would pass
+        while the camera behind the path is unreachable, and the consumer would
+        then sit on a dead relay instead of going direct.
+
+        Also true when the relay refuses the product's login: it is running,
+        and a consumer sent direct by a configuration fault would carry the
+        password on its command line and take the camera's second session.
+        See Invoke-CamRelayApi.
 
         Deliberately not an RTSP session - a probe that opened one would itself
         consume a reader slot and add latency to every restart.
@@ -765,7 +921,9 @@ function Test-CamRelayPathReady {
     )
 
     $route = 'v3/paths/get/' + [System.Uri]::EscapeDataString($PathName)
-    $info = Get-CamRelayApiJson -Config $Config -Route $route
+    $answer = Invoke-CamRelayApi -Config $Config -Route $route
+    if ($answer.Status -eq 'denied') { return $true }
+    $info = $answer.Data
     if (-not $info) { return $false }
 
     $property = $info.PSObject.Properties['ready']
@@ -783,10 +941,18 @@ function Get-CamRelayReadyPaths {
         on every status tick to see whether a camera still on its direct input
         can move onto the relay, and six separate probes a tick would be
         needless chatter.
+
+        When the relay refuses the product's login, every camera's path is
+        returned: the relay is running and serving without a login, and only
+        the readiness view is lost. Reporting none would send every consumer
+        direct - see Invoke-CamRelayApi. A caller that needs to tell the two
+        apart asks Get-CamRelayApiStatus afterwards.
     #>
     param([Parameter(Mandatory = $true)]$Config)
 
-    $list = Get-CamRelayApiJson -Config $Config -Route 'v3/paths/list'
+    $answer = Invoke-CamRelayApi -Config $Config -Route 'v3/paths/list'
+    if ($answer.Status -eq 'denied') { return @((Get-CamRelayPathMap -Cameras (Get-CamList)).Keys) }
+    $list = $answer.Data
     if (-not $list) { return @() }
 
     $names = New-Object System.Collections.ArrayList
@@ -990,6 +1156,70 @@ function Stop-CamViewer {
 }
 
 
+function Send-CamViewerUrl {
+    <#
+        Hands a stream URL to a running mpv over its JSON IPC pipe, so the URL
+        never appears on mpv's command line, where every local process can read
+        it. $true only when mpv acknowledged the loadfile.
+
+        mpv was started idle with --input-ipc-server=$PipeName. The pipe takes a
+        moment to exist, so the connect is retried until $TimeoutMs, and it
+        gives up at once if mpv has already exited. After the load is
+        acknowledged the pipe is switched off again: its default access lets
+        any local user connect, and mpv would answer the `path` property with
+        the URL. A refusal of that last step is not a failure of the hand-over.
+
+        Nothing here logs, and nothing throws: any fault is a $false.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [Parameter(Mandatory = $true)][string]$PipeName,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [int]$TimeoutMs = 8000
+    )
+
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $client = $null
+    try {
+        while ($true) {
+            if ($Process.HasExited -or $clock.ElapsedMilliseconds -ge $TimeoutMs) { return $false }
+            $attempt = New-Object System.IO.Pipes.NamedPipeClientStream('.', $PipeName, [System.IO.Pipes.PipeDirection]::InOut)
+            try { $attempt.Connect(250); $client = $attempt; break }
+            catch { $attempt.Dispose() }
+        }
+
+        $writer = New-Object System.IO.StreamWriter($client)
+        $writer.AutoFlush = $true
+        $reader = New-Object System.IO.StreamReader($client)
+
+        $sent = 0
+        foreach ($command in @(
+                @{ command = @('loadfile', $Url); request_id = 1 },
+                @{ command = @('set_property', 'input-ipc-server', ''); request_id = 2 })) {
+            $writer.WriteLine(($command | ConvertTo-Json -Compress))
+            $sent++
+            # mpv interleaves events with replies, and only the reply to this
+            # request id says whether it worked.
+            $reply = $null
+            while ($null -eq $reply) {
+                $left = $TimeoutMs - $clock.ElapsedMilliseconds
+                if ($left -lt 500) { $left = 500 }
+                $line = $reader.ReadLineAsync()
+                if (-not $line.Wait([int]$left) -or $null -eq $line.Result) { break }
+                if ($line.Result -notmatch '"request_id"\s*:\s*' + $sent + '\b') { continue }
+                $reply = $line.Result | ConvertFrom-Json
+            }
+            if ($sent -eq 1 -and (($null -eq $reply) -or ([string]$reply.error -ne 'success'))) { return $false }
+        }
+        return $true
+    }
+    catch { return $false }
+    finally {
+        if ($client) { $client.Dispose() }
+    }
+}
+
+
 function Invoke-CamViewer {
     <#
         Runs ONE mpv attempt for a dashboard pane and answers one question:
@@ -1021,6 +1251,17 @@ function Invoke-CamViewer {
         The pane hands over the argument tokens exactly as PowerShell parsed
         them and Get-CamArgumentLine rejoins them, so the arguments mpv
         receives are the ones the call operator used to pass.
+
+        A URL that carries credentials is the one exception to "the URL is
+        mpv's first argument", because any local process can read a command
+        line and the direct URL holds the camera password. mpv is started idle
+        with a private IPC pipe and the URL is sent to it afterwards
+        (Send-CamViewerUrl). --idle=once keeps the rest of this function
+        unchanged: mpv idles only until that first load and then exits when
+        playback ends or fails, as it does without the option. If the hand-over
+        fails the answer is $false and mpv is stopped - never a retry with the
+        URL as an argument. A relay URL has no credentials and keeps the old
+        path.
     #>
     param(
         [Parameter(Mandatory = $true)]$Config,
@@ -1032,10 +1273,22 @@ function Invoke-CamViewer {
 
         [Parameter(Mandatory = $true)][string]$MpvPath,
 
-        [AllowNull()][AllowEmptyCollection()][string[]]$MpvArgs
+        [AllowNull()][AllowEmptyCollection()][string[]]$MpvArgs,
+
+        [int]$IpcTimeoutMs = 8000
     )
 
-    $line = Get-CamArgumentLine -Tokens (@([string]$Choice.Url) + @($MpvArgs))
+    # Any '@' after the scheme counts, not only a well-formed user:pass@: a
+    # password containing a slash would slip past the redactor's own pattern,
+    # and the cost of a false positive is only an IPC hand-over.
+    $viaIpc = ([string]$Choice.Url -match '^[a-z][a-z0-9+.\-]*://.*@')
+    if ($viaIpc) {
+        $pipeName = 'camviewer-' + [guid]::NewGuid().ToString('N')
+        $line = Get-CamArgumentLine -Tokens (@($MpvArgs) + @('--idle=once', "--input-ipc-server=$pipeName"))
+    }
+    else {
+        $line = Get-CamArgumentLine -Tokens (@([string]$Choice.Url) + @($MpvArgs))
+    }
 
     # -NoNewWindow keeps mpv's console output in the pane it belongs to, the
     # way the call operator did. Its stderr is not captured, so it can no
@@ -1044,6 +1297,12 @@ function Invoke-CamViewer {
     try { $null = $process.Handle } catch { }
 
     try {
+        if ($viaIpc -and -not (Send-CamViewerUrl -Process $process -PipeName $pipeName -Url ([string]$Choice.Url) -TimeoutMs $IpcTimeoutMs)) {
+            Stop-CamViewer -Process $process
+            Write-Host (Get-CamRedacted -Text 'The viewer could not hand the stream to mpv over its control pipe; mpv was stopped and the pane will retry.') -ForegroundColor Yellow
+            return $false
+        }
+
         $seconds = 10
         try { $seconds = [int]$Config.ViewerPromoteCheckSeconds } catch { }
 
@@ -1081,12 +1340,17 @@ function Get-CamRelayConfigText {
         in the file and is overridden at launch by MTX_PATHS_<NAME>_SOURCE,
         which is the only reason the camera password stays off the disk.
 
+        Nor is the control API's password: the file holds the product's login
+        as its user name and the SHA-256 of its password only, see
+        Get-CamRelayApiCredential.
+
         Used by -InstallRestreamer to write the file and by the supervisor to
-        tell whether the file on disk still matches cameras.json.
+        tell whether the file on disk still matches cameras.json and the login.
     #>
     param(
         [Parameter(Mandatory = $true)]$Config,
         [Parameter(Mandatory = $true)]$PathMap,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$ApiCredential,
         [string]$TemplatePath
     )
 
@@ -1109,6 +1373,8 @@ function Get-CamRelayConfigText {
     $text = [System.IO.File]::ReadAllText($TemplatePath)
     $text = $text.Replace('__RTSP_ADDRESS__', (Get-CamRelayHostPort -Url ([string]$Config.RelayBase)))
     $text = $text.Replace('__API_ADDRESS__', (Get-CamRelayHostPort -Url ([string]$Config.RelayApiBase)))
+    $text = $text.Replace('__API_USER__', $ApiCredential.UserName)
+    $text = $text.Replace('__API_PASS__', (Get-CamRelayApiPassHash -Credential $ApiCredential))
     $text = $text.Replace('__PATHS__', ($lines -join "`r`n"))
 
     # Normalised to CRLF: the generated file lands on NTFS and the Operator
@@ -1143,6 +1409,29 @@ function Get-CamRelayConfigPathNames {
 }
 
 
+function Get-CamRelayConfigAuthBlock {
+    <#
+        The authentication settings of a rendered MediaMTX config: from the
+        authMethod: line through the end of the authInternalUsers: list, with
+        line endings normalised. Empty when the file has none, which is what
+        every config written before the control API needed a login looks like.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Text)
+
+    $block = New-Object System.Collections.ArrayList
+    $inBlock = $false
+    foreach ($line in [regex]::Split($Text, "`r`n|`n")) {
+        if (-not $inBlock) {
+            if ($line -match '^authMethod:') { $inBlock = $true; [void]$block.Add($line.TrimEnd()) }
+            continue
+        }
+        if ($line -match '^\S' -and $line -notmatch '^authInternalUsers:') { break }
+        [void]$block.Add($line.TrimEnd())
+    }
+    return (($block -join "`r`n").TrimEnd())
+}
+
+
 function Test-CamRelayConfigCurrent {
     <#
         Whether the MediaMTX config on disk still covers exactly the cameras in
@@ -1167,6 +1456,15 @@ function Test-CamRelayConfigCurrent {
         A renamed, added or removed camera DOES change the set, and that is the
         case that matters: a camera with no path is never pulled and quietly
         stays on a direct connection, taking the second of its two sessions.
+
+        The other thing that must match is the control API's login, reported
+        separately as AuthCurrent because it is fixed differently: the
+        authentication block in the file must be exactly the one
+        Get-CamRelayConfigText renders for relay_api_creds.xml. A file written
+        before the API needed a login has no block and leaves the API open; a
+        file whose login is not the stored one locks the product out of its
+        own API. Without relay_api_creds.xml it cannot be current. Current is
+        true only when both are.
     #>
     param(
         [Parameter(Mandatory = $true)]$Config,
@@ -1175,13 +1473,14 @@ function Test-CamRelayConfigCurrent {
     )
 
     $result = [pscustomobject]@{
-        Current  = $false
-        Readable = $false
-        Expected = @($PathMap.Keys)
-        Found    = @()
-        Missing  = @()
-        Extra    = @()
-        Detail   = ''
+        Current     = $false
+        AuthCurrent = $false
+        Readable    = $false
+        Expected    = @($PathMap.Keys)
+        Found       = @()
+        Missing     = @()
+        Extra       = @()
+        Detail      = ''
     }
 
     $actual = $null
@@ -1195,17 +1494,26 @@ function Test-CamRelayConfigCurrent {
     $result.Found = @(Get-CamRelayConfigPathNames -Text $actual)
     $result.Missing = @($result.Expected | Where-Object { $result.Found -notcontains $_ })
     $result.Extra = @($result.Found | Where-Object { $result.Expected -notcontains $_ })
-    $result.Current = ($result.Missing.Count -eq 0 -and $result.Extra.Count -eq 0)
+    $pathsCurrent = ($result.Missing.Count -eq 0 -and $result.Extra.Count -eq 0)
+
+    $apiCredential = Get-CamRelayApiCredential
+    if ($apiCredential) {
+        $expected = Get-CamRelayConfigText -Config $Config -PathMap $PathMap -ApiCredential $apiCredential
+        $result.AuthCurrent = ((Get-CamRelayConfigAuthBlock -Text $actual) -ceq (Get-CamRelayConfigAuthBlock -Text $expected))
+    }
+    $result.Current = ($pathsCurrent -and $result.AuthCurrent)
 
     if ($result.Current) {
-        $result.Detail = '{0} has a path for every camera in cameras.json: {1}' -f `
+        $result.Detail = '{0} has a path for every camera in cameras.json and the control API login: {1}' -f `
             $ConfigPath, (($result.Found | Sort-Object) -join ', ')
     }
     else {
         $parts = New-Object System.Collections.ArrayList
         if ($result.Missing.Count -gt 0) { [void]$parts.Add('no path for ' + (($result.Missing | Sort-Object) -join ', ')) }
         if ($result.Extra.Count -gt 0) { [void]$parts.Add('a path for no camera: ' + (($result.Extra | Sort-Object) -join ', ')) }
-        $result.Detail = '{0} no longer covers cameras.json - {1}. Run cam.recorder.ps1 -InstallRestreamer' -f `
+        if (-not $apiCredential) { [void]$parts.Add('no control API login exists yet') }
+        elseif (-not $result.AuthCurrent) { [void]$parts.Add('the control API login is missing or not the stored one') }
+        $result.Detail = '{0} is out of date - {1}. Run cam.recorder.ps1 -InstallRestreamer' -f `
             $ConfigPath, ($parts -join '; ')
     }
     return $result
@@ -1830,12 +2138,15 @@ function Get-CamAlertEventIdList {
                deletable is left, so the disk is filling
           122  the age rule's circuit breaker held a run that would have
                deleted more than MaxAgePruneFraction of the archive
+          130  the restreamer's control API refused the product's login, so
+               readiness is not visible and every consumer is kept on the
+               relay
 
         103 is its own ID rather than another 100 because the log is where the
         Operator reads back what happened, and "somebody closed the window" and
         "the supervisor died" need different answers from him.
     #>
-    return @(100, 101, 102, 103, 110, 120, 121, 122)
+    return @(100, 101, 102, 103, 110, 120, 121, 122, 130)
 }
 
 

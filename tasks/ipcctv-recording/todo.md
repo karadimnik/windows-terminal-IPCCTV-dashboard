@@ -71,14 +71,14 @@ exact codec and consumer shape we have - so the restreamer must be proven, not a
 
 - [x] **[14]** DONE Phase D. README rewritten end to end: install order, command reference for all
       four entry points, how it works, every config key, twelve known limitations, the screenshot.
-- [ ] **[15]** Commit to `executor/recording-feature`. No merge, no push without approval.
+- [x] **[15]** DONE (everything is committed and merged locally). Commit to `executor/recording-feature`. No merge, no push without approval.
 
 ## Deferred
 
 - [ ] **[16]** Motion-triggered recording, simple version. Research ONVIF Profile S event
       subscription first - these are ONVIF cameras, so the built-in detector may well be reachable,
       which beats re-detecting motion on the PC. ffmpeg `select`/`scene` only as fallback.
-- [ ] **[17]** Local restreamer revisit (go2rtc / MediaMTX) - one camera connection fanned out
+- [x] **[17]** DONE: the MediaMTX relay has been the production input path since 2026-10-12. Local restreamer revisit (go2rtc / MediaMTX) - one camera connection fanned out
       locally; also removes the credential-in-command-line exposure.
 
 ## Operator-owned verification (after handover)
@@ -120,7 +120,7 @@ srt/moq - transport fan-out only, never a media server, never a recorder.
 **Open, carried forward:**
 - [x] **[23]** Operator to run DONE 2026-10-15, reported "done ok" by the Operator (camera-facing -SelfTest).  camera-facing `-SelfTest` (checks b/c/d) with the dashboard CLOSED.
       Never executed - the Phase B agent was forbidden from touching cameras.
-- [ ] **[24]** Untested over time: log rotation at `LogMaxBytes`, the 900 s production segment path,
+- [x] **[24]** Untested over time: DONE 2026-10-15: parts A and B and the production soak exercised every path named here in a sandbox. log rotation at `LogMaxBytes`, the 900 s production segment path,
       `HealthyResetSeconds` backoff reset, the real 2250 s stall threshold, `MaxRetentionDays`.
 - [x] **[25]** DONE Phase D: the README's configuration tables list every key with its default and
       mark the ones absent from `recorder.config.example.json` with a star, including
@@ -1342,9 +1342,41 @@ The Operator approved all four. Documentation only; no code touched.
       `loadfile`) keeps the URL off the process command line - an in-architecture fix; (b) interview the Operator
       on the browser direction before any build: scope, which OS, what to keep of the grid and health strip.
 
-- **[87] update 2026-10-15:** the Operator chose the incremental, additive route: grow the web app first (live view
-      in the page), then an OS-independent recorder, then the supervisor; PC, then LAN, then internet; NOTHING removed.
-      Sub-plan written: `tasks/portable-nvr/plan.md` (stages 0-5, rules, decisions D1-D6). The mpv password exposure has
-      its own small in-architecture fix (mpv JSON IPC `loadfile`, verified by experiment) queued as Stage 1b. The soak
-      and 1b wait for the usage limit to reset (2026-10-20 01:00 Bucharest); a WIP soak check is parked on
-      `executor/soak` (untested, not for merging as is).
+- **RULE (Operator, 2026-10-15): the portable NVR NEVER reaches `master`/`main` of this repository.** It is
+  developed on the branch `portable-nvr`, started from this repository's master, and when finished it moves to its
+  own repository. Its plan lives only on that branch. Do not merge `portable-nvr` into master, do not copy its
+  files here, do not push it to this repository's `master`. This repository keeps working exactly as it is.
+
+- **[24] soak DONE 2026-10-15** (merged locally, `-Checks soak`, named only). 33 min at the production defaults: two
+  complete 900 s segments (900.018 s, 900.117 s, quarter-hour aligned), `recorder.log` and the camera log rolled at 2 MB
+  with nothing lost, 0 restarts, 0 alerts, status gap max 6.7 s, handles flat, ffmpeg flat. ONE OPEN OBSERVATION:
+  supervisor memory rose about 1.3 MB/min between minutes 10 and 30 (then levelled), under a camera about 840x noisier
+  than a real one. A micro-test showed `Write-CamLog` (old and new) is flat over 45,000 calls, so the cause is unproven
+  (a leak elsewhere, or collector drift). Worst case scaled to real log rates is about 2 MB/day. The check reports
+  memory but only fails on handles. FOLLOW-UP (cheap, report-only): a 60-minute soak on a QUIET camera.
+
+- [x] **[88]** DONE 2026-10-15 (merged locally, not pushed): the camera password no longer reaches mpv's command line. A
+      viewer pane starts mpv `--idle=once` with a random private IPC pipe and hands it the credentialed URL over
+      `loadfile`, then unsets the pipe so nothing can reconnect to read the `path` back. A failed hand-over never falls
+      back to the command line. Check `viewerpw`: password on 0 of 104 process-listing sweeps, red against the old
+      function. Audit of the remaining exposures: [89], and the ffmpeg direct path below.
+- [x] **[89]** DONE 2026-10-15 on branch `executor/relay-api-auth` (not merged; design in `relay-api-auth.md`, check `relayapi`). SECURITY, found by the [88] audit and reproduced 2026-10-15: MediaMTX's control API (`api: yes`, no
+      `authMethod`, loopback) returns a camera's full `rtsp://user:PASSWORD@...` source from `/v3/config/paths/list` and
+      `/v3/config/paths/get/<name>` to ANY local process or Windows account; the routes the product uses
+      (`/v3/paths/*`) do not leak it. No `Access-Control-Allow-Origin` is sent, so an ordinary web page cannot read it
+      (DNS rebinding untested). Decided with the Operator: fix now, before the portable project: enable API
+      authentication with a login the product holds like the camera credential, keep the anonymous RTSP read/publish
+      behaviour, and make sure a failing readiness probe can NOT push viewers or recorders onto direct inputs.
+- [ ] **[90]** The recorder's ffmpeg children put the credentialed URL on their command line on the DIRECT path
+      (relay off, or its path not ready), and `-SelfTest` probes always do. Not fixed; the relay path avoids it.
+      Candidate: refuse direct input for recording when the relay is enabled, or accept as the floor.
+
+- **[89] merged locally 2026-10-15** (`executor/relay-api-auth`, alert id 130, login file `relay_api_creds.xml`). The first live
+  start after it rewrites `C:\mediamtx\mediamtx.yml` with the auth block and creates the login; not yet run against the
+  real cameras. Trade-off, by design: while the relay refuses the product's login, consumers stay on the relay, so a camera
+  whose path has no stream is not recorded until the login is fixed (alert 130 says so) instead of falling back to direct.
+
+- **Testing preference (Operator, 2026-10-15): no more stress or endurance tests; feasibility (functionality) tests only.**
+  Dropped as a result: the 60-minute quiet-camera soak that was to settle the supervisor memory observation under [24]
+  (the observation stays recorded, worst case about 2 MB a day at real log rates), and the quiet-PC UDP rerun of the
+  portable project's one-tile spike. A functionality check for something new is still expected.
