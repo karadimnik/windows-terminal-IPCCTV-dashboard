@@ -79,24 +79,35 @@ function Format-CamAgeText {
 
 
 function Format-CamTimestamp {
-    <# Round-trippable local timestamp, or $null for "never". #>
+    <#
+        Round-trippable timestamp, or $null for "never": local time with the
+        offset in force at that instant (2026-10-25T03:30:00+02:00), so people
+        read local time and every reader still gets the exact instant. Taken
+        from the UTC instant because a local DateTime in the repeated hour of a
+        fall-back cannot always say which of the two offsets it had.
+    #>
     param($Value)
 
     if ($null -eq $Value) { return $null }
     $when = [DateTime]$Value
     if ($when -eq [DateTime]::MinValue) { return $null }
-    return $when.ToString('o')
+    return ([DateTimeOffset]$when.ToUniversalTime()).ToLocalTime().ToString('o')
 }
 
 
 function Get-CamDateTimeOrNull {
-    <# Parses a timestamp written by Format-CamTimestamp. #>
+    <#
+        Parses a timestamp written by Format-CamTimestamp as the instant it
+        names, returned in UTC so it can be subtracted from Get-CamWallClock.
+        Parsing to a local DateTime would drop the offset and put a time from
+        before a daylight-saving change an hour out.
+    #>
     param($Value)
 
     if ($null -eq $Value) { return $null }
     $text = [string]$Value
     if ([string]::IsNullOrWhiteSpace($text)) { return $null }
-    try { return [DateTime]::Parse($text, [System.Globalization.CultureInfo]::InvariantCulture) }
+    try { return [DateTimeOffset]::Parse($text, [System.Globalization.CultureInfo]::InvariantCulture).UtcDateTime }
     catch { return $null }
 }
 
@@ -859,17 +870,17 @@ function Get-CamInputUrl {
     try { $pollMs = [int]$Config.RelayReadyPollMs } catch { }
     if ($pollMs -lt 50) { $pollMs = 50 }
 
-    $startedAt = [DateTime]::Now
+    $startedAt = Get-CamWallClock
     $deadline = $startedAt.AddSeconds($WaitSeconds)
-    while ([DateTime]::Now -lt $deadline) {
+    while ((Get-CamWallClock) -lt $deadline) {
         Start-Sleep -Milliseconds $pollMs
         if (Test-CamRelayPathReady -Config $Config -PathName $RelayPathName) {
-            $relay.WaitedSeconds = ([DateTime]::Now - $startedAt).TotalSeconds
+            $relay.WaitedSeconds = ((Get-CamWallClock) - $startedAt).TotalSeconds
             return $relay
         }
     }
 
-    $direct.WaitedSeconds = ([DateTime]::Now - $startedAt).TotalSeconds
+    $direct.WaitedSeconds = ((Get-CamWallClock) - $startedAt).TotalSeconds
     return $direct
 }
 
@@ -2035,11 +2046,30 @@ function Get-CamPruneRefusal {
 
 function Get-CamWallClock {
     <#
-        The time the pruner judges ages against. Its own function so a test can
-        move the clock, which is the failure the pruner's clock check exists
-        for.
+        The one clock every interval, age, deadline and "is it due" is measured
+        on, in UTC. DateTime subtraction ignores the offset, so on local time a
+        daylight-saving change moves every interval by an hour: at fall-back
+        every timer stalls for an hour, at spring-forward every age jumps by
+        3600 s. Compare its readings with file times only through
+        LastWriteTimeUtc / CreationTimeUtc, and with stored timestamps only
+        through Get-CamDateTimeOrNull. Local time is for display alone - log
+        stamps, Format-CamTimestamp, segment names.
+
+        Its own function so a test can move the clock.
     #>
-    return [DateTime]::Now
+    return [DateTime]::UtcNow
+}
+
+
+function Test-CamIntervalDue {
+    <# True once $Seconds have passed since $Last, both readings of Get-CamWallClock. #>
+    param(
+        [Parameter(Mandatory = $true)][DateTime]$Last,
+        [Parameter(Mandatory = $true)][double]$Seconds,
+        [Parameter(Mandatory = $true)][DateTime]$Now
+    )
+
+    return (($Now - $Last).TotalSeconds -ge $Seconds)
 }
 
 
@@ -2053,8 +2083,8 @@ function Get-CamPruneClockProblem {
         before the per-folder strictly-older filter, so a disagreement between
         the two is caught here rather than filtered away - $Newest the newest
         segment of each folder (protected, never deleted), $Segments every
-        segment the run looked at. All times are LastWriteTime, the one the age
-        rule and the oldest-first order use.
+        segment the run looked at. All times are LastWriteTimeUtc, the one the
+        age rule and the oldest-first order use, against a UTC $Now.
 
           1. The oldest candidate is not later than the newest segment. If it
              is, the order the pruner deletes in disagrees with which file it
@@ -2077,30 +2107,30 @@ function Get-CamPruneClockProblem {
     )
 
     if ($Candidates.Count -eq 0 -or $Newest.Count -eq 0) { return '' }
-    $stamp = { param($time) $time.ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) }
+    $stamp = { param($time) $time.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture) }
 
     $oldest = $Candidates[0]
-    foreach ($file in $Candidates) { if ($file.LastWriteTime -lt $oldest.LastWriteTime) { $oldest = $file } }
+    foreach ($file in $Candidates) { if ($file.LastWriteTimeUtc -lt $oldest.LastWriteTimeUtc) { $oldest = $file } }
     $newestFile = $Newest[0]
-    foreach ($file in $Newest) { if ($file.LastWriteTime -gt $newestFile.LastWriteTime) { $newestFile = $file } }
+    foreach ($file in $Newest) { if ($file.LastWriteTimeUtc -gt $newestFile.LastWriteTimeUtc) { $newestFile = $file } }
 
-    if ($oldest.LastWriteTime -gt $newestFile.LastWriteTime) {
+    if ($oldest.LastWriteTimeUtc -gt $newestFile.LastWriteTimeUtc) {
         return ("the oldest candidate {0} (written {1}) is later than the newest segment {2} (written {3})" -f `
-            $oldest.FullName, (& $stamp $oldest.LastWriteTime), $newestFile.FullName, (& $stamp $newestFile.LastWriteTime))
+            $oldest.FullName, (& $stamp $oldest.LastWriteTimeUtc), $newestFile.FullName, (& $stamp $newestFile.LastWriteTimeUtc))
     }
 
     $limit = $Now.AddSeconds(60)
     foreach ($file in $Segments) {
-        if ($file.LastWriteTime -gt $limit) {
-            return ("{0} is written {1}, in the future of the wall clock {2}" -f $file.FullName, (& $stamp $file.LastWriteTime), (& $stamp $Now))
+        if ($file.LastWriteTimeUtc -gt $limit) {
+            return ("{0} is written {1}, in the future of the wall clock {2}" -f $file.FullName, (& $stamp $file.LastWriteTimeUtc), (& $stamp $Now))
         }
     }
 
     $bound = [double]$Config.SegmentSeconds * [double]$Config.StallFactor
-    $lag = ($Now - $newestFile.LastWriteTime).TotalSeconds
+    $lag = ($Now - $newestFile.LastWriteTimeUtc).TotalSeconds
     if ($lag -gt $bound) {
         return ("the wall clock {0} is {1} s ahead of the newest segment {2} (written {3}), more than the {4} s stall threshold - the clock jumped or nothing is recording" -f `
-            (& $stamp $Now), [int64]$lag, $newestFile.FullName, (& $stamp $newestFile.LastWriteTime), [int64]$bound)
+            (& $stamp $Now), [int64]$lag, $newestFile.FullName, (& $stamp $newestFile.LastWriteTimeUtc), [int64]$bound)
     }
     return ''
 }
@@ -2271,7 +2301,7 @@ function Initialize-CamArchiveOwner {
         Owner     = 'IPCCTV recorder'
         Schema    = 1
         RootPath  = [string]$Config.RootPath
-        CreatedAt = Format-CamTimestamp -Value ([DateTime]::Now)
+        CreatedAt = Format-CamTimestamp -Value (Get-CamWallClock)
         Note      = 'The recorder prunes footage only under a root holding this file. It wrote it because the root held nothing but its own files. Do not copy it into another folder.'
     }
     $dir = Split-Path -Path $result.Path -Parent
@@ -2366,7 +2396,7 @@ function Set-CamStatusUnexpectedStop {
 
     $path = Get-CamStatusFilePath -Config $Config
     $record = [pscustomobject]@{
-        At            = Format-CamTimestamp -Value ([DateTime]::Now)
+        At            = Format-CamTimestamp -Value (Get-CamWallClock)
         Reason        = Get-CamRedacted -Text $Reason
         SupervisorPid = $SupervisorPid
         DetectedBy    = $DetectedBy
@@ -2423,7 +2453,7 @@ function Set-CamStatusWindowClosed {
 
     $path = Get-CamStatusFilePath -Config $Config
     $record = [pscustomobject]@{
-        At          = Format-CamTimestamp -Value ([DateTime]::Now)
+        At          = Format-CamTimestamp -Value (Get-CamWallClock)
         Reason      = Get-CamRedacted -Text $Reason
         WindowTitle = $WindowTitle
         DetectedBy  = $DetectedBy
@@ -2472,7 +2502,7 @@ function Get-CamSupervisorState {
 
     $state.Pid = $Snapshot.SupervisorPid
     $updated = Get-CamDateTimeOrNull -Value $Snapshot.UpdatedAt
-    if ($updated) { $state.AgeSeconds = [math]::Round(([DateTime]::Now - $updated).TotalSeconds, 1) }
+    if ($updated) { $state.AgeSeconds = [math]::Round(((Get-CamWallClock) - $updated).TotalSeconds, 1) }
 
     if ([string]$Snapshot.State -ne 'running') {
         $state.Reason = "the supervisor recorded a clean shutdown at $($Snapshot.UpdatedAt)"
@@ -2862,7 +2892,7 @@ function Set-CamWindowRecord {
             TerminalPid = [CamWin]::ProcessIdOf($Hwnd)
             WardenPid   = $PID
             JobName     = $JobName
-            At          = Format-CamTimestamp -Value ([DateTime]::Now)
+            At          = Format-CamTimestamp -Value (Get-CamWallClock)
         }
 
         $json = ConvertTo-Json -InputObject $record -Depth 4
@@ -3116,8 +3146,8 @@ function Stop-CamTerminalWindow {
         [void][CamWin]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
     }
 
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
+    $deadline = (Get-CamWallClock).AddSeconds($TimeoutSeconds)
+    while ((Get-CamWallClock) -lt $deadline) {
         Start-Sleep -Milliseconds 250
         if (@(Get-CamTerminalWindow -Title $Title).Count -eq 0) { return 0 }
     }
@@ -3501,9 +3531,9 @@ function Add-CamJobMember {
     )
 
     Import-CamJobApi
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $deadline = (Get-CamWallClock).AddSeconds($TimeoutSeconds)
     $problem = 'not attempted'
-    while ((Get-Date) -lt $deadline) {
+    while ((Get-CamWallClock) -lt $deadline) {
         $problem = [CamJob]::JoinCurrentProcess($JobName)
         if ([string]::IsNullOrEmpty($problem)) {
             Write-Host ("{0} joined the job '{1}'" -f (Get-Date -Format 'HH:mm:ss'), $JobName) -ForegroundColor DarkGray
@@ -3775,9 +3805,9 @@ function Stop-CamProcessList {
 
     foreach ($id in $targets) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
 
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $deadline = (Get-CamWallClock).AddSeconds($TimeoutSeconds)
     $alive = @($targets)
-    while ($alive.Count -gt 0 -and (Get-Date) -lt $deadline) {
+    while ($alive.Count -gt 0 -and (Get-CamWallClock) -lt $deadline) {
         Start-Sleep -Milliseconds 300
         $alive = @($alive | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
     }
@@ -3976,8 +4006,8 @@ function Start-CamJobWarden {
         # its window never appeared must not delete the record of a warden
         # that is watching one.
         $recordConfig = $null
-        $deadline = (Get-Date).AddSeconds($AppearTimeoutSeconds)
-        while ((Get-Date) -lt $deadline) {
+        $deadline = (Get-CamWallClock).AddSeconds($AppearTimeoutSeconds)
+        while ((Get-CamWallClock) -lt $deadline) {
             $found = @([CamWin]::FindTerminalByTitle($WindowTitle))
             if ($found.Count -ge 1) { $hwnd = $found[0]; break }
             Start-Sleep -Milliseconds $PollMs
@@ -4164,6 +4194,19 @@ function Start-CamNvrWarden {
 }
 
 
+function Remove-CamExpiredRestart {
+    <# Drops the restarts older than the window from the front of an oldest-first list of Get-CamWallClock readings. #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][System.Collections.ArrayList]$Restarts,
+        [Parameter(Mandatory = $true)][double]$WindowMinutes,
+        [Parameter(Mandatory = $true)][DateTime]$Now
+    )
+
+    $cutoff = $Now.AddMinutes(-$WindowMinutes)
+    while ($Restarts.Count -gt 0 -and $Restarts[0] -lt $cutoff) { $Restarts.RemoveAt(0) }
+}
+
+
 function Start-CamNvrHost {
     <#
         The NVR pane. Runs the supervisor as a child, waits for it, and starts
@@ -4238,11 +4281,11 @@ function Start-CamNvrHost {
         $psi.CreateNoWindow = $false
         $child = [System.Diagnostics.Process]::Start($psi)
         [void]$child.Handle
-        $startedAt = [DateTime]::Now
+        $startedAt = Get-CamWallClock
 
         $child.WaitForExit()
         $code = $child.ExitCode
-        $ranFor = ([DateTime]::Now - $startedAt).TotalSeconds
+        $ranFor = ((Get-CamWallClock) - $startedAt).TotalSeconds
 
         $requested = (Test-Path -LiteralPath $stopFlag)
         $stopKind = ''
@@ -4272,8 +4315,7 @@ function Start-CamNvrHost {
             [void](Set-CamStatusUnexpectedStop -Config $config -Reason $reason -SupervisorPid $child.Id)
         }
 
-        $cutoff = [DateTime]::Now.AddMinutes(-$RestartWindowMinutes)
-        while ($restarts.Count -gt 0 -and $restarts[0] -lt $cutoff) { $restarts.RemoveAt(0) }
+        Remove-CamExpiredRestart -Restarts $restarts -WindowMinutes $RestartWindowMinutes -Now (Get-CamWallClock)
 
         if ($restarts.Count -ge $MaxRestarts) {
             [void](Send-CamAlert -Title 'the NVR has stopped and is NOT coming back' `
@@ -4290,11 +4332,11 @@ function Start-CamNvrHost {
         # The next supervisor creates a job of the same name, so wait for the
         # kernel to finish sweeping the last one rather than letting it start
         # without crash safety.
-        $deadline = [DateTime]::Now.AddSeconds(20)
-        while ([CamJob]::Exists($jobName) -and [DateTime]::Now -lt $deadline) { Start-Sleep -Milliseconds 250 }
+        $deadline = (Get-CamWallClock).AddSeconds(20)
+        while ([CamJob]::Exists($jobName) -and (Get-CamWallClock) -lt $deadline) { Start-Sleep -Milliseconds 250 }
 
         Start-Sleep -Seconds $RestartDelaySeconds
-        [void]$restarts.Add([DateTime]::Now)
+        [void]$restarts.Add((Get-CamWallClock))
         [void](Send-CamAlert -Title 'the NVR is recording again' `
                 -Message ("restarted the supervisor after an unexpected stop; this is restart {0} of {1} allowed in {2} minutes." -f `
                     $restarts.Count, $MaxRestarts, $RestartWindowMinutes) `
@@ -4407,13 +4449,13 @@ function Resolve-CamWindowStart {
         # after an orderly stop, item [84].
         $alive = @()
         $job = $false
-        $deadline = (Get-Date).AddSeconds($WaitSeconds)
+        $deadline = (Get-CamWallClock).AddSeconds($WaitSeconds)
         while ($true) {
             $alive = @($owned | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
             $windows = (Get-CamWindowPresence -Config $Config -Title $Title).Count
             $job = [CamJob]::Exists($JobName)
             if ($alive.Count -eq 0 -and $windows -eq 0 -and -not $job) { break }
-            if ((Get-Date) -ge $deadline) {
+            if ((Get-CamWallClock) -ge $deadline) {
                 throw ("Nothing is recording, but the NVR is still there after stopping its host and warden: {0} window(s) answering to '{1}', job '{2}' held: {3}, its own process(es) still alive: {4} (stopped: {5}; survived: {6}). Something outside this project holds them. Run cam.ps1 -Status, which names the window by handle and by the title it is actually showing, and the processes by role, then try again." -f `
                         $windows, $Title, $JobName, $job, `
                         $(if ($alive.Count -gt 0) { ($alive | Sort-Object) -join ', ' } else { 'none' }), `
@@ -4519,8 +4561,8 @@ function Start-CamNvrWindow {
     $warden = Start-CamDetachedProcess -Script $wardenScript
     $report.WardenPid = $warden.Id
 
-    $deadline = (Get-Date).AddSeconds($JobWaitSeconds)
-    while ((Get-Date) -lt $deadline) {
+    $deadline = (Get-CamWallClock).AddSeconds($JobWaitSeconds)
+    while ((Get-CamWallClock) -lt $deadline) {
         if ([CamJob]::Exists($jobName)) { $report.JobReady = $true; break }
         Start-Sleep -Milliseconds 250
     }
@@ -4542,8 +4584,8 @@ function Start-CamNvrWindow {
         'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NoExit', '-EncodedCommand', $encoded)
     & wt.exe $wtArgs
 
-    $deadline = (Get-Date).AddSeconds($WindowWaitSeconds)
-    while ((Get-Date) -lt $deadline) {
+    $deadline = (Get-CamWallClock).AddSeconds($WindowWaitSeconds)
+    while ((Get-CamWallClock) -lt $deadline) {
         # The window we just launched carries the title - its tab is the active
         # one and nothing has been adopted into it yet - so the title search
         # answers here. Asking through the presence reader anyway means this
@@ -4643,8 +4685,8 @@ function Stop-CamWardenedWindow {
         # The kernel sweep is immediate once the handle is gone, but the
         # warden has to die first and a terminated process is reaped
         # asynchronously.
-        $deadline = (Get-Date).AddSeconds(10)
-        while ((Get-Date) -lt $deadline) {
+        $deadline = (Get-CamWallClock).AddSeconds(10)
+        while ((Get-CamWallClock) -lt $deadline) {
             $alive = @($hosts | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
             if ($alive.Count -eq 0 -and -not [CamJob]::Exists($jobName)) { break }
             Start-Sleep -Milliseconds 250
