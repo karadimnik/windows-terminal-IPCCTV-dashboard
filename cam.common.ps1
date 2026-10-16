@@ -368,6 +368,28 @@ function Get-CamConfigDefault {
         # mpv panes alike - so six of them do not burst onto the relay, the
         # control API and the cameras in the same instant.
         StartStaggerMs          = 300
+        # Live view in a browser: a SECOND MediaMTX, dedicated to WebRTC and
+        # separate from the recording relay above, which never speaks WebRTC.
+        # Off by default; with it off nothing here is read, started or written.
+        # Its paths are <relaypath>sub (the camera's LiveSubStream, pulled on
+        # demand) and <relaypath>main (the recording relay's own path, so no
+        # extra camera session). Read access needs a login that only the
+        # supervisor and camui can read; see tasks/portable-nvr/live-1a-design.md.
+        LiveViewEnabled      = $false
+        # Empty means the relay's RestreamerExePath.
+        LiveExePath          = ''
+        # A LOCAL NTFS path, like RestreamerConfigPath.
+        LiveConfigPath       = 'C:\mediamtx\mediamtx-live.yml'
+        # Loopback only: WebRTC signaling (TCP) and the ICE media port (UDP).
+        LiveWhepAddress      = '127.0.0.1:8889'
+        LiveUdpAddress       = '127.0.0.1:8189'
+        # The camera stream the live grid pulls, on demand.
+        LiveSubStream        = 'stream2'
+        # How long after the last viewer leaves the camera session is closed.
+        LiveCloseAfterSeconds = 10
+        # The login's secret. Empty means %LOCALAPPDATA%\IPCCTV\live_view_secret.txt:
+        # a local per-user folder, because the repository share cannot hold an ACL.
+        LiveSecretPath       = ''
         Container            = 'mkv'
         ContainerProfiles    = @{
             mkv  = [pscustomobject]@{
@@ -462,7 +484,69 @@ function Get-CamConfig {
     }
     $config.MaxAgePruneFraction = $fraction
 
+    Assert-CamLiveConfig -Config $config
+
     return $config
+}
+
+
+function Assert-CamLiveConfig {
+    <#
+        Rejects a malformed live-view setting at load rather than at the first
+        start. Checked whether or not LiveViewEnabled is true, so a typo cannot
+        sit unnoticed until the day it is switched on. Any key starting with
+        Live that is not one of the known ones is refused too: a misspelled
+        LiveViewEnabled would otherwise leave live view off without a word.
+    #>
+    param([Parameter(Mandatory = $true)][hashtable]$Config)
+
+    $known = @('LiveViewEnabled', 'LiveExePath', 'LiveConfigPath', 'LiveWhepAddress', 'LiveUdpAddress', 'LiveSubStream', 'LiveCloseAfterSeconds', 'LiveSecretPath')
+    foreach ($key in @($Config.Keys)) {
+        if ($key -match '^(?i)live' -and $known -cnotcontains $key) {
+            throw "Unknown live-view setting '$key'. The known ones are: $($known -join ', ')."
+        }
+    }
+
+    if ($Config.LiveViewEnabled -isnot [bool]) {
+        throw "LiveViewEnabled must be true or false, got '$($Config.LiveViewEnabled)'."
+    }
+    foreach ($key in @('LiveExePath', 'LiveConfigPath', 'LiveSecretPath')) {
+        if ($Config[$key] -isnot [string]) { throw "$key must be a path string, got '$($Config[$key])'." }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Config.LiveConfigPath)) { throw 'LiveConfigPath must not be empty.' }
+    foreach ($key in @('LiveExePath', 'LiveConfigPath', 'LiveSecretPath')) {
+        if (([string]$Config[$key]).StartsWith('\\')) {
+            throw "$key '$($Config[$key])' is a network or WSL share path. MediaMTX cannot watch its config there and a share cannot hold the secret's access control. Use a local path."
+        }
+    }
+
+    $ports = @{}
+    foreach ($key in @('LiveWhepAddress', 'LiveUdpAddress')) {
+        $match = [regex]::Match([string]$Config[$key], '^127\.0\.0\.1:([0-9]{1,5})$')
+        if (-not $match.Success -or [int]$match.Groups[1].Value -lt 1 -or [int]$match.Groups[1].Value -gt 65535) {
+            throw "$key must be 127.0.0.1 and a port such as 127.0.0.1:8889, got '$($Config[$key])'. Live view is loopback only."
+        }
+        $ports[$key] = [string]$Config[$key]
+    }
+
+    if ([string]$Config.LiveSubStream -notmatch '^[A-Za-z0-9_\-]{1,32}$') {
+        throw "LiveSubStream must be a camera stream name such as stream2 (letters, digits, - and _), got '$($Config.LiveSubStream)'."
+    }
+
+    $seconds = 0
+    if (-not [int]::TryParse([string]$Config.LiveCloseAfterSeconds, [ref]$seconds) -or $seconds -lt 1 -or $seconds -gt 3600) {
+        throw "LiveCloseAfterSeconds must be a whole number from 1 to 3600, got '$($Config.LiveCloseAfterSeconds)'."
+    }
+    $Config.LiveCloseAfterSeconds = $seconds
+
+    # The live instance must not be told to take an address the relay owns.
+    $relayAddresses = @()
+    foreach ($key in @('RelayBase', 'RelayApiBase')) {
+        if ($Config[$key]) { $relayAddresses += (Get-CamRelayHostPort -Url ([string]$Config[$key])) }
+    }
+    if ($relayAddresses -contains $ports.LiveWhepAddress) {
+        throw "LiveWhepAddress '$($ports.LiveWhepAddress)' is the address of the recording relay (RelayBase or RelayApiBase)."
+    }
 }
 
 
@@ -1517,6 +1601,273 @@ function Test-CamRelayConfigCurrent {
             $ConfigPath, ($parts -join '; ')
     }
     return $result
+}
+
+
+# ---------------------------------------------------------------------------
+# Live view: a dedicated WebRTC MediaMTX beside the recording relay
+# ---------------------------------------------------------------------------
+# MediaMTX's WebRTC signaling port answers any website's cross-origin request
+# when origins are the default, has no Host check, and a user allowed to read
+# RTSP may read WebRTC too. So WebRTC never goes on the shared relay (whose
+# read is anonymous). This second instance has one named user with a random
+# secret, no cross-origin permission and nothing else listening. Design and
+# the docs behind each key: tasks/portable-nvr/live-1a-design.md.
+
+$script:CamLiveUser = 'camlive'
+
+
+function Get-CamLiveEnabled {
+    <# False (the default) means no live instance exists: nothing starts, nothing is written. #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    if ($Config -is [System.Collections.IDictionary]) {
+        if (-not $Config.Contains('LiveViewEnabled')) { return $false }
+        return ($Config['LiveViewEnabled'] -is [bool] -and $Config['LiveViewEnabled'] -eq $true)
+    }
+
+    $property = $Config.PSObject.Properties['LiveViewEnabled']
+    if (-not $property) { return $false }
+    return ($property.Value -is [bool] -and $property.Value -eq $true)
+}
+
+
+function Get-CamLiveExePath {
+    <# LiveExePath, or the relay's executable when it is empty. #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Config.LiveExePath)) { return [string]$Config.LiveExePath }
+    return [string]$Config.RestreamerExePath
+}
+
+
+function Get-CamLivePathMap {
+    <#
+        Ordered live path name -> entry, from the relay's path map (so a live
+        name is checked against every relay name):
+
+          <relaypath>sub   the camera's LiveSubStream, pulled on demand. Its
+                           source URL carries the camera credential and is
+                           supplied at launch by Get-CamLiveSourceUrl, never
+                           written to the config.
+          <relaypath>main  the recording relay's own loopback path, which
+                           holds the one session the recorder already uses, so
+                           it adds none.
+
+        A camera whose recorder Quality already IS LiveSubStream gets only
+        <relaypath>main: the relay already pulls that stream for the
+        recorder, so a second pull from the camera would only spend its
+        second session on the same picture.
+
+        A collision throws, like Get-CamRelayPathMap, rather than serving one
+        camera under another's name.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$RelayPathMap
+    )
+
+    $map = New-Object System.Collections.Specialized.OrderedDictionary
+    foreach ($relayPath in $RelayPathMap.Keys) {
+        $camera = $RelayPathMap[$relayPath]
+        $quality = [string]$camera.Quality
+        if ([string]::IsNullOrWhiteSpace($quality)) { $quality = 'stream1' }
+
+        $entries = New-Object System.Collections.ArrayList
+        if ($quality -ne [string]$Config.LiveSubStream) {
+            [void]$entries.Add([pscustomobject]@{ Name = "${relayPath}sub"; Kind = 'sub'; RelayPath = $relayPath; Camera = $camera })
+        }
+        [void]$entries.Add([pscustomobject]@{ Name = "${relayPath}main"; Kind = 'main'; RelayPath = $relayPath; Camera = $camera })
+
+        foreach ($entry in $entries) {
+            if ($RelayPathMap.Contains($entry.Name)) {
+                throw "The live path '$($entry.Name)' for camera '$($camera.Name)' is also the recording relay's path for camera '$($RelayPathMap[$entry.Name].Name)'. Rename a camera in cameras.json."
+            }
+            if ($map.Contains($entry.Name)) {
+                throw "The live path '$($entry.Name)' for camera '$($camera.Name)' is also the live path of camera '$($map[$entry.Name].Camera.Name)'. Rename a camera in cameras.json."
+            }
+            $map[$entry.Name] = $entry
+        }
+    }
+    return $map
+}
+
+
+function Get-CamLiveSourceUrl {
+    <# The camera URL a <relaypath>sub path pulls (carries the credential: environment only). #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$Camera,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential
+    )
+
+    $sub = [pscustomobject]@{ IP = $Camera.IP; Quality = [string]$Config.LiveSubStream }
+    return (Get-CamRtspUrl -Camera $sub -Credential $Credential)
+}
+
+
+function Get-CamLiveConfigText {
+    <#
+        The live instance's whole config, rendered in code (the relay's
+        template and Get-CamRelayConfigText are not involved and not changed).
+
+        What is deliberately absent matters as much as what is there: no
+        anonymous user, so every read needs the login; no origin in
+        webrtcAllowOrigins, so no Access-Control-Allow-Origin is ever sent
+        and a browser POST from another origin is refused; every server but
+        WebRTC off; WebRTC bound to loopback with the media port advertised
+        as 127.0.0.1 only (webrtcIPsFromInterfaces off, so no interface name
+        has to be spelled). The secret appears only as its SHA-256.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$LivePathMap,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$LiveCredential
+    )
+
+    $udp = [string]$Config.LiveUdpAddress
+    $lines = New-Object System.Collections.ArrayList
+    foreach ($name in $LivePathMap.Keys) {
+        $entry = $LivePathMap[$name]
+        [void]$lines.Add("  ${name}:")
+        if ($entry.Kind -eq 'sub') {
+            $envName = Get-CamRelaySourceEnvName -PathName $name
+            [void]$lines.Add("    # $($entry.Camera.Name) $($Config.LiveSubStream) - source supplied at launch by $envName")
+            [void]$lines.Add('    source: publisher')
+        }
+        else {
+            [void]$lines.Add("    # $($entry.Camera.Name) through the recording relay - no credential, no extra camera session")
+            [void]$lines.Add("    source: $(Get-CamRelayUrl -Config $Config -PathName $entry.RelayPath)")
+        }
+    }
+
+    $text = @"
+# Generated by cam.recorder.ps1 for live view. Do not edit: the supervisor rewrites it at every start.
+logLevel: info
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 512
+
+authMethod: internal
+authInternalUsers:
+  - user: $($LiveCredential.UserName)
+    pass: $(Get-CamRelayApiPassHash -Credential $LiveCredential)
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: read
+
+api: no
+metrics: no
+pprof: no
+playback: no
+rtsp: no
+rtmp: no
+hls: no
+srt: no
+moq: no
+
+webrtc: yes
+webrtcAddress: $([string]$Config.LiveWhepAddress)
+webrtcEncryption: no
+webrtcAllowOrigins: []
+webrtcTrustedProxies: []
+webrtcLocalUDPAddress: $udp
+webrtcLocalTCPAddress: ""
+webrtcIPsFromInterfaces: no
+webrtcIPsFromInterfacesList: []
+webrtcAdditionalHosts: ["$(($udp -replace ':[0-9]+$', ''))"]
+webrtcICEServers2: []
+
+pathDefaults:
+  rtspTransport: tcp
+  sourceOnDemand: yes
+  sourceOnDemandStartTimeout: 10s
+  sourceOnDemandCloseAfter: $([int]$Config.LiveCloseAfterSeconds)s
+
+paths:
+$($lines -join "`n")
+"@
+
+    return ([regex]::Replace($text, "`r`n|`n", "`r`n"))
+}
+
+
+function Get-CamLiveSecretPath {
+    <#
+        Where the live login's secret lives: LiveSecretPath, or by default
+        %LOCALAPPDATA%\IPCCTV\live_view_secret.txt. Local and per user on
+        purpose - the repository normally sits on the WSL share, which holds
+        no NTFS access control at all (icacls answers "Incorrect function"),
+        so a file there could not be kept from other accounts.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$Config.LiveSecretPath)) { return [string]$Config.LiveSecretPath }
+    return (Join-Path -Path (Get-CamAutostartDir) -ChildPath 'live_view_secret.txt')
+}
+
+
+function Get-CamLiveCredential {
+    <#
+        The live login (user camlive, the secret as password), or $null when
+        there is no secret file yet and -Create was not given.
+
+        The secret is 32 random bytes as 64 hex characters in a plain ASCII
+        file with no newline, so camui (Go, standard library only) can read it
+        with os.ReadFile. It is created with an access control list that
+        names only the current Windows user and no inherited entry, set at the
+        moment the file is created (never a window in which it is readable by
+        others), then moved into place atomically. DPAPI like
+        relay_api_creds.xml would also keep other accounts out, but Go cannot
+        open an Export-Clixml blob without a CLIXML parser and CryptUnprotectData.
+
+        The secret is registered for redaction. Never put it on a command
+        line, in the generated config (only its sha256 goes there) or in any
+        log or status output.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [switch]$Create
+    )
+
+    $path = Get-CamLiveSecretPath -Config $Config
+
+    if (-not (Test-Path -LiteralPath $path)) {
+        if (-not $Create) { return $null }
+
+        $dir = Split-Path -Path $path -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+
+        $bytes = New-Object byte[] 32
+        $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try { $random.GetBytes($bytes) } finally { $random.Dispose() }
+        $hex = (($bytes | ForEach-Object { $_.ToString('x2') }) -join '')
+
+        $security = New-Object System.Security.AccessControl.FileSecurity
+        $security.SetAccessRuleProtection($true, $false)
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $security.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                    $me, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)))
+
+        $temp = "$path.tmp"
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+        $stream = New-Object System.IO.FileStream($temp, [System.IO.FileMode]::CreateNew, [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::None, $security)
+        try {
+            $data = [System.Text.Encoding]::ASCII.GetBytes($hex)
+            $stream.Write($data, 0, $data.Length)
+        }
+        finally { $stream.Dispose() }
+        Move-CamFileAtomic -TempPath $temp -Path $path
+    }
+
+    $secret = ([System.IO.File]::ReadAllText($path)).Trim()
+    if ($secret -notmatch '^[0-9a-f]{64}$') {
+        throw "The live-view secret file '$path' does not hold 64 hex characters. Delete it and the supervisor creates a new one at its next start."
+    }
+    Register-CamSecret -Value $secret
+    return (New-Object System.Management.Automation.PSCredential($script:CamLiveUser, (ConvertTo-SecureString $secret -AsPlainText -Force)))
 }
 
 

@@ -2314,6 +2314,216 @@ function Invoke-CamRelayTick {
 
 
 # ===========================================================================
+# Live view: the dedicated WebRTC MediaMTX (only when LiveViewEnabled)
+# ===========================================================================
+# Supervised exactly like the restreamer - same job, same backoff, stopped with
+# the supervisor - but recording never depends on it: a failed start logs one
+# redacted line and the recorders carry on. It starts only while the recording
+# relay is running, because its <path>main paths pull from the relay.
+
+function New-CamLiveEntry {
+    <# The live instance's supervisor entry. #>
+    param([Parameter(Mandatory = $true)]$Paths)
+
+    $entry = New-CamProcessEntry -Name 'liveview' -LogPath (Join-Path -Path $Paths.LogDir -ChildPath 'liveview.log')
+    # Live path name -> entry, as of the last start.
+    $entry.PathMap = $null
+    # The last "cannot start" reason already written to the supervisor log, so
+    # a persistent reason is one line, not one per retry.
+    $entry.ReasonLogged = ''
+    return $entry
+}
+
+
+function Write-CamLiveConfig {
+    <#
+        Renders the live config and writes it when it differs from the file
+        (temp then rename). Returns $true when it wrote. The supervisor does this
+        at every start, so the file always matches cameras.json and the secret
+        and needs no install step.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)]$LivePathMap,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$LiveCredential
+    )
+
+    $configPath = [string]$Config.LiveConfigPath
+    $text = Get-CamLiveConfigText -Config $Config -LivePathMap $LivePathMap -LiveCredential $LiveCredential
+    if ((Test-Path -LiteralPath $configPath) -and ([System.IO.File]::ReadAllText($configPath) -ceq $text)) { return $false }
+
+    $dir = Split-Path -Path $configPath -Parent
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir -Force) }
+    $temp = "$configPath.tmp"
+    if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
+    [System.IO.File]::WriteAllText($temp, $text, (New-Object System.Text.UTF8Encoding($false)))
+    Move-CamFileAtomic -TempPath $temp -Path $configPath
+    return $true
+}
+
+
+function Start-CamLiveChild {
+    <#
+        Launches the live MediaMTX. Its sub paths' camera URLs (credential
+        included) go in the child's environment block only, like the relay's;
+        the login's secret is in neither the environment nor the command line:
+        the config holds its sha256 and the secret file holds the secret.
+        stdout is the log, through the redactor.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential,
+        [Parameter(Mandatory = $true)][string]$SupervisorLog
+    )
+
+    $exePath = Get-CamLiveExePath -Config $Config
+    $configPath = [string]$Config.LiveConfigPath
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        throw "MediaMTX is not installed at '$exePath'. Install the binary there, or set LiveViewEnabled to false."
+    }
+
+    $relayMap = Get-CamRelayPathMap -Cameras (Get-CamList)
+    $liveMap = Get-CamLivePathMap -Config $Config -RelayPathMap $relayMap
+    $Entry.PathMap = $liveMap
+    $liveCredential = Get-CamLiveCredential -Config $Config -Create
+    if (Write-CamLiveConfig -Config $Config -LivePathMap $liveMap -LiveCredential $liveCredential) {
+        Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message ("wrote {0} for live view ({1} path(s))" -f $configPath, $liveMap.Count)
+    }
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $exePath
+    $startInfo.Arguments = Get-CamCommandLine -Arguments @($configPath)
+    $startInfo.WorkingDirectory = (Split-Path -Path $configPath -Parent)
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($pathName in $liveMap.Keys) {
+        if ($liveMap[$pathName].Kind -ne 'sub') { continue }
+        $startInfo.EnvironmentVariables[(Get-CamRelaySourceEnvName -PathName $pathName)] = (Get-CamLiveSourceUrl -Config $Config -Camera $liveMap[$pathName].Camera -Credential $Credential)
+    }
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    [void]$process.Handle
+
+    $Entry.Process = $process
+    $Entry.LastPid = $process.Id
+    $Entry.StartedAt = Get-CamWallClock
+    $Entry.TextBuffer = ''
+    $Entry.Decoder = [System.Text.Encoding]::UTF8.GetDecoder()
+    $Entry.ReadBuffer = New-Object byte[] 8192
+    $Entry.ReadStream = $process.StandardOutput.BaseStream
+    $Entry.ReadTask = $Entry.ReadStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
+    $Entry.ReasonLogged = ''
+
+    Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message ("start live view pid {0}: {1} serving {2} path(s): {3}" -f `
+            $process.Id, $exePath, $liveMap.Count, (($liveMap.Keys | Sort-Object) -join ', '))
+}
+
+
+function Stop-CamLiveChild {
+    <# Hard-kills the live instance; it holds no file. Called before the relay's own stop, since its main paths read the relay. #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][string]$SupervisorLog,
+        [Parameter(Mandatory = $true)][string]$Reason
+    )
+
+    $process = $Entry.Process
+    if (-not $process) { return }
+
+    if (-not $process.HasExited) {
+        Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message ("kill live view pid {0}: {1}" -f $process.Id, $Reason)
+        try { $process.Kill() } catch { }
+        [void]$process.WaitForExit(10000)
+    }
+
+    Read-CamChildOutput -Entry $Entry -Config $Config -Final
+    Write-CamRelayStderr -Entry $Entry -Config $Config
+    try { $process.Dispose() } catch { }
+
+    $Entry.Process = $null
+    $Entry.ReadTask = $null
+    $Entry.ReadStream = $null
+}
+
+
+function Invoke-CamLiveTick {
+    <#
+        One supervisor cycle for the live instance: drain its log, notice an
+        exit and restart it on the restreamer's backoff, start it once the
+        recording relay is running. Every failure is contained here: it is
+        logged once, remembered for status.json, and never reaches the
+        recorders.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]$Entry,
+        [Parameter(Mandatory = $true)]$Config,
+        [Parameter(Mandatory = $true)][System.Management.Automation.PSCredential]$Credential,
+        $Relay,
+        [Parameter(Mandatory = $true)][string]$SupervisorLog,
+        [Parameter(Mandatory = $true)][DateTime]$Now
+    )
+
+    $maxBytes = [int]$Config.LogMaxBytes
+
+    if ($Entry.Process) {
+        Read-CamChildOutput -Entry $Entry -Config $Config
+        if (-not $Entry.Process.HasExited) { return }
+
+        $exitCode = $Entry.Process.ExitCode
+        $ranFor = ($Now - $Entry.StartedAt).TotalSeconds
+        Read-CamChildOutput -Entry $Entry -Config $Config -Final
+        Write-CamRelayStderr -Entry $Entry -Config $Config
+        try { $Entry.Process.Dispose() } catch { }
+        $Entry.Process = $null
+        $Entry.ReadTask = $null
+        $Entry.ReadStream = $null
+
+        $Entry.RestartCount = $Entry.RestartCount + 1
+        [void]$Entry.Restarts.Add($Now)
+        $Entry.LastError = "mediamtx exited with code $exitCode after $([int]$ranFor)s"
+        $Entry.LastErrorAt = $Now
+
+        $wait = Set-CamChildBackoff -Entry $Entry -Config $Config -RanForSeconds $ranFor
+        Write-CamLog -Path $SupervisorLog -MaxBytes $maxBytes -Message ("live view exit {0} after {1}s; restart #{2} in {3}s" -f $exitCode, [int]$ranFor, $Entry.RestartCount, $wait)
+        return
+    }
+
+    if ($Now -lt $Entry.NextStartAt) { return }
+
+    $reason = ''
+    if (-not (Get-CamRelayEnabled -Config $Config)) { $reason = 'live view needs the recording relay: RestreamerEnabled is false, so it is not started' }
+    elseif (-not $Relay -or -not $Relay.Process -or $Relay.Process.HasExited) { $reason = 'waiting for the recording relay before starting live view' }
+    if ($reason) {
+        if ($Entry.ReasonLogged -ne $reason) {
+            $Entry.ReasonLogged = $reason
+            Write-CamLog -Path $SupervisorLog -MaxBytes $maxBytes -Message $reason
+        }
+        return
+    }
+
+    try {
+        Start-CamLiveChild -Entry $Entry -Config $Config -Credential $Credential -SupervisorLog $SupervisorLog
+    }
+    catch {
+        $message = Get-CamRedacted -Text $_.Exception.Message
+        $Entry.LastError = "failed to start: $message"
+        $Entry.LastErrorAt = $Now
+        $wait = Set-CamChildBackoff -Entry $Entry -Config $Config -RanForSeconds 0
+        if ($Entry.ReasonLogged -ne $message) {
+            $Entry.ReasonLogged = $message
+            Write-CamLog -Path $SupervisorLog -MaxBytes $maxBytes -Message ("failed to start live view: {0}; retrying with backoff (recording is not affected)" -f $message)
+        }
+    }
+}
+
+
+# ===========================================================================
 # Archive scan, status file, pruner
 # ===========================================================================
 
@@ -2527,6 +2737,8 @@ function Write-CamStatusFile {
         $Archive,
         $PruneState,
         $Relay,
+        # The live-view entry, or $null when LiveViewEnabled is false, in which case status.json has no Live section at all.
+        $Live,
         # The supervisor log. Its tail is published as the Events list so the
         # health strip can show recent restarts, watchdog kills, prune
         # deletions and failures without opening a second file. Every line in
@@ -2687,6 +2899,25 @@ function Write-CamStatusFile {
         }
     }
 
+    # Present ONLY while live view is enabled, so with it off status.json is
+    # exactly what it was. Path names only: no address, no credential.
+    $liveSection = $null
+    if ($Live) {
+        $liveAlive = $false
+        if ($Live.Process) { $liveAlive = (-not $Live.Process.HasExited) }
+        $liveSection = [pscustomobject]@{
+            Enabled       = $true
+            Pid           = $(if ($liveAlive) { $Live.Process.Id } else { $null })
+            LastPid       = $Live.LastPid
+            Alive         = $liveAlive
+            StartedAt     = Format-CamTimestamp -Value $Live.StartedAt
+            RestartsTotal = $Live.RestartCount
+            Paths         = @($(if ($Live.PathMap) { @($Live.PathMap.Keys) } else { @() }))
+            LastError     = Get-CamRedacted -Text ([string]$Live.LastError)
+            LastErrorAt   = Format-CamTimestamp -Value $Live.LastErrorAt
+        }
+    }
+
     # Newest first: the strip has room for a handful of lines and the newest
     # are the ones worth the space.
     $events = @()
@@ -2739,6 +2970,7 @@ function Write-CamStatusFile {
         Events        = $events
         Cameras       = $rows
     }
+    if ($liveSection) { Add-Member -InputObject $document -NotePropertyName 'Live' -NotePropertyValue $liveSection }
 
     $json = ConvertTo-Json -InputObject $document -Depth 6
     $json = Get-CamRedacted -Text $json
@@ -3313,6 +3545,19 @@ function Invoke-CamStopSupervisor {
         }
     }
 
+    # And for live view's own mediamtx, when status.json says there was one.
+    if ($final -and $final.PSObject.Properties['Live'] -and $final.Live.LastPid) {
+        $livePid = [int]$final.Live.LastPid
+        $liveProcess = Get-Process -Id $livePid -ErrorAction SilentlyContinue
+        if ($liveProcess -and $liveProcess.Name -eq 'mediamtx') {
+            Write-CamHost -Message ("ORPHAN live-view mediamtx pid {0} survived the shutdown; killing it" -f $livePid) -Colour 'Red'
+            try { $liveProcess.Kill() } catch { }
+        }
+        else {
+            Write-CamHost -Message 'no live-view mediamtx left behind' -Colour 'Green'
+        }
+    }
+
     if (Test-Path -LiteralPath $flag) { Remove-Item -LiteralPath $flag -Force -ErrorAction SilentlyContinue }
 }
 
@@ -3512,6 +3757,10 @@ function Invoke-CamSupervisor {
     # consumer falls back to a direct camera connection while it is down.
     $relay = $null
     if (Get-CamRelayEnabled -Config $Config) { $relay = New-CamRelayEntry -Paths $paths }
+    # Live view: a second MediaMTX for WebRTC, only when asked for. Recording
+    # never depends on it.
+    $live = $null
+    if (Get-CamLiveEnabled -Config $Config) { $live = New-CamLiveEntry -Paths $paths }
 
     $listStamp = [DateTime]::MinValue
     $lastReconcile = [DateTime]::MinValue
@@ -3579,6 +3828,11 @@ function Invoke-CamSupervisor {
                     -SupervisorLog $supervisorLog -Now $now
                 # A relay start waits for its paths, so the clock has moved.
                 $now = Get-CamWallClock
+            }
+
+            if ($live) {
+                Invoke-CamLiveTick -Entry $live -Config $Config -Credential $credential -Relay $relay `
+                    -SupervisorLog $supervisorLog -Now $now
             }
 
             $statusDue = Test-CamIntervalDue -Last $lastStatus -Seconds ([double]$Config.StatusIntervalSeconds) -Now $now
@@ -3799,7 +4053,7 @@ function Invoke-CamSupervisor {
 
                 try {
                     Write-CamStatusFile -Config $Config -Path $statusPath -Cameras $cameras -Children $children `
-                        -StartedAt $startedAt -State 'running' -Archive $archive -PruneState $pruneState -Relay $relay `
+                        -StartedAt $startedAt -State 'running' -Archive $archive -PruneState $pruneState -Relay $relay -Live $live `
                         -SupervisorLogPath $supervisorLog -LastUnexpectedStop $lastUnexpectedStop
                 }
                 catch {
@@ -3854,6 +4108,12 @@ function Invoke-CamSupervisor {
             catch { Write-CamLog -Path $supervisorLog -Message ("failed to stop {0}: {1}" -f $entry.Name, $_.Exception.Message) -MaxBytes $maxBytes }
         }
 
+        # Live view first of the two: its main paths read the relay.
+        if ($live) {
+            try { Stop-CamLiveChild -Entry $live -Config $Config -SupervisorLog $supervisorLog -Reason $reason }
+            catch { Write-CamLog -Path $supervisorLog -Message ("failed to stop live view: {0}" -f $_.Exception.Message) -MaxBytes $maxBytes }
+        }
+
         # After the recorders, never before: a relay torn down first would make
         # every child lose its input and log a failure on the way out. A
         # surviving mediamtx would hold a session on all six cameras.
@@ -3867,7 +4127,7 @@ function Invoke-CamSupervisor {
         try {
             Write-CamStatusFile -Config $Config -Path $statusPath -Cameras $cameras -Children $children `
                 -StartedAt $startedAt -State 'stopped' -StopKind $stopKind -Archive $archive -PruneState $pruneState `
-                -Relay $relay -SupervisorLogPath $supervisorLog -LastUnexpectedStop $lastUnexpectedStop
+                -Relay $relay -Live $live -SupervisorLogPath $supervisorLog -LastUnexpectedStop $lastUnexpectedStop
         }
         catch { }
 

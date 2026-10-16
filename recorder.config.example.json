@@ -15,6 +15,14 @@
   "RelayBase": "rtsp://127.0.0.1:8554",
   "RelayApiBase": "http://127.0.0.1:9997",
   "RelayProbeTimeoutMs": 1500,
+  "LiveViewEnabled": false,
+  "LiveExePath": "",
+  "LiveConfigPath": "C:\\mediamtx\\mediamtx-live.yml",
+  "LiveWhepAddress": "127.0.0.1:8889",
+  "LiveUdpAddress": "127.0.0.1:8189",
+  "LiveSubStream": "stream2",
+  "LiveCloseAfterSeconds": 10,
+  "LiveSecretPath": "",
   "Container": "mkv",
   "ContainerProfiles": {
     "mkv": {

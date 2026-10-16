@@ -921,17 +921,24 @@ function Start-CamTestSyntheticCamera {
         # publishers need none. Fake credentials only.
         [string]$ReadUser,
         [string]$ReadPass,
-        [int]$TimeoutSeconds = 20
+        [int]$TimeoutSeconds = 20,
+        # A control API on this loopback port, no login (sandbox only), so a
+        # check can count the sessions on the camera's own paths. 0 = none.
+        [int]$ApiPort = 0,
+        # Per path: 'WxH:profile', for example '1280x720:high' - an encode with that size and H.264
+        # profile, no B-frames, instead of the default 640x360 baseline-ish stream.
+        [hashtable]$VideoSpec = @{}
     )
 
     if (-not (Test-CamTestPortFree -Port $Port)) { throw "TCP port $Port is already in use; the synthetic camera needs it free." }
+    if ($ApiPort -and -not (Test-CamTestPortFree -Port $ApiPort)) { throw "TCP port $ApiPort is already in use; the synthetic camera's API needs it free." }
 
     $work = Join-Path -Path $Dir -ChildPath 'synthcam'
     [void](New-Item -ItemType Directory -Path $work -Force)
     $config = Join-Path -Path $work -ChildPath 'mediamtx.yml'
     $log = Join-Path -Path $work -ChildPath 'mediamtx.out'
     $yml = @(
-        'logLevel: info', 'logDestinations: [stdout]', 'api: no', 'metrics: no', 'pprof: no', 'playback: no',
+        'logLevel: info', 'logDestinations: [stdout]', $(if ($ApiPort) { "api: yes`napiAddress: 127.0.0.1:$ApiPort" } else { 'api: no' }), 'metrics: no', 'pprof: no', 'playback: no',
         'rtsp: yes', 'rtspTransports: [tcp]', "rtspAddress: 127.0.0.1:$Port",
         'rtmp: no', 'hls: no', 'webrtc: no', 'srt: no', 'moq: no'
     )
@@ -960,11 +967,16 @@ function Start-CamTestSyntheticCamera {
 
         $ffmpeg = (Get-CamConfigDefault).FfmpegPath
         foreach ($name in $PathName) {
+            $size = '640x360'; $encode = @('-preset', 'ultrafast', '-tune', 'zerolatency')
+            if ($VideoSpec.ContainsKey($name)) {
+                $size, $codecProfile = ([string]$VideoSpec[$name]) -split ':'
+                $encode = @('-preset', 'veryfast', '-tune', 'zerolatency', '-profile:v', $codecProfile, '-bf', '0')
+            }
             $publish = @('-hide_banner', '-loglevel', 'error', '-nostdin',
-                '-re', '-f', 'lavfi', '-i', "testsrc2=size=640x360:rate=$FrameRate",
+                '-re', '-f', 'lavfi', '-i', "testsrc2=size=${size}:rate=$FrameRate",
                 '-re', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=8000',
                 '-map', '0:v', '-map', '1:a',
-                '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency', '-pix_fmt', 'yuv420p',
+                '-c:v', 'libx264') + $encode + @('-pix_fmt', 'yuv420p',
                 '-g', "$FrameRate", '-keyint_min', "$FrameRate", '-sc_threshold', '0',
                 '-c:a', 'pcm_alaw', '-ar', '8000', '-ac', '1')
             if ($NonMonotonic) { $publish += '-bsf:v', ('setts=ts=if(eq(mod(N\,{0})\,{1})\,PREV_OUTPTS\,PTS)' -f $NonMonotonicEvery, ($NonMonotonicEvery - 1)) }
@@ -2208,4 +2220,386 @@ function Find-CamDocLinkProblems {
     }
 
     return [pscustomobject]@{ Links = $links; Anchors = $anchors; Problems = @($problems) }
+}
+
+
+# ---------------------------------------------------------------------------
+# Live view (Stage 1A)
+# ---------------------------------------------------------------------------
+
+function Copy-CamTestMasterFile {
+    <#
+        Writes a file as it is on the repository's master branch, byte for
+        byte, to $Destination, using git inside WSL (git is not installed on
+        Windows here). Returns $true when the file exists afterwards and is not
+        empty. cmd.exe does the redirection so no console encoding touches the
+        bytes.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Destination
+    )
+
+    $repo = Get-CamTestRepo
+    $linux = (& wsl.exe -e wslpath -a -u $repo) | Select-Object -First 1
+    if (-not $linux) { return $false }
+    if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Force }
+    # cmd.exe prints 'UNC paths are not supported' to stderr when the current directory is a \\wsl.localhost path, and under
+    # ErrorActionPreference Stop that first stderr line aborts the check with the path as its message. Run it from a local folder.
+    Push-Location -LiteralPath $env:TEMP
+    try { & cmd.exe /c ('wsl.exe -e git -C "{0}" show "master:{1}" > "{2}"' -f $linux, $Name, $Destination) 2>$null | Out-Null }
+    finally { Pop-Location }
+    return ((Test-Path -LiteralPath $Destination) -and ((Get-Item -LiteralPath $Destination).Length -gt 0))
+}
+
+
+function Test-CamTestUdpPortFree {
+    <# True when nothing on this machine has UDP $Port bound. #>
+    param([Parameter(Mandatory = $true)][int]$Port)
+
+    $listeners = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveUdpListeners()
+    return (@($listeners | Where-Object { $_.Port -eq $Port }).Count -eq 0)
+}
+
+
+function Get-CamTestBrowser {
+    <#
+        Chrome or Edge as installed, or $null with the reason. A browser with a
+        staged update (new_chrome.exe / new_msedge.exe beside it) is refused:
+        launching it would apply the update to the Operator's real install.
+        Firefox is never used.
+    #>
+    param([Parameter(Mandatory = $true)][ValidateSet('chrome', 'edge')][string]$Browser)
+
+    $candidates = $(if ($Browser -eq 'chrome') { @('C:\Program Files\Google\Chrome\Application\chrome.exe', 'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe') }
+        else { @('C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe', 'C:\Program Files\Microsoft\Edge\Application\msedge.exe') })
+    $exe = $candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $exe) { return [pscustomobject]@{ Exe = $null; Version = ''; Reason = "$Browser is not installed" } }
+    $staged = Join-Path -Path (Split-Path -Path $exe -Parent) -ChildPath $(if ($Browser -eq 'chrome') { 'new_chrome.exe' } else { 'new_msedge.exe' })
+    if (Test-Path -LiteralPath $staged) { return [pscustomobject]@{ Exe = $null; Version = ''; Reason = "$Browser has a staged update ($staged); not launched" } }
+    return [pscustomobject]@{ Exe = $exe; Version = (Get-Item -LiteralPath $exe).VersionInfo.ProductVersion; Reason = '' }
+}
+
+
+function Start-CamTestBrowser {
+    <#
+        Starts Chrome or Edge on $Url, headed, in a small window, with a
+        throwaway profile folder whose path is unique and sits on the command
+        line: that path is the marker Stop-CamTestBrowser finds the processes
+        by. ShellExecute, so no handle is inherited by this shell. Never
+        touches a browser this run did not start.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('chrome', 'edge')][string]$Browser,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$BaseDir,
+        # Fake capture device and no prompt, which makes Chromium expose decoderImplementation in getStats.
+        [switch]$Capture
+    )
+
+    $found = Get-CamTestBrowser -Browser $Browser
+    if (-not $found.Exe) { throw $found.Reason }
+    Add-Type -ErrorAction SilentlyContinue -Name Pw -Namespace CamTest -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, System.UIntPtr x);
+'@
+    # A sleeping display makes the page hidden and stops rendering; hold it awake for this process only.
+    [void][CamTest.Pw]::SetThreadExecutionState([uint32]2147483651)
+    [CamTest.Pw]::mouse_event(1, 0, 0, 0, [System.UIntPtr]::Zero)
+
+    $profile = Join-Path -Path $BaseDir -ChildPath ('prof-{0}-{1}' -f $Browser, [guid]::NewGuid().ToString('n').Substring(0, 8))
+    [void](New-Item -ItemType Directory -Path $profile -Force)
+    $arguments = '--user-data-dir="{0}" --new-window --no-first-run --no-default-browser-check --window-position=40,40 --window-size=720,520 --autoplay-policy=no-user-gesture-required --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows{2} "{1}"' -f $profile, $Url, $(if ($Capture) { ' --use-fake-ui-for-media-stream --use-fake-device-for-media-stream' } else { '' })
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $found.Exe
+    $info.Arguments = $arguments
+    $info.UseShellExecute = $true
+    $process = [System.Diagnostics.Process]::Start($info)
+    return [pscustomobject]@{ Browser = $Browser; Version = $found.Version; Pid = $process.Id; Profile = $profile; StartedAt = [DateTime]::UtcNow }
+}
+
+
+function Get-CamTestBrowserPids {
+    <# Every process carrying the profile marker on its command line, plus all their descendants. #>
+    param([Parameter(Mandatory = $true)]$Started)
+
+    $all = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, CommandLine)
+    $set = New-Object System.Collections.Generic.HashSet[int]
+    # The root pid only while it is still the process this run started (a recycled pid is somebody else's).
+    $root = Get-Process -Id $Started.Pid -ErrorAction SilentlyContinue
+    if ($root -and $root.StartTime.ToUniversalTime() -ge $Started.StartedAt.AddSeconds(-5)) { [void]$set.Add([int]$Started.Pid) }
+    foreach ($p in $all) { if ($p.CommandLine -and $p.CommandLine.Contains($Started.Profile)) { [void]$set.Add([int]$p.ProcessId) } }
+    do {
+        $n = $set.Count
+        foreach ($p in $all) { if ($set.Contains([int]$p.ParentProcessId)) { [void]$set.Add([int]$p.ProcessId) } }
+    } while ($set.Count -ne $n)
+    return @($set | Sort-Object)
+}
+
+
+function Stop-CamTestBrowser {
+    <# Kills exactly the processes Get-CamTestBrowserPids finds and removes the throwaway profile. Returns what was left, if anything. #>
+    param([Parameter(Mandatory = $true)]$Started)
+
+    # Chromium respawns helpers while its root is dying, so kill again until a listing finds nothing (a few rounds at most).
+    $left = @()
+    for ($round = 0; $round -lt 6; $round++) {
+        foreach ($id in @(Get-CamTestBrowserPids -Started $Started)) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+        Start-Sleep -Milliseconds 1000
+        $left = @(Get-CamTestBrowserPids -Started $Started | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
+        if (-not $left.Count) { break }
+    }
+    for ($i = 0; $i -lt 8 -and (Test-Path -LiteralPath $Started.Profile); $i++) {
+        Remove-Item -LiteralPath $Started.Profile -Recurse -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $Started.Profile) { Start-Sleep -Seconds 1 }
+    }
+    return [pscustomobject]@{ Left = $left; ProfileRemoved = -not (Test-Path -LiteralPath $Started.Profile) }
+}
+
+
+function Start-CamTestLiveServer {
+    <#
+        Starts tests\live\server.ps1 (the stand-in for camui) in its own hidden
+        PowerShell and waits for /health. The login's secret travels as a FILE
+        PATH, never as text. Returns the process.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Prefix,
+        [Parameter(Mandatory = $true)][string]$PageFile,
+        [Parameter(Mandatory = $true)][string]$DataDir,
+        [string]$WhepBase = '',
+        [string]$SecretFile = '',
+        [string]$Login = 'right'
+    )
+
+    $script = Join-Path -Path (Join-Path -Path (Get-CamTestRepo) -ChildPath 'tests\live') -ChildPath 'server.ps1'
+    $argumentList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script, '-Prefix', $Prefix, '-PageFile', $PageFile, '-DataDir', $DataDir, '-Login', $Login)
+    if ($WhepBase) { $argumentList += @('-WhepBase', $WhepBase) }
+    if ($SecretFile) { $argumentList += @('-SecretFile', $SecretFile) }
+    $errFile = Join-Path -Path $DataDir -ChildPath ('server-{0}.err' -f ([uri]$Prefix).Port)
+    $process = Start-Process -FilePath 'powershell.exe' -ArgumentList (Get-CamCommandLine -Arguments $argumentList) -PassThru -WindowStyle Hidden `
+        -RedirectStandardError $errFile -RedirectStandardOutput "$errFile.out"
+    [void]$process.Handle
+    $deadline = [DateTime]::Now.AddSeconds(30)
+    while ([DateTime]::Now -lt $deadline) {
+        if ($process.HasExited) { throw ("the live test server exited: " + [System.IO.File]::ReadAllText($errFile)) }
+        try {
+            $r = [System.Net.HttpWebRequest]::Create($Prefix + 'health'); $r.Proxy = $null; $r.Timeout = 1500
+            $x = $r.GetResponse(); $x.Dispose(); return $process
+        } catch { Start-Sleep -Milliseconds 400 }
+    }
+    try { $process.Kill() } catch { }
+    throw 'the live test server did not answer /health within 30 s'
+}
+
+
+function Read-CamTestLiveStats {
+    <# The page's posted events (one JSON object per line) as objects; unreadable lines skipped. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $events = New-Object System.Collections.ArrayList
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $reader = New-Object System.IO.StreamReader($stream)
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ($line.Trim().Length -eq 0) { continue }
+            try { [void]$events.Add((ConvertFrom-Json -InputObject $line)) } catch { }
+        }
+    } finally { $stream.Dispose() }
+    return @($events)
+}
+
+
+function Start-CamTestLiveRig {
+    <#
+        The whole live-view rig in a sandbox, run by the REAL supervisor: a
+        synthetic camera (paths -CameraPath, with a control API so sessions
+        can be counted), the recording relay and the live instance as the
+        supervisor's own children, the recorder reading the camera through
+        the relay. Fake credentials, non-default ports: camera 18554 (API
+        18557), relay RTSP 18564 and API 18567, live WHEP 18889 and ICE/UDP
+        18189. Returns the rig, or throws after tearing down what it started.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][object[]]$Cameras,
+        [Parameter(Mandatory = $true)][string[]]$CameraPath,
+        [hashtable]$Config = @{},
+        [hashtable]$VideoSpec = @{},
+        [int]$LiveCloseAfterSeconds = 4
+    )
+
+    $rig = [pscustomobject]@{
+        Name = $Name; Dir = (Join-Path -Path $env:TEMP -ChildPath "cam-tests\$Name"); CamPort = 18554; CamApi = 18557; RelayPort = 18564; RelayApi = 18567
+        WhepPort = 18889; UdpPort = 18189; Sandbox = $null; Camera = $null; Supervisor = $null; DataDir = $null; Alerts = $null
+    }
+    foreach ($p in @($rig.CamPort, $rig.CamApi, $rig.RelayPort, $rig.RelayApi, $rig.WhepPort)) {
+        if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the live rig needs it free." }
+    }
+    if (-not (Test-CamTestUdpPortFree -Port $rig.UdpPort)) { throw "UDP port $($rig.UdpPort) is already in use; the live rig needs it free." }
+
+    try {
+        $settings = @{
+            RestreamerEnabled = $true; RestreamerExePath = (Join-Path $rig.Dir 'bin\mediamtx.exe'); RestreamerConfigPath = (Join-Path $rig.Dir 'mtx\mediamtx.yml')
+            RelayBase = "rtsp://127.0.0.1:$($rig.RelayPort)"; RelayApiBase = "http://127.0.0.1:$($rig.RelayApi)"
+            RelayProbeTimeoutMs = 800; RelayStartupWaitSeconds = 15; RelayReadyWaitSeconds = 8; StatusIntervalSeconds = 3
+            LiveViewEnabled = $true; LiveWhepAddress = "127.0.0.1:$($rig.WhepPort)"; LiveUdpAddress = "127.0.0.1:$($rig.UdpPort)"
+            LiveConfigPath = (Join-Path $rig.Dir 'live\mediamtx-live.yml'); LiveSecretPath = (Join-Path $rig.Dir 'live\live_view_secret.txt')
+            LiveCloseAfterSeconds = $LiveCloseAfterSeconds }
+        foreach ($key in $Config.Keys) { $settings[$key] = $Config[$key] }
+        $rig.Sandbox = New-CamTestSandbox -Name $Name -Cameras $Cameras -Config $settings
+        $rig.Alerts = Set-CamTestAlertStub -Sandbox $rig.Sandbox
+        $rig.DataDir = Join-Path -Path $rig.Dir -ChildPath 'data'
+        [void](New-Item -ItemType Directory -Path (Join-Path $rig.Dir 'bin'), $rig.DataDir -Force)
+        Copy-Item -LiteralPath 'C:\mediamtx\mediamtx.exe' -Destination (Join-Path $rig.Dir 'bin\mediamtx.exe')
+
+        $rig.Camera = Start-CamTestSyntheticCamera -Dir $rig.Dir -Port $rig.CamPort -PathName $CameraPath -ApiPort $rig.CamApi -VideoSpec $VideoSpec
+        $install = Invoke-CamTestScript -Path $rig.Sandbox.Recorder -Arguments @('-InstallRestreamer')
+        if ($install.ExitCode -ne 0) { throw ('-InstallRestreamer failed: ' + ($install.Lines -join ' | ')) }
+        $rig.Supervisor = Start-CamTestSupervisor -Sandbox $rig.Sandbox
+
+        $deadline = [DateTime]::Now.AddSeconds(60)
+        $ready = $false
+        while ([DateTime]::Now -lt $deadline) {
+            $status = Get-CamTestStatusJson -Sandbox $rig.Sandbox
+            if ($status -and $status.Snapshot.Live -and $status.Snapshot.Live.Alive -and $status.Snapshot.Restreamer.Alive -and -not (Test-CamTestPortFree -Port $rig.WhepPort)) { $ready = $true; break }
+            if ($rig.Supervisor.HasExited) { throw 'the sandbox supervisor exited' }
+            Start-Sleep -Milliseconds 700
+        }
+        if (-not $ready) { throw 'the live instance did not come up under the supervisor within 60 s; see ' + $rig.Dir }
+        return $rig
+    }
+    catch {
+        $message = $_.Exception.Message
+        [void](Stop-CamTestLiveRig -Rig $rig)
+        throw $message
+    }
+}
+
+
+function Stop-CamTestLiveRig {
+    <# Stops the rig through the product's own -Stop, then the synthetic camera. Returns lines describing anything that had to be forced or was left. #>
+    param([Parameter(Mandatory = $true)]$Rig)
+
+    $notes = @()
+    if ($Rig.Sandbox -and $Rig.Supervisor) {
+        $stop = Stop-CamTestSupervisor -Sandbox $Rig.Sandbox -Process $Rig.Supervisor
+        $notes += ("-Stop through the product: exit {0}, forced: {1}" -f $stop.ExitCode, $(if ($stop.Killed.Count) { $stop.Killed -join '; ' } else { 'nothing' }))
+    }
+    if ($Rig.Camera) { [void](Stop-CamTestSyntheticCamera -Camera $Rig.Camera) }
+    $left = @(Get-CimInstance Win32_Process -Filter "Name = 'mediamtx.exe' or Name = 'ffmpeg.exe' or Name = 'powershell.exe'" |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($Rig.Dir) } | ForEach-Object { '{0} pid {1}' -f $_.Name, $_.ProcessId })
+    $notes += ("processes still tied to {0}: {1}" -f $Rig.Dir, $(if ($left.Count) { $left -join ', ' } else { 'none' }))
+    foreach ($entry in $left) { if ($entry -match 'pid (\d+)') { Stop-Process -Id ([int]$Matches[1]) -Force -ErrorAction SilentlyContinue } }
+    return $notes
+}
+
+
+function Start-CamTestMediaMtx {
+    <#
+        A plain MediaMTX on a given config for a sandbox experiment (no
+        camera credentials, no environment sources): local working directory,
+        stdout to a file kept open on the returned process as LogStream.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$ConfigPath,
+        [Parameter(Mandatory = $true)][string]$WorkDir,
+        [Parameter(Mandatory = $true)][string]$LogPath
+    )
+
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = 'C:\mediamtx\mediamtx.exe'
+    $info.Arguments = Get-CamCommandLine -Arguments @($ConfigPath)
+    $info.WorkingDirectory = $WorkDir
+    $info.UseShellExecute = $false; $info.CreateNoWindow = $true; $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $info
+    [void]$process.Start()
+    [void]$process.Handle
+    $file = [System.IO.File]::Open($LogPath, 'Create', 'Write', 'ReadWrite')
+    $null = $process.StandardOutput.BaseStream.CopyToAsync($file)
+    $null = $process.StandardError.BaseStream.CopyToAsync([System.IO.Stream]::Null)
+    Add-Member -InputObject $process -NotePropertyName LogStream -NotePropertyValue $file
+    return $process
+}
+
+
+function Stop-CamTestMediaMtx {
+    <# Kills a process from Start-CamTestMediaMtx (by object, never by name) and closes its log. #>
+    param($Process)
+
+    if (-not $Process) { return }
+    if (-not $Process.HasExited) { try { $Process.Kill(); [void]$Process.WaitForExit(5000) } catch { } }
+    if ($Process.LogStream) { try { $Process.LogStream.Dispose() } catch { } }
+}
+
+
+function Start-CamTestCommandLineSampler {
+    <#
+        Records every DISTINCT process command line this machine shows, from now
+        until Stop-CamTestCommandLineSampler, in a background runspace. What it
+        saw is searched afterwards, so the needles need not be known yet (the
+        product creates its secret during the run). A process that lives
+        between two looks is missed - the positive control proves what it does
+        catch.
+    #>
+    $state = [hashtable]::Synchronized(@{ Stop = $false; Looks = 0; Seen = [hashtable]::Synchronized(@{}) })
+    $shell = [powershell]::Create()
+    [void]$shell.AddScript({
+        param($state)
+        while (-not $state.Stop) {
+            try {
+                foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, Name, CommandLine)) {
+                    $line = [string]$p.CommandLine
+                    if ($line -and -not $state.Seen.ContainsKey($line)) { $state.Seen[$line] = ('{0} pid {1}' -f $p.Name, $p.ProcessId) }
+                }
+                $state.Looks++
+            } catch { }
+            Start-Sleep -Milliseconds 120
+        }
+    }).AddArgument($state)
+    return [pscustomobject]@{ Shell = $shell; Handle = $shell.BeginInvoke(); State = $state }
+}
+
+
+function Stop-CamTestCommandLineSampler {
+    <# Stops the sampler; returns the distinct command lines (as line, who) and how many looks it took. #>
+    param([Parameter(Mandatory = $true)]$Sampler)
+
+    $Sampler.State.Stop = $true
+    [void]$Sampler.Handle.AsyncWaitHandle.WaitOne(10000)
+    try { $Sampler.Shell.Dispose() } catch { }
+    $seen = @($Sampler.State.Seen.GetEnumerator() | ForEach-Object { [pscustomobject]@{ Line = [string]$_.Key; Who = [string]$_.Value } })
+    return [pscustomobject]@{ Seen = $seen; Looks = [int]$Sampler.State.Looks }
+}
+
+
+function Find-CamTestNeedleInFiles {
+    <# Files under $Root (except $Exclude) whose bytes hold any needle, as ASCII or UTF-16, as 'path: needle label'. #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][hashtable]$Needles,
+        [string[]]$Exclude = @()
+    )
+
+    $hits = @()
+    $count = 0
+    foreach ($file in @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+        if ($Exclude -contains $file.FullName -or $file.Length -gt 200MB) { continue }
+        $count++
+        try { $bytes = [System.IO.File]::ReadAllBytes($file.FullName) } catch {
+            try {
+                $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite'); $buffer = New-Object byte[] $stream.Length
+                [void]$stream.Read($buffer, 0, $buffer.Length); $stream.Dispose(); $bytes = $buffer
+            } catch { continue }
+        }
+        $ascii = [System.Text.Encoding]::GetEncoding(28591).GetString($bytes)
+        $wide = [System.Text.Encoding]::Unicode.GetString($bytes)
+        foreach ($label in $Needles.Keys) {
+            $needle = [string]$Needles[$label]
+            if ($ascii.Contains($needle) -or $wide.Contains($needle)) { $hits += ('{0}: {1}' -f $file.FullName.Substring($Root.Length).TrimStart('\'), $label) }
+        }
+    }
+    return [pscustomobject]@{ Hits = @($hits); Files = $count }
 }
