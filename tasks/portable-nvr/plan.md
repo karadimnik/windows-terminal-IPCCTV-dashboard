@@ -135,7 +135,18 @@ Commissioned on master of the original repository, ahead of this project, as the
   candidate (on this PC a virtual adapter's, since it had no physical LAN address at test time). Firewall commands are
   documented, none applied. Prompted by the Operator's report that tiles stay on "Connecting" in Firefox: the loopback-only
   hypothesis fits (MediaMTX offers only the loopback host candidate) but is UNVERIFIED until he retests. Still open for
-  Stage 2: camui on the LAN with the token, TLS, a physical-NIC and phone test, whether Firefox is a supported browser.
+  Stage 2: a physical-NIC and phone test, whether Firefox is a supported browser.
+- **Status (2026-10-16), step 2b on branch `portable-nvr-2b` (not merged): camui over HTTPS on the LAN.** An optional second
+  listener (`tlsListen`, a private IPv4:port, off by default) serves the whole app and the Live screen with a MANDATORY token
+  (`tlsToken` / `CAMUI_TLS_TOKEN`, separate from the loopback `token`), a Secure/HttpOnly/SameSite=Strict cookie holding a
+  derived value, a per-address failure limiter and https-only origins; the loopback listener is unchanged. A locally generated
+  ECDSA P-256 CA with X.509 name constraints (private addresses and .lan-style names only) signs a 390-day server certificate
+  that renews itself; keys are owner-only (icacls); `camui.exe -print-ca` and `-new-token` hand over the CA and a token; only the
+  CA certificate is served. Proven by Go tests (every route x token state, certificate matrix, limiter) and `livetls`: Chrome and
+  Edge, trusting the CA per process only (`--ignore-certificate-errors-spki-list`; no Windows store touched, no firewall rule
+  created), play the tiles over HTTPS; without the flag they show the certificate warning. NOT done (2c): a real phone and a second
+  PC (the Operator's steps are in docs/ui.md), a physical NIC, the firewall rules (documented, never applied), HSTS/CSP hardening,
+  and the Operator's decision whether a LAN device may see camera addresses through /api/cameras.
 
 ### Stage 3 - the internet
 

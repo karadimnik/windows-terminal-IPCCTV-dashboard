@@ -91,6 +91,13 @@ func newHostAllowlist(cfg Config) hostAllowlist {
 // newGuard returns the middleware. It sits inside the request logger and
 // outside the mux, so it covers the static page and every API route.
 func newGuard(cfg Config, log *slog.Logger) func(http.Handler) http.Handler {
+	return newGuardScheme(cfg, log, "")
+}
+
+// newGuardScheme is newGuard for a listener with a known scheme: with "https" an
+// Origin must be https too (an http:// page cannot drive the HTTPS listener).
+// An empty scheme keeps the loopback behaviour, which compares host and port only.
+func newGuardScheme(cfg Config, log *slog.Logger, scheme string) func(http.Handler) http.Handler {
 	allowed := newHostAllowlist(cfg)
 
 	return func(next http.Handler) http.Handler {
@@ -123,7 +130,7 @@ func newGuard(cfg Config, log *slog.Logger) func(http.Handler) http.Handler {
 					refuse(http.StatusForbidden, "cross-site request", "forbidden: cross-site request")
 					return
 				}
-				if origin, present := r.Header["Origin"]; present && !sameOrigin(origin[0], r.Host) {
+				if origin, present := r.Header["Origin"]; present && !sameOrigin(origin[0], r.Host, scheme) {
 					refuse(http.StatusForbidden, "foreign origin", "forbidden: cross-origin request")
 					return
 				}
@@ -172,9 +179,12 @@ func isJSON(contentType string) bool {
 
 // sameOrigin reports whether an Origin header names the host:port the request
 // was sent to. "null" (sandboxed frames, redirects across origins) never does.
-func sameOrigin(origin, host string) bool {
+func sameOrigin(origin, host, scheme string) bool {
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
+		return false
+	}
+	if scheme != "" && !strings.EqualFold(u.Scheme, scheme) {
 		return false
 	}
 	return strings.EqualFold(u.Host, host)

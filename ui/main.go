@@ -46,14 +46,30 @@ func main() {
 		flags      Config
 		configPath string
 		showVer    bool
+		printCA    bool
+		newTok     bool
 	)
 	flag.StringVar(&flags.Listen, "listen", "", "host:port to bind (default "+defaultListen+"; a non-loopback address requires a token)")
 	flag.StringVar(&flags.ArchiveRoot, "archive-root", "", "recorder archive root (default: RootPath from recorder.config.json, else "+defaultArchiveRoot+")")
 	flag.StringVar(&flags.StatusFile, "status-file", "", "status.json path (default <archive-root>\\_state\\status.json)")
 	flag.StringVar(&flags.ScriptDir, "script-dir", "", "directory holding cam.ps1, cameras.json and recorder.config.json (default: the directory holding camui.exe)")
 	flag.StringVar(&configPath, "config", "", "path to a JSON config file")
+	flag.StringVar(&flags.TLSListen, "tls-listen", "", "private IPv4:port for the HTTPS LAN listener, e.g. 192.168.1.50:8443 (needs a token of at least 16 characters; off by default)")
+	flag.StringVar(&flags.TLSDir, "tls-dir", "", "folder for the local CA and server certificate (default %LOCALAPPDATA%\\IPCCTV\\tls)")
+	flag.BoolVar(&printCA, "print-ca", false, "create the local CA if needed, print its file, SHA-256 fingerprint and how to install it on a device, and exit")
+	flag.BoolVar(&newTok, "new-token", false, "print a fresh 32-byte hex token for tlsToken / CAMUI_TLS_TOKEN (writes nothing) and exit")
 	flag.BoolVar(&showVer, "version", false, "print the version and exit")
 	flag.Parse()
+
+	if newTok {
+		token, err := newToken()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "no randomness:", err)
+			os.Exit(1)
+		}
+		fmt.Println(token)
+		return
+	}
 
 	if showVer {
 		fmt.Println("camui " + version)
@@ -65,6 +81,14 @@ func main() {
 	cfg, err := LoadConfig(configPath, flags)
 	if err != nil {
 		log.Error("configuration", "error", err)
+		os.Exit(2)
+	}
+	if printCA {
+		os.Exit(runPrintCA(cfg, os.Stdout, os.Stderr))
+	}
+	if err := cfg.ValidateTLS(); err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		log.Error("refusing to start", "tlsListen", cfg.TLSListen, "reason", "TLS guard")
 		os.Exit(2)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -81,19 +105,26 @@ func main() {
 	}
 }
 
-// newHandler assembles the whole HTTP handler: the static page, the API, and
-// the middleware around them. The token check is outermost so an
-// unauthenticated request learns nothing else.
-func newHandler(cfg Config, log *slog.Logger) (http.Handler, error) {
+// buildMux registers the API and the embedded UI.
+func buildMux(cfg Config, log *slog.Logger) (*http.ServeMux, error) {
 	static, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		return nil, fmt.Errorf("embedded UI: %w", err)
 	}
-
 	mux := http.NewServeMux()
 	NewAPI(cfg, log).Routes(mux)
 	mux.Handle("GET /", versioned(http.FileServerFS(static)))
+	return mux, nil
+}
 
+// newHandler assembles the loopback listener's handler: the static page, the
+// API, and the middleware around them. The token check is outermost so an
+// unauthenticated request learns nothing else.
+func newHandler(cfg Config, log *slog.Logger) (http.Handler, error) {
+	mux, err := buildMux(cfg, log)
+	if err != nil {
+		return nil, err
+	}
 	return requireToken(cfg.Token, logRequests(log, newGuard(cfg, log)(mux))), nil
 }
 
@@ -124,6 +155,12 @@ func run(cfg Config, log *slog.Logger) error {
 			"scriptDir", cfg.ScriptDir)
 	}
 
+	tlsServer, tlsStop, err := startTLS(cfg, log)
+	if err != nil {
+		listener.Close()
+		return err
+	}
+
 	log.Info("camui listening",
 		"version", version,
 		"address", listener.Addr().String(),
@@ -136,7 +173,7 @@ func run(cfg Config, log *slog.Logger) error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	errc := make(chan error, 1)
+	errc := make(chan error, 2)
 	go func() {
 		err := server.Serve(listener)
 		if errors.Is(err, http.ErrServerClosed) {
@@ -144,6 +181,15 @@ func run(cfg Config, log *slog.Logger) error {
 		}
 		errc <- err
 	}()
+	if tlsServer != nil {
+		go func() {
+			err := tlsStop()
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			errc <- err
+		}()
+	}
 
 	select {
 	case err := <-errc:
@@ -152,6 +198,9 @@ func run(cfg Config, log *slog.Logger) error {
 		log.Info("shutting down", "signal", sig.String())
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if tlsServer != nil {
+			_ = tlsServer.Shutdown(ctx)
+		}
 		if err := server.Shutdown(ctx); err != nil {
 			return fmt.Errorf("shutdown: %w", err)
 		}
@@ -174,41 +223,13 @@ func versioned(next http.Handler) http.Handler {
 	})
 }
 
-// requireToken enforces the auth token when one is configured. The token is
-// accepted from a cookie, from an Authorization: Bearer header, or once from a
-// ?token= query parameter, which is then moved into a cookie so it stops
-// appearing in the address bar, in history and in any Referer header.
+// requireToken enforces the auth token on the loopback listener: accepted from
+// a cookie, from an Authorization: Bearer header, or once from a ?token= query
+// parameter, which is then moved into a cookie so it stops appearing in the
+// address bar, in history and in any Referer header. The LAN listener uses the
+// stricter requireTokenPolicy in token.go.
 func requireToken(token string, next http.Handler) http.Handler {
-	if token == "" {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if cookie, err := r.Cookie(tokenCookie); err == nil && tokenMatches(token, cookie.Value) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if bearer, ok := bearerToken(r); ok && tokenMatches(token, bearer) {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if query := r.URL.Query().Get("token"); query != "" && tokenMatches(token, query) {
-			http.SetCookie(w, &http.Cookie{
-				Name:     tokenCookie,
-				Value:    token,
-				Path:     "/",
-				HttpOnly: true,
-				SameSite: http.SameSiteStrictMode,
-			})
-			clean := *r.URL
-			params := clean.Query()
-			params.Del("token")
-			clean.RawQuery = params.Encode()
-			http.Redirect(w, r, clean.RequestURI(), http.StatusSeeOther)
-			return
-		}
-		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, "a token is required", http.StatusUnauthorized)
-	})
+	return requireTokenPolicy(tokenPolicy{Token: token}, next)
 }
 
 func bearerToken(r *http.Request) (string, bool) {
