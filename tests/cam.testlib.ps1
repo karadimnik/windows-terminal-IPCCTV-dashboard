@@ -2321,6 +2321,8 @@ function Start-CamTestBrowser {
     $profile = Join-Path -Path $BaseDir -ChildPath ('prof-{0}-{1}' -f $Browser, [guid]::NewGuid().ToString('n').Substring(0, 8))
     [void](New-Item -ItemType Directory -Path $profile -Force)
     $extra = $(if ($ExtraArgs) { ' ' + $ExtraArgs } else { '' }) + $(if ($Capture) { ' --use-fake-ui-for-media-stream --use-fake-device-for-media-stream' } else { '' }) + $(if ($DebugPort -gt 0) { " --remote-debugging-port=$DebugPort" } else { '' })
+    # Development aid: CAMTEST_HEADLESS=1 runs the browser with no window at all (a rehearsal that disturbs nobody). The acceptance run is headed.
+    if ($env:CAMTEST_HEADLESS -eq '1') { $extra += ' --headless=new' }
     $arguments = '--user-data-dir="{0}" --new-window --no-first-run --no-default-browser-check --window-position=40,40 --window-size={3} --autoplay-policy=no-user-gesture-required --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows{2} "{1}"' -f $profile, $Url, $extra, $WindowSize
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $found.Exe
