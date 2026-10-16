@@ -8257,7 +8257,7 @@ function Invoke-CamCheckLiveRobust {
                     $rows += & $measure 'visible (reference)' $false
                     foreach ($variant in @(@{ Name = 'keep (nothing touched)'; Mode = 'keep'; Grace = -1 }, @{ Name = 'pause (video.pause)'; Mode = 'pause'; Grace = -1 }, @{ Name = 'detach (srcObject = null)'; Mode = 'detach'; Grace = -1 },
                             @{ Name = 'disable (video tracks off)'; Mode = 'disable'; Grace = -1 }, @{ Name = 'close at once (the old behaviour, grace 0)'; Mode = 'keep'; Grace = 0 })) {
-                        [void](& $js ("window.__liveTune({ mode: '{0}', grace: {1} })" -f $variant.Mode, $variant.Grace))
+                        [void](& $js ("window.__liveTune({ mode: '" + $variant.Mode + "', grace: " + $variant.Grace + " })"))
                         $live0 = & $sessions; $rx0 = & $rx
                         & $minimize
                         [void](& $until { param($s) $s.visibility -eq 'hidden' } 10)

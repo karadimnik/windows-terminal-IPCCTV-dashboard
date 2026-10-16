@@ -85,7 +85,7 @@ const Live = (() => {
     recoveries: 0,
     lastTick: Date.now(),
     ticking: false,
-    tune: { grace: null, mode: "pause", stallMs: STALL_MS, offMs: OFFSCREEN_GRACE_MS },   // grace/mode are test hooks (window.__liveTune); mode is chosen in docs/ui.md
+    tune: { grace: null, mode: "keep", stallMs: STALL_MS, offMs: OFFSCREEN_GRACE_MS },   // grace/mode are test hooks (window.__liveTune); mode is chosen in docs/ui.md
     fit: null,           // the last bestGrid answer applied to the grid
     fitTimer: null,
   };
@@ -811,7 +811,9 @@ const Live = (() => {
 
   const savedStream = new WeakMap();
 
-  // Stops painting one video while away. Variants (view.tune.mode): keep = untouched, pause = pause a muted element,
+  // Stops painting one video while away. Measured in Chrome and Edge (docs/ui.md): none of these lowers the browser's CPU
+  // beyond what the browser already saves for a hidden page, so the default is "keep" (untouched). The others stay as measured
+  // alternatives (window.__liveTune): pause = pause a muted element,
   // detach = srcObject null on a muted element, disable = remote video tracks disabled. A picture that is sounding
   // (unmuted) keeps playing except under "disable", which leaves audio alone.
   function hideVideo(v) {
