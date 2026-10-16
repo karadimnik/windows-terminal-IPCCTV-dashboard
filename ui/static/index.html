@@ -204,6 +204,26 @@
       </div>
       <div id="lnote" class="lnote hide"></div>
       <div class="lgrid" id="lgrid"></div>
+
+      <!-- One camera, large. Inside lwrap so it is still shown while the grid is fullscreen. -->
+      <dialog id="lmodal" class="lmodal" role="dialog" aria-modal="true" aria-labelledby="lmname">
+        <div class="lmbox" id="lmbox" data-show="sub">
+          <div class="lmstage">
+            <video id="lmsub" class="lmv" muted autoplay playsinline></video>
+            <video id="lmmain" class="lmv" muted autoplay playsinline></video>
+            <div id="lmmsg" class="lmmsg"></div>
+          </div>
+          <div class="lmtop">
+            <span class="lmname" id="lmname"></span>
+            <span class="lmchips" id="lmchips"></span>
+            <button type="button" class="lmb hide" id="lmretry">Retry HD</button>
+            <button type="button" class="lmb" id="lmcopy">Copy diagnostics</button>
+            <button type="button" class="lmb" id="lmmute" aria-pressed="false">Unmute</button>
+            <button type="button" class="lmb" id="lmfs">Fullscreen</button>
+            <button type="button" class="lmb" id="lmclose" autofocus>Close</button>
+          </div>
+        </div>
+      </dialog>
     </div>
   </section>
 </div>
