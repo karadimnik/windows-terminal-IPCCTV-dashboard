@@ -305,3 +305,11 @@ dialog p{margin:0;color:var(--ink-2)}
   .lpanel>.lgrid{padding:10px}
   .ltile .lmute{min-height:36px;padding:6px 12px}
 }
+
+/* ---- view-only (HTTPS LAN listener, tlsReadOnly) ---- */
+.viewonly-note{background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r);padding:10px var(--pad);margin-bottom:14px;color:var(--ink-2);font-size:13px}
+.viewonly-note strong{color:var(--ink)}
+body.viewonly #controls{display:none}
+body.viewonly .tgl{pointer-events:none;opacity:.5}
+body.viewonly [data-ack]{display:none}
+body.viewonly section[data-tab="set"]>.panel:not(#tlsPanel){opacity:.55}
