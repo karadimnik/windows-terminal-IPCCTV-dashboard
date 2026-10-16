@@ -6233,6 +6233,7 @@ function Invoke-CamCheckDocSwitches {
         'cam.health.ps1'                     = 'cam.health.ps1'
         'mpv.cam.autolayout.autorestart.ps1' = 'mpv.cam.autolayout.autorestart.ps1'
         'cam.tests.ps1'                      = 'tests\cam.tests.ps1'
+        'demo.ps1'                           = 'tests\live\demo.ps1'
     }
     # Parameters of Windows PowerShell itself and of the cmdlets the docs
     # quote, not of this repository.

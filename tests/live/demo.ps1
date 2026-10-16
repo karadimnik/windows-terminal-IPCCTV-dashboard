@@ -54,10 +54,12 @@ try {
         $exe = Join-Path -Path $binDir -ChildPath 'camui-demo.exe'
         $uiLinux = ((& wsl.exe -e wslpath -a -u (Join-Path (Get-CamTestRepo) 'ui')) | Select-Object -First 1)
         $outLinux = ((& wsl.exe -e wslpath -a -u $exe) | Select-Object -First 1)
+        # A tiny script file: quoting a go build line through wsl.exe and bash -c does not survive.
+        $script = Join-Path -Path $binDir -ChildPath 'build.sh'
+        [System.IO.File]::WriteAllText($script, "#!/bin/bash`nexport PATH=`"`$PATH:`$HOME/.local/go/bin`"`ncd `"`$1`" || exit 1`nCGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags `"-s -w -X main.version=demo`" -o `"`$2`" .`n", (New-Object System.Text.UTF8Encoding($false)))
+        $scriptLinux = ((& wsl.exe -e wslpath -a -u $script) | Select-Object -First 1)
         Push-Location -LiteralPath $env:TEMP
-        try {
-            & wsl.exe -e bash -c 'export PATH="$PATH:$HOME/.local/go/bin"; cd "$0" && CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-s -w -X main.version=demo" -o "$1" .' $uiLinux $outLinux
-        } finally { Pop-Location }
+        try { & wsl.exe -e bash $scriptLinux $uiLinux $outLinux } finally { Pop-Location }
         if (-not (Test-Path -LiteralPath $exe)) { throw 'could not build camui; pass -CamuiExe (a camui.exe built from this tree).' }
     }
     $env:CAMUI_TEST_EXE = $exe
@@ -78,7 +80,7 @@ try {
     Write-Host ''
 
     $interactive = $true
-    try { [void][Console]::KeyAvailable } catch { $interactive = $false }
+    try { if ([Console]::IsInputRedirected) { $interactive = $false } else { [void][Console]::KeyAvailable } } catch { $interactive = $false }
     $deadline = [DateTime]::Now.AddMinutes($Minutes)
     while ([DateTime]::Now -lt $deadline) {
         if ($rig.Supervisor.HasExited -or $ui.Process.HasExited) { Write-Host 'a demo process exited; stopping.' -ForegroundColor Yellow; break }
