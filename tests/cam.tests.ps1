@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'livegone')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'livegone', 'livelan')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -7829,6 +7829,194 @@ function Invoke-CamCheckLiveGone {
 }
 
 
+function Invoke-CamCheckLiveLan {
+    <#
+        [Stage 2a, opt-in: opens browser windows] The media path works through a
+        NON-loopback address, and a stuck tile explains itself.
+
+        The live instance listens on 0.0.0.0 and advertises ONLY this PC's
+        private address (a test-only patch of the sandbox copy drops the usual
+        127.0.0.1 from the advertised list), run from the installed MediaMTX so
+        no new firewall prompt can appear. The address is read at run time and
+        never printed or written.
+          answer     the SDP camui returns holds exactly that one host candidate
+          chrome and edge   three tiles reach playing, framesDecoded keeps growing,
+                     and each tile's selected candidate pair is private on the
+                     server side, not loopback (window.__liveStats diag.pair)
+          negative   (Chrome) a second live instance advertises only an address
+                     nothing answers: the tile must say why - server answered
+                     201, ICE state, what each side offered, "No media after 15 s"
+                     - with a Copy diagnostics button that works, and no IP
+                     address anywhere in the page text
+        Address choice: CAMTEST_LAN_ADDRESS if set; else a physical adapter with
+        a default route; else (this PC may have none) a virtual adapter's address
+        on a Private profile - which proves the non-loopback candidate path but
+        NOT a physical NIC, and the evidence says which it was.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $fail = { param([string]$Text) $script:CamLanOk = $false; $script:CamLanEvidence += ('FAIL ' + $Text) }
+    $note = { param([string]$Text) $script:CamLanEvidence += $Text }
+    $script:CamLanOk = $true; $script:CamLanEvidence = @(); $script:CamLanBrowsers = @(); $script:CamLanSeconds = 0
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $rig = $null; $ui = $null; $cdp = $null
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livelan'
+    $base = 'http://127.0.0.1:18789'
+    $shots = [string]$env:CAMTEST_SHOTS
+    $offer = Get-CamTestWhepOffer
+    $ipPattern = '\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+
+    $stats = { try { Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.__liveStats ? window.__liveStats() : null' -Await } catch { $null } }
+    $playing = { param($s, [int]$n) $s -and $s.shown -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -ge $n }
+    $launch = {
+        param([string]$Browser)
+        $started = Start-CamTestBrowser -Browser $Browser -BaseDir $dir -Url 'about:blank' -DebugPort 18300 -WindowSize '1280,900'
+        $script:CamLanBrowsers += $started
+        $cdp = Connect-CamTestCdp -Port 18300
+        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.enable')
+        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Emulation.setDeviceMetricsOverride' -Params @{ width = 1280; height = 800; deviceScaleFactor = 1; mobile = $false })
+        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = "$base/#live" })
+        return @{ Started = $started; Cdp = $cdp }
+    }
+    $finish = {
+        param($Started)
+        Disconnect-CamTestCdp -Cdp $cdp
+        $end = Stop-CamTestBrowser -Started $Started
+        if ($end.Left.Count -or -not $end.ProfileRemoved) { & $fail 'a browser left processes or a profile behind' }
+    }
+    $startRig = {
+        param([string]$Name, [string]$AdvertiseHost, [int]$CameraCount)
+        $cameras = 1..$CameraCount | ForEach-Object { [pscustomobject]@{ Name = "Cam $_"; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 1) } }
+        $r = Start-CamTestLiveRig -Name $Name -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 4 -LiveOnlyAdvertised `
+            -Config @{ LiveExePath = 'C:\mediamtx\mediamtx.exe'; LiveUdpAddress = '0.0.0.0:18189'; LiveAdvertiseHosts = @($AdvertiseHost) }
+        return $r
+    }
+
+    try {
+        if (-not $env:CAMUI_TEST_EXE -or -not (Test-Path -LiteralPath $env:CAMUI_TEST_EXE)) { throw 'CAMUI_TEST_EXE must name a camui.exe built from this tree.' }
+        foreach ($p in @(18789, 18300)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
+        if (-not (Test-Path -LiteralPath 'C:\mediamtx\mediamtx.exe')) { throw 'C:\mediamtx\mediamtx.exe is needed (the live instance runs from it so no firewall prompt can appear).' }
+        if ($shots) { [void](New-Item -ItemType Directory -Path $shots -Force) }
+
+        # ---- which address ----
+        $candidates = @(Get-CamLanCandidates)
+        $pick = $null; $why = ''
+        if ($env:CAMTEST_LAN_ADDRESS) { $pick = @($candidates | Where-Object { $_.Address -eq $env:CAMTEST_LAN_ADDRESS })[0]; $why = 'CAMTEST_LAN_ADDRESS' }
+        if (-not $pick) { $pick = @($candidates | Where-Object { -not $_.Virtual -and $_.Gateway })[0]; $why = 'a physical adapter with a default route' }
+        if (-not $pick) { $pick = @($candidates | Where-Object { -not $_.Virtual })[0]; $why = 'a physical adapter' }
+        if (-not $pick) { $pick = @($candidates | Where-Object { $_.Profile -eq 'Private' })[0]; $why = 'NO physical private address on this PC: a virtual adapter on a Private profile' }
+        if (-not $pick) { throw 'this PC has no private IPv4 address on an up adapter to test with' }
+        $lan = $pick.Address
+        & $note ("LAN address used: adapter '{0}' ({1}, profile {2}, default route {3}) chosen as {4}; {5} candidate(s) existed; the address itself is not printed" -f $pick.Alias, $(if ($pick.Virtual) { 'VIRTUAL' } else { 'physical' }), $pick.Profile, $pick.Gateway, $why, $candidates.Count)
+
+        # ---- the answer holds exactly that candidate ----
+        $rig = & $startRig 'livelan' $lan 3
+        $dir = $rig.Dir
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livelan'
+        if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
+        $liveConf = Get-Content -LiteralPath (Join-Path $rig.Dir 'live\mediamtx-live.yml') | Where-Object { $_ -match '^webrtc(LocalUDPAddress|AdditionalHosts):' }
+        & $note ("generated live config (the LAN address masked): {0}" -f ((($liveConf -join ' | ') -replace $ipPattern, 'a.b.c.d') -replace 'a\.b\.c\.d(?=:)', '0.0.0.0'))
+        $answer = Invoke-CamRawHttp -Port 18789 -Method 'POST' -Path '/api/live/Cam%201/whep?stream=sub' -Headers @{ 'Content-Type' = 'application/sdp' } -Body $offer
+        $ips = @(([regex]::Matches($answer.Body, '(?m)^a=candidate:\S+ 1 udp \d+ (\S+) (\d+) typ host') | ForEach-Object { $_.Groups[1].Value }) | Select-Object -Unique)
+        & $note ("SDP answer: HTTP {0}, {1} distinct host candidate address(es), equals the LAN address: {2}, contains 127.0.0.1: {3}" -f $answer.Status, $ips.Count, (($ips -join ',') -eq $lan), ($ips -contains '127.0.0.1'))
+        if ($answer.Status -ne 201 -or ($ips -join ',') -ne $lan) { & $fail 'the answer does not hold exactly the LAN host candidate' }
+        if ($answer.Headers['location'] -match '^/api/live/session/[0-9a-f]{32}$') { [void](Invoke-CamRawHttp -Port 18789 -Method 'DELETE' -Path $answer.Headers['location']) }
+
+        # ---- browsers play over it ----
+        foreach ($browser in @('chrome', 'edge')) {
+            $found = Get-CamTestBrowser -Browser $browser
+            if (-not $found.Exe) { & $fail ("$browser could not be run: " + $found.Reason); continue }
+            $began = [DateTime]::UtcNow
+            try {
+                $l = & $launch $browser; $started = $l.Started; $cdp = $l.Cdp
+                $end = [DateTime]::UtcNow.AddSeconds(45); $s = $null
+                while ([DateTime]::UtcNow -lt $end) { $s = & $stats; if (& $playing $s 3) { break }; Start-Sleep -Milliseconds 500 }
+                if (-not (& $playing $s 3)) { & $fail "$browser : three tiles did not reach playing over the LAN candidate"; if ($s) { foreach ($t in @($s.tiles)) { & $note ("    {0}: {1} | {2}" -f $t.name, $t.state, $t.diag.line) } }; continue }
+                Start-Sleep -Seconds 3
+                $s2 = & $stats
+                & $note ("== $browser $($found.Version): three tiles playing over the non-loopback candidate ==")
+                foreach ($t in @($s.tiles)) {
+                    $t2 = @($s2.tiles | Where-Object { $_.name -eq $t.name })[0]
+                    $pair = [string]$t2.diag.pair
+                    $remote = ($pair -split '<->')[-1].Trim()
+                    & $note ("  {0}: framesDecoded {1} -> {2} in 3 s; selected pair {3}; server offered {4}; browser offered {5}" -f $t.name, $t.v.framesDecoded, $t2.v.framesDecoded, $pair, $t2.diag.answer, $t2.diag.local)
+                    if ($t2.v.framesDecoded -lt $t.v.framesDecoded + 10) { & $fail "$browser $($t.name): framesDecoded did not keep growing" }
+                    if ($remote -notmatch '/private$') { & $fail "$browser $($t.name): the selected remote candidate is not a private non-loopback address ($pair)" }
+                    if (@($t2.diag.answerClasses) -contains 'loopback') { & $fail "$browser $($t.name): the server offered a loopback candidate" }
+                }
+                $overlays = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'Array.from(document.querySelectorAll(".lover:not(.hide)")).length'
+                & $note ("  explanation overlays visible on playing tiles: $overlays")
+                if ($overlays -ne 0) { & $fail "$browser : an overlay is shown on a playing tile" }
+            }
+            catch { & $fail ("$browser run aborted: " + $_.Exception.Message) }
+            finally {
+                if ($started) { & $finish $started; $started = $null }
+                $script:CamLanSeconds += ([DateTime]::UtcNow - $began).TotalSeconds
+            }
+        }
+        [void](Stop-CamTestUi -Ui $ui); $ui = $null
+        $notes1 = @(Stop-CamTestLiveRig -Rig $rig); if ($notes1 -match 'forced: (?!nothing)') { & $fail 'the first live rig had to be forced' }
+        if ($script:CamLanOk) { try { Remove-CamTestTree -Path $rig.Dir } catch { } }
+        $rig = $null
+
+        # ---- negative: an address nothing answers; the tile must explain ----
+        $rig = & $startRig 'livelan' '10.254.254.77' 2
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livelan'
+        if (-not $ui.Started) { throw ('camui did not restart: ' + $ui.Reason) }
+        $began = [DateTime]::UtcNow; $started = $null
+        try {
+            $l = & $launch 'chrome'; $started = $l.Started; $cdp = $l.Cdp
+            $end = [DateTime]::UtcNow.AddSeconds(40); $s = $null
+            while ([DateTime]::UtcNow -lt $end) { $s = & $stats; if ($s -and @(@($s.tiles) | Where-Object { $_.state -eq 'error' -or $_.state -eq 'offline' }).Count -ge 1) { break }; Start-Sleep -Milliseconds 700 }
+            Start-Sleep -Milliseconds 800
+            $s = & $stats
+            $t = @($s.tiles)[0]
+            $overlay = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'Array.from(document.querySelectorAll(".ltile")).slice(0, 1).map(t => t.querySelector(".lover").innerText).join("\n")'
+            $copyVisible = Invoke-CamTestCdpEval -Cdp $cdp -Expression '!!document.querySelector(".ltile .lcopy:not(.hide)")'
+            & $note ("== negative (Chrome): the server advertises an address nothing answers ==")
+            & $note ("  tile state {0}; the overlay says: {1}" -f $t.state, (($overlay -split "`n" | Where-Object { $_ }) -join ' / '))
+            & $note ("  diagnostics line: {0}" -f $t.diag.line)
+            if ($t.state -notin 'error', 'offline') { & $fail 'a tile with no media did not reach error or offline' }
+            if ($overlay -notmatch 'No media after 15 s' -or $overlay -notmatch 'server answered HTTP 201' -or $overlay -notmatch 'server offered 1 host \(private\)' -or $overlay -notmatch 'browser offered') { & $fail "the overlay does not explain the stuck tile in plain words: $overlay" }
+            if (-not $copyVisible) { & $fail 'no Copy diagnostics button on a stuck tile' }
+            if (($overlay + $t.diag.line) -match $ipPattern) { & $fail 'an IP address appears in the tile text or the diagnostics line' }
+            if ($shots) { [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots 'chrome-stuck-tile.png')) }
+            $pos = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(() => { const r = document.querySelector(".ltile .lcopy:not(.hide)").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()'
+            foreach ($type in @('mouseMoved', 'mousePressed', 'mouseReleased')) { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = $type; x = $pos.x; y = $pos.y; button = 'left'; clickCount = 1; buttons = $(if ($type -eq 'mousePressed') { 1 } else { 0 }) }) }
+            Start-Sleep -Milliseconds 400
+            $label = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'document.querySelector(".ltile .lcopy").textContent'
+            $focused = (& $stats).focus
+            & $note ("  Copy diagnostics clicked: the button now reads '$label'; the click did not focus the tile: $(-not $focused)")
+            if ($label -ne 'Copied') { & $fail "Copy diagnostics did not copy (button reads '$label')" }
+            if ($focused) { & $fail 'clicking Copy diagnostics focused the tile' }
+        }
+        catch { & $fail ('negative run aborted: ' + $_.Exception.Message) }
+        finally {
+            if ($started) { & $finish $started }
+            $script:CamLanSeconds += ([DateTime]::UtcNow - $began).TotalSeconds
+        }
+    }
+    catch { & $fail ('check aborted: ' + $_.Exception.Message) }
+    finally {
+        Disconnect-CamTestCdp -Cdp $cdp
+        foreach ($b in @($script:CamLanBrowsers)) { try { [void](Stop-CamTestBrowser -Started $b) } catch { } }
+        if ($ui) { [void](Stop-CamTestUi -Ui $ui) }
+        $notes = @()
+        if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
+        $evidence += ("browser windows were up {0:n0} s in total; whole check {1:n0} s" -f $script:CamLanSeconds, $watch.Elapsed.TotalSeconds)
+        $evidence += $notes
+        if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
+        if ($script:CamLanOk -and $rig) { try { Remove-CamTestTree -Path $rig.Dir } catch { $script:CamLanEvidence += 'cleanup failed' } }
+        elseif ($rig) { $script:CamLanEvidence += "left for inspection: $($rig.Dir)" }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'livelan' -Status $(if ($script:CamLanOk) { 'PASS' } else { 'FAIL' }) `
+        -Message 'with only a non-loopback address advertised, Chrome and Edge play over it; with an unreachable one the tile explains why' `
+        -Evidence ($evidence + $script:CamLanEvidence)
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -7888,6 +8076,7 @@ foreach ($check in $Checks) {
         'liveondemand' { Invoke-CamCheckLiveOnDemand -Run $run }
         'livepage'  { Invoke-CamCheckLivePage  -Run $run }
         'livegone'  { Invoke-CamCheckLiveGone  -Run $run }
+        'livelan'   { Invoke-CamCheckLiveLan   -Run $run }
         'soak'      { Invoke-CamCheckSoak      -Run $run -DryRun:$SoakDryRun }
     }
 }

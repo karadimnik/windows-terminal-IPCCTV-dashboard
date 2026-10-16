@@ -56,6 +56,7 @@ const Live = (() => {
   // ---- diagnostics ---------------------------------------------------------
 
   function addressClass(address) {
+    if (!address) return "masked";
     if (/\.local$/i.test(address)) return "mDNS";
     if (/^127\./.test(address) || address === "::1") return "loopback";
     if (/^10\./.test(address) || /^192\.168\./.test(address) || /^172\.(1[6-9]|2\d|3[01])\./.test(address) || /^f[cd][0-9a-f]{2}:/i.test(address)) return "private";
@@ -124,6 +125,10 @@ const Live = (() => {
     if (tile.state === "connecting" && tile.fails > 0) head = "Connecting (retry " + tile.fails + ")";
     if (!d || (tile.state === "connecting" && seconds(d) < 3 && !tile.lastVerdict)) return [head, "", false];
 
+    // A retry has nothing of its own to say yet: keep showing why the last attempt failed.
+    if (tile.state === "connecting" && d.http === null && tile.lastVerdict && tile.lastDetail) {
+      return [head, "last attempt: " + tile.lastVerdict + "\n" + tile.lastDetail, true];
+    }
     const parts = [];
     if (d.http === null) parts.push(d.gather === "complete" ? "waiting for the server's answer" : "gathering browser candidates (" + d.gather + ")");
     else parts.push("server answered HTTP " + d.http + (d.httpText ? " (" + d.httpText + ")" : ""));
@@ -231,7 +236,7 @@ const Live = (() => {
         '<div class="lbar"><span class="lname">' + esc(cam.name) + '</span><span class="lchip"></span>' +
         '<button type="button" class="lmute" aria-pressed="false" title="Sound is muted. Click to unmute.">Unmute</button></div>';
       const tile = { name: cam.name, root, video: root.querySelector("video"), pc: null, session: null, gen: 0,
-        stream: "sub", state: "idle", detail: "", fails: 0, retry: null, watchdog: null, tick: null, diag: null, lastVerdict: "", cam };
+        stream: "sub", state: "idle", detail: "", fails: 0, retry: null, watchdog: null, tick: null, diag: null, lastVerdict: "", lastDetail: "", cam };
       tile.video.muted = true;
       view.tiles.set(cam.name, tile);
       grid().append(root);
@@ -309,6 +314,10 @@ const Live = (() => {
   function fail(tile, gen, state, detail, delay) {
     if (tile.gen !== gen) return;
     tile.lastVerdict = detail;
+    const was = tile.state;
+    tile.state = state;
+    tile.lastDetail = explain(tile)[1];
+    tile.state = was;
     if (tile.diag) tile.diag.conn = tile.pc ? tile.pc.connectionState : tile.diag.conn;
     console.info("live:", tile.name, diagLine(tile));
     closeTile(tile);
@@ -342,7 +351,7 @@ const Live = (() => {
         const now = pc.connectionState;
         diag.conn = now;
         if (now === "connected") {
-          selectedPair(pc).then((pair) => { diag.pair = pair; });
+          selectedPair(pc).then((pair) => { diag.pair = pair || diag.pair; if (!pair) setTimeout(() => selectedPair(pc).then((again) => { diag.pair = again || diag.pair; }), 1500); });
           clearTimeout(tile.watchdog);
           clearTimeout(lost);
           tile.fails = 0;
@@ -529,6 +538,11 @@ const Live = (() => {
           answer: summary(tile.diag.answer), answerClasses: (tile.diag.answer || []).map((c) => c.cls), pair: tile.diag.pair, line: diagLine(tile) } : null,
         explain: explain(tile).slice(0, 2), rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) } };
       if (tile.pc) {
+        if (tile.diag && !tile.diag.pair && tile.pc.connectionState === "connected") {
+          tile.diag.pair = await selectedPair(tile.pc);
+          row.diag.pair = tile.diag.pair;
+          row.diag.line = diagLine(tile);
+        }
         try {
           (await tile.pc.getStats()).forEach((r) => {
             if (r.type === "inbound-rtp" && r.kind === "video") row.v = { framesDecoded: r.framesDecoded, framesDropped: r.framesDropped, w: r.frameWidth, h: r.frameHeight };
