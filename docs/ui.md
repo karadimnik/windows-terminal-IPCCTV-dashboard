@@ -1,6 +1,6 @@
 # The control UI
 
-Its three screens - Dashboard, Settings and Footage - are described in the [README](../README.md#day-to-day).
+Its four screens - Dashboard, Settings, Footage and Live - are described in the [README](../README.md#day-to-day); Live has its own section below.
 
 ## How it works
 
