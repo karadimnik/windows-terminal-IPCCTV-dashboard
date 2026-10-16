@@ -24,8 +24,8 @@ Branch `portable-nvr-1b`. Builds on Stage 1A (`live-1a-design.md`).
    - `GET /api/live` -> `{enabled, alive, cameras:[{name, sub, main, camAlive, restarts, lastError}]}`.
    - `POST /api/live/{camera}/whep?stream=sub|main`, body `application/sdp` <= 64 KB. Order of checks: stream (400), live off
      (503 `live view is off`), live not running (503 `unavailable`), camera unknown (404), stream not offered for that camera
-     (404), session caps (429), body (413/415/400), then the upstream call. Answer: `201`, `application/sdp`, `Location:
-     /api/live/session/<id>` with a minted random id.
+     (404), content type (415), body (413 / 400), session caps (429), then the secret and address (502) and the upstream call.
+     Answer: `201`, `application/sdp`, `Location: /api/live/session/<id>` with a minted random id.
    - `DELETE /api/live/session/{id}` -> forwards a DELETE to the stored upstream URL, drops the id, `204`; unknown id `404`.
 4. **Guard exception.** Only `POST /api/live/{camera}/whep` (one non-empty segment) may carry `application/sdp`; every other
    route keeps the JSON rule; Host, Origin and Sec-Fetch-Site still apply.
