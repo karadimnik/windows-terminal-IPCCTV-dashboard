@@ -347,7 +347,10 @@ function Start-CamTestUi {
         # place.
         [string]$Source,
         # The folder under cam-tests\ the copy runs from, so a second camui can run beside the first.
-        [string]$Name = 'camui'
+        [string]$Name = 'camui',
+        # [Stage 2b] More camui arguments (for example -tls-listen), and an exact path to run the copy from.
+        [string[]]$ExtraArgs = @(),
+        [string]$RunExe = ''
     )
 
     if (-not $Source) { $Source = $env:CAMUI_TEST_EXE }
@@ -368,6 +371,7 @@ function Start-CamTestUi {
     $dir = Join-Path -Path $env:TEMP -ChildPath ('cam-tests\' + $Name)
     [void](New-Item -ItemType Directory -Path $dir -Force)
     $exe = Join-Path -Path $dir -ChildPath 'camui.exe'
+    if ($RunExe) { [void](New-Item -ItemType Directory -Path (Split-Path -Parent $RunExe) -Force); $exe = $RunExe }
     Copy-Item -LiteralPath $source -Destination $exe -Force
 
     $out = Join-Path -Path $dir -ChildPath 'camui.out.log'
@@ -376,7 +380,7 @@ function Start-CamTestUi {
 
     if ($Token) { $env:CAMUI_TOKEN = $Token } else { Remove-Item Env:\CAMUI_TOKEN -ErrorAction SilentlyContinue }
     $process = Start-Process -FilePath $exe `
-        -ArgumentList '-listen', ("127.0.0.1:{0}" -f $Port), '-status-file', $StatusFile, '-script-dir', $ScriptDir `
+        -ArgumentList (@('-listen', ("127.0.0.1:{0}" -f $Port), '-status-file', $StatusFile, '-script-dir', $ScriptDir) + $ExtraArgs) `
         -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
 
     $base = "http://127.0.0.1:$Port"
@@ -2299,7 +2303,9 @@ function Start-CamTestBrowser {
         [switch]$Capture,
         # DevTools protocol on this loopback port (0 = off), for a test that drives the page and captures its own window.
         [int]$DebugPort = 0,
-        [string]$WindowSize = '720,520'
+        [string]$WindowSize = '720,520',
+        # More command-line text for the browser (for example a per-process certificate allowance).
+        [string]$ExtraArgs = ''
     )
 
     $found = Get-CamTestBrowser -Browser $Browser
@@ -2314,7 +2320,7 @@ function Start-CamTestBrowser {
 
     $profile = Join-Path -Path $BaseDir -ChildPath ('prof-{0}-{1}' -f $Browser, [guid]::NewGuid().ToString('n').Substring(0, 8))
     [void](New-Item -ItemType Directory -Path $profile -Force)
-    $extra = $(if ($Capture) { ' --use-fake-ui-for-media-stream --use-fake-device-for-media-stream' } else { '' }) + $(if ($DebugPort -gt 0) { " --remote-debugging-port=$DebugPort" } else { '' })
+    $extra = $(if ($ExtraArgs) { ' ' + $ExtraArgs } else { '' }) + $(if ($Capture) { ' --use-fake-ui-for-media-stream --use-fake-device-for-media-stream' } else { '' }) + $(if ($DebugPort -gt 0) { " --remote-debugging-port=$DebugPort" } else { '' })
     $arguments = '--user-data-dir="{0}" --new-window --no-first-run --no-default-browser-check --window-position=40,40 --window-size={3} --autoplay-policy=no-user-gesture-required --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows{2} "{1}"' -f $profile, $Url, $extra, $WindowSize
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $found.Exe
@@ -2787,9 +2793,9 @@ function Get-CamTestWhepOffer {
 
 function Start-CamTestLiveCamui {
     <# camui (CAMUI_TEST_EXE, a copy under %TEMP%) on a loopback port against a live rig's sandbox: its script folder and its status file. #>
-    param([Parameter(Mandatory = $true)]$Rig, [Parameter(Mandatory = $true)][int]$Port, [string]$Name = 'camui-live')
+    param([Parameter(Mandatory = $true)]$Rig, [Parameter(Mandatory = $true)][int]$Port, [string]$Name = 'camui-live', [string[]]$ExtraArgs = @(), [string]$RunExe = '')
 
-    return (Start-CamTestUi -Port $Port -Name $Name -StatusFile (Get-CamStatusFilePath -Config $Rig.Sandbox.Config) -ScriptDir $Rig.Sandbox.Dir)
+    return (Start-CamTestUi -Port $Port -Name $Name -StatusFile (Get-CamStatusFilePath -Config $Rig.Sandbox.Config) -ScriptDir $Rig.Sandbox.Dir -ExtraArgs $ExtraArgs -RunExe $RunExe)
 }
 
 
@@ -2833,4 +2839,97 @@ function Get-CamLanCandidates {
             Profile = $(if ($profile) { [string]$profile.NetworkCategory } else { 'unknown' }) }
     }
     return @($found)
+}
+
+
+function Get-CamTestAllowedCamuiPath {
+    <#
+        An existing, enabled inbound ALLOW rule for a camui.exe under %TEMP% that applies to Private networks: running a test camui from exactly
+        that path binds beyond loopback without a Windows Firewall prompt. Read only; no rule is ever created or changed. $null when there is none.
+    #>
+    foreach ($filter in @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue)) {
+        if ([string]$filter.Program -notmatch '\\camui\.exe$' -or -not ([string]$filter.Program).StartsWith($env:TEMP, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        $rule = $filter | Get-NetFirewallRule -ErrorAction SilentlyContinue
+        if ($rule -and $rule.Enabled -eq 'True' -and $rule.Direction -eq 'Inbound' -and $rule.Action -eq 'Allow' -and ([string]$rule.Profile -match 'Private|Any')) { return [string]$filter.Program }
+    }
+    return $null
+}
+
+
+function Invoke-CamTestTls {
+    <#
+        One HTTPS/1.1 request over a raw TLS stream to an address whose certificate chains to a given CA CERTIFICATE (in memory only: no Windows
+        certificate store is read for trust or written), with the Host header, other headers and body exactly as given. The server certificate must
+        name -ServerName and chain to the CA, otherwise the handshake fails. Returns Status (0 = none), Headers (lower-cased names), Body, the
+        negotiated protocol, and the served leaf. -Plain sends the request WITHOUT TLS (to show the port refuses it).
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Address,
+        [Parameter(Mandatory = $true)][int]$Port,
+        [string]$CaPem = '',
+        [string]$ServerName = '',
+        [string]$Method = 'GET',
+        [string]$Path = '/',
+        [System.Collections.IDictionary]$Headers = @{},
+        [string]$Body = '',
+        [switch]$Plain
+    )
+
+    if (-not $ServerName) { $ServerName = $Address }
+    $bytes = if ($Body) { [System.Text.Encoding]::UTF8.GetBytes($Body) } else { @() }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add(('{0} {1} HTTP/1.1' -f $Method, $Path))
+    if (-not $Headers.Contains('Host')) { $lines.Add(('Host: {0}:{1}' -f $ServerName, $Port)) }
+    foreach ($name in $Headers.Keys) { $lines.Add(('{0}: {1}' -f $name, $Headers[$name])) }
+    if ($bytes.Length -gt 0) { $lines.Add(('Content-Length: {0}' -f $bytes.Length)) }
+    $lines.Add('Connection: close')
+    $head = [System.Text.Encoding]::ASCII.GetBytes((($lines -join "`r`n") + "`r`n`r`n"))
+    $request = New-Object byte[] ($head.Length + $bytes.Length)
+    [Array]::Copy($head, 0, $request, 0, $head.Length)
+    if ($bytes.Length -gt 0) { [Array]::Copy($bytes, 0, $request, $head.Length, $bytes.Length) }
+
+    $result = [pscustomobject]@{ Status = 0; Headers = @{}; Body = ''; Protocol = ''; Leaf = $null; Error = '' }
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $client.ReceiveTimeout = 10000; $client.SendTimeout = 10000
+        $client.Connect($Address, $Port)
+        $stream = $client.GetStream()
+        if (-not $Plain) {
+            $caCert = $null
+            if ($CaPem) { $caCert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(, [System.Text.Encoding]::ASCII.GetBytes($CaPem)) }
+            $capture = @{ Leaf = $null }
+            $callback = [System.Net.Security.RemoteCertificateValidationCallback]{
+                param($sender, $certificate, $chain, $errors)
+                $capture.Leaf = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certificate)
+                if (-not $caCert) { return ($errors -eq [System.Net.Security.SslPolicyErrors]::None) }
+                if (($errors -band [System.Net.Security.SslPolicyErrors]::RemoteCertificateNameMismatch) -ne 0) { return $false }
+                $own = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+                $own.ChainPolicy.RevocationMode = [System.Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
+                $own.ChainPolicy.VerificationFlags = [System.Security.Cryptography.X509Certificates.X509VerificationFlags]::AllowUnknownCertificateAuthority
+                [void]$own.ChainPolicy.ExtraStore.Add($caCert)
+                [void]$own.Build($capture.Leaf)
+                $top = $own.ChainElements[$own.ChainElements.Count - 1].Certificate
+                return ($own.ChainElements.Count -ge 2 -and $top.Thumbprint -eq $caCert.Thumbprint)
+            }
+            $ssl = New-Object System.Net.Security.SslStream($stream, $false, $callback)
+            $ssl.AuthenticateAsClient($ServerName, $null, [System.Security.Authentication.SslProtocols]::Tls12, $false)
+            $result.Protocol = [string]$ssl.SslProtocol
+            $result.Leaf = $capture.Leaf
+            $stream = $ssl
+        }
+        $stream.Write($request, 0, $request.Length)
+        $buffer = New-Object System.IO.MemoryStream
+        $chunk = New-Object byte[] 8192
+        try { while (($n = $stream.Read($chunk, 0, $chunk.Length)) -gt 0) { $buffer.Write($chunk, 0, $n) } } catch { }
+        $text = [System.Text.Encoding]::UTF8.GetString($buffer.ToArray())
+        $split = $text.IndexOf("`r`n`r`n")
+        $headText = if ($split -ge 0) { $text.Substring(0, $split) } else { $text }
+        $rows = $headText -split "`r`n"
+        if ($rows[0] -match '^HTTP/\d(\.\d)? (\d{3})') { $result.Status = [int]$Matches[2] }
+        foreach ($row in ($rows | Select-Object -Skip 1)) { $c = $row.IndexOf(':'); if ($c -gt 0) { $result.Headers[$row.Substring(0, $c).ToLowerInvariant()] = $row.Substring($c + 1).Trim() } }
+        $result.Body = $(if ($split -ge 0) { $text.Substring($split + 4) } else { '' })
+    }
+    catch { $result.Error = $_.Exception.Message }
+    finally { $client.Close() }
+    return $result
 }

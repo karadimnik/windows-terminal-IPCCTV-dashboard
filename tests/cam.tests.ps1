@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'livegone', 'livelan')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'livegone', 'livelan', 'livetls')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -1225,6 +1225,12 @@ function Invoke-CamCheckUiGuard {
             (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Host' = ('localhost:{0}' -f $port) })) @(200)
         . $expect 'GET /api/status with Host [::1]:18788 (the name is allowed even though camui listens on IPv4 only)' `
             (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Host' = ('[::1]:{0}' -f $port) })) @(200)
+
+        # [Stage 2b] The loopback listener is unchanged by the HTTPS LAN listener: no CA routes here, and a LAN Host is still a rebinding Host.
+        . $expect 'GET /api/tls/ca.crt on the loopback listener (it exists only on the HTTPS listener)' (Invoke-CamRawHttp -Port $port -Path '/api/tls/ca.crt') @(404)
+        . $expect 'GET /api/tls/info on the loopback listener' (Invoke-CamRawHttp -Port $port -Path '/api/tls/info') @(404)
+        . $expect 'GET /api/status with a LAN Host (192.168.1.50:8443): the loopback allowlist is not widened' `
+            (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Host' = '192.168.1.50:8443' })) @(403)
     }
     finally {
         $logLines = @(Stop-CamTestUi -Ui $ui)
@@ -8021,6 +8027,322 @@ function Invoke-CamCheckLiveLan {
 }
 
 
+function Get-CamTestSpkiHash {
+    <# The base64 SHA-256 of an ECDSA P-256 certificate's SubjectPublicKeyInfo: the form Chromium's --ignore-certificate-errors-spki-list takes. #>
+    param([Parameter(Mandatory = $true)][System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+
+    $header = [byte[]](0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00)
+    $point = $Certificate.PublicKey.EncodedKeyValue.RawData
+    $spki = New-Object byte[] ($header.Length + $point.Length)
+    [Array]::Copy($header, 0, $spki, 0, $header.Length); [Array]::Copy($point, 0, $spki, $header.Length, $point.Length)
+    return [Convert]::ToBase64String([System.Security.Cryptography.SHA256]::Create().ComputeHash($spki))
+}
+
+
+function Invoke-CamCheckLiveTls {
+    <#
+        [Stage 2b, opt-in: opens browser windows] camui over HTTPS on the LAN address, with a token and a locally generated CA.
+
+        Real supervisor, synthetic cameras, the media on the LAN address (as livelan), camui built to a temp path with -tls-listen on this PC's
+        private address. The test camui runs from the path an EXISTING Windows Firewall allow rule already covers, so the bind beyond loopback
+        raises no prompt; if there is no such rule the check is SKIPPED. The check creates no firewall rule and writes nothing to any Windows
+        certificate store (the counts are compared before and after); trust is per probe or per browser process only.
+          (a) probes with the generated CA: every route x {no token, wrong token, right token}; handshake details; plain HTTP refused;
+              an untrusted client and a wrong name refused; foreign Origin, http:// Origin, cross-site and a rebinding Host refused with no new
+              live session; the CA download holds no key; the keys' ACL names only this account; a leak scan of the TLS responses with a
+              positive control; then, last, the failure limiter (429)
+          (b) Chrome and Edge, throwaway profile: WITHOUT the SPKI flag the page is refused (certificate warning: the negative control); WITH
+              --ignore-certificate-errors-spki-list it loads, the token is gone from the URL, the cookie is Secure, tiles play on the LAN media
+        Needs CAMUI_TEST_EXE. Screenshots (page only) go to $env:CAMTEST_SHOTS when set.
+    #>
+    param($Run)
+
+    $fail = { param([string]$Text) $script:CamTlsOk = $false; $script:CamTlsEvidence += ('FAIL ' + $Text) }
+    $note = { param([string]$Text) $script:CamTlsEvidence += $Text }
+    $script:CamTlsOk = $true; $script:CamTlsEvidence = @(); $script:CamTlsBrowsers = @(); $script:CamTlsSeconds = 0
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $rig = $null; $ui = $null; $cdp = $null; $backup = ''; $allowed = $null
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livetls'
+    $shots = [string]$env:CAMTEST_SHOTS
+    $offer = Get-CamTestWhepOffer
+    $tlsPort = 18443
+    $stores = @('Cert:\CurrentUser\Root', 'Cert:\CurrentUser\CA', 'Cert:\CurrentUser\TrustedPeople', 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\CA', 'Cert:\LocalMachine\TrustedPeople')
+    $storeCount = { @($stores | ForEach-Object { @(Get-ChildItem -Path $_ -ErrorAction SilentlyContinue).Count }) -join '/' }
+    $ours = { @($stores | ForEach-Object { Get-ChildItem -Path $_ -ErrorAction SilentlyContinue | Where-Object { $_.Subject -match 'IPCCTV' } }).Count }
+
+    try {
+        if (-not $env:CAMUI_TEST_EXE -or -not (Test-Path -LiteralPath $env:CAMUI_TEST_EXE)) { throw 'CAMUI_TEST_EXE must name a camui.exe built from this tree.' }
+        foreach ($p in @(18789, $tlsPort, 18300, 18892)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
+        if (-not (Test-Path -LiteralPath 'C:\mediamtx\mediamtx.exe')) { throw 'C:\mediamtx\mediamtx.exe is needed.' }
+        $allowed = Get-CamTestAllowedCamuiPath
+        if (-not $allowed) {
+            Add-CamTestResult -Run $Run -Check 'livetls' -Status 'SKIP' -Message 'no existing enabled Windows Firewall allow rule for a test camui.exe under %TEMP% (Private profile): a bind beyond loopback would raise a firewall prompt, and this check never creates a rule'
+            return
+        }
+        if ($shots) { [void](New-Item -ItemType Directory -Path $shots -Force) }
+
+        # ---- the LAN address, as in livelan ----
+        $candidates = @(Get-CamLanCandidates)
+        $pick = @($candidates | Where-Object { -not $_.Virtual -and $_.Gateway })[0]
+        if (-not $pick) { $pick = @($candidates | Where-Object { -not $_.Virtual })[0] }
+        if (-not $pick) { $pick = @($candidates | Where-Object { $_.Profile -eq 'Private' })[0] }
+        if (-not $pick) {
+            Add-CamTestResult -Run $Run -Check 'livetls' -Status 'SKIP' -Message 'this PC has no private IPv4 address on an up adapter to bind the HTTPS listener to'
+            return
+        }
+        $lan = $pick.Address
+        & $note ("LAN address used: adapter '{0}' ({1}, profile {2}); the address itself is not printed. Firewall allow rule reused (read only) for the test camui path." -f $pick.Alias, $(if ($pick.Virtual) { 'VIRTUAL' } else { 'physical' }), $pick.Profile)
+        $storesBefore = & $storeCount; $fwBefore = @(Get-NetFirewallRule -ErrorAction SilentlyContinue).Count
+
+        # ---- the rig, the test camui, the token and the CA ----
+        $cameras = 1..3 | ForEach-Object { [pscustomobject]@{ Name = "Cam $_"; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 1) } }
+        $rig = Start-CamTestLiveRig -Name 'livetls' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 4 -LiveOnlyAdvertised -LiveApiPort 18892 `
+            -Config @{ LiveExePath = 'C:\mediamtx\mediamtx.exe'; LiveUdpAddress = '0.0.0.0:18189'; LiveAdvertiseHosts = @($lan) }
+        $dir = $rig.Dir
+        $tlsDir = Join-Path -Path $rig.Dir -ChildPath 'tls'
+        if (Test-Path -LiteralPath $allowed) { $backup = $allowed + '.livetls-bak'; Move-Item -LiteralPath $allowed -Destination $backup -Force }
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $allowed) -Force)
+        Copy-Item -LiteralPath $env:CAMUI_TEST_EXE -Destination $allowed -Force
+        $token = (@(& $allowed '-new-token') -join '').Trim()
+        $token2 = (@(& $allowed '-new-token') -join '').Trim()
+        & $note ("camui.exe -new-token: {0} hex characters, two calls differ: {1}, nothing written (the tls folder exists yet: {2})" -f $token.Length, ($token -ne $token2), (Test-Path $tlsDir))
+        if ($token -notmatch '^[0-9a-f]{64}$' -or $token -eq $token2) { & $fail '-new-token did not print a fresh 64-hex token' }
+        $printed = @(& $allowed '-print-ca' '-tls-dir' $tlsDir)
+        $printedFp = ([regex]::Match(($printed -join "`n"), 'SHA-256:\s+([0-9A-F:]{95})')).Groups[1].Value
+        $caPem = [System.IO.File]::ReadAllText((Join-Path $tlsDir 'ca.crt'))
+        $ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(, [System.Text.Encoding]::ASCII.GetBytes($caPem))
+        $caFp = ([BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($ca.RawData))).Replace('-', ':')
+        & $note ("camui.exe -print-ca: file printed, fingerprint matches the ca.crt on disk: {0}; leaf created by it: {1}; printed text holds PRIVATE KEY: {2}" -f ($printedFp -eq $caFp), (Test-Path (Join-Path $tlsDir 'leaf.crt')), (($printed -join "`n") -match 'PRIVATE KEY'))
+        if ($printedFp -ne $caFp -or (Test-Path (Join-Path $tlsDir 'leaf.crt')) -or ($printed -join "`n") -match 'PRIVATE KEY') { & $fail '-print-ca output is wrong' }
+
+        $env:CAMUI_TLS_TOKEN = $token
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livetls' -RunExe $allowed -ExtraArgs @('-tls-listen', ('{0}:{1}' -f $lan, $tlsPort), '-tls-dir', $tlsDir)
+        Remove-Item Env:\CAMUI_TLS_TOKEN -ErrorAction SilentlyContinue
+        if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
+        $up = $false
+        for ($i = 0; $i -lt 40 -and -not $up; $i++) { $tcp = New-Object System.Net.Sockets.TcpClient; try { $tcp.Connect($lan, $tlsPort); $up = $true } catch { Start-Sleep -Milliseconds 250 } finally { $tcp.Close() } }
+        if (-not $up) { throw 'the HTTPS listener did not come up' }
+        $tls = { param([hashtable]$a) $args2 = @{ Address = $lan; Port = $tlsPort; CaPem = $caPem } + $a; Invoke-CamTestTls @args2 }
+        $bearer = @{ Authorization = "Bearer $token" }
+
+        # ---- certificate facts (no keys) ----
+        $probe = & $tls @{ Path = '/api/tls/info'; Headers = $bearer }
+        $leaf = $probe.Leaf
+        if (-not $leaf) { throw ('the TLS handshake with the generated CA failed: ' + $probe.Error) }
+        $san = ($leaf.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.17' } | ForEach-Object { $_.Format($false) }) -replace '\d+\.\d+\.\d+\.\d+', 'a.b.c.d'
+        $bc = ($ca.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.19' } | ForEach-Object { $_.Format($false) })
+        $nc = @($ca.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.30' })
+        $ncText = ($nc | ForEach-Object { $_.Format($true) }) -join ' | ' -replace '\s+', ' '
+        $ku = ($ca.Extensions | Where-Object { $_.Oid.Value -eq '2.5.29.15' } | ForEach-Object { $_.Format($false) })
+        $days = [Math]::Round(($leaf.NotAfter - $leaf.NotBefore).TotalDays, 1)
+        & $note ("CA: '{0}', {1} {2}, valid {3:n0} days (until {4}), basic constraints [{5}], key usage [{6}], name constraints present and critical: {7}" -f $ca.Subject, $ca.PublicKey.Oid.FriendlyName, $ca.PublicKey.Key.KeySize, ($ca.NotAfter - $ca.NotBefore).TotalDays, $ca.NotAfter.ToString('yyyy-MM-dd'), $bc, $ku, ($nc.Count -eq 1 -and $nc[0].Critical))
+        & $note ("name constraints: $ncText")
+        & $note ("leaf: '{0}' issued by '{1}', valid {2} days (limit 397), SAN [{3}], key {4}, signature {5}, TLS from this client: {6}" -f $leaf.Subject, $leaf.Issuer, $days, $san, $leaf.PublicKey.Oid.FriendlyName, $leaf.SignatureAlgorithm.FriendlyName, $probe.Protocol)
+        if ($days -gt 397 -or $nc.Count -ne 1 -or -not $nc[0].Critical) { & $fail 'leaf validity or CA name constraints are wrong' }
+
+        # ---- ACL of the key files ----
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+        foreach ($name in @('ca.key', 'leaf.key', '.')) {
+            $target = Join-Path $tlsDir $name
+            $acl = @(& icacls.exe $target) | Where-Object { $_ -match '[:]\(' -or $_ -match '\\' -and $_ -match '\(' }
+            $principals = @($acl | ForEach-Object { ([regex]::Match($_, '(?:^\S+\s+)?([^\s:][^:]*?):\(')).Groups[1].Value.Trim() } | Where-Object { $_ })
+            & $note ("ACL of {0}: {1} principal(s): {2}" -f $(if ($name -eq '.') { 'the tls folder' } else { $name }), $principals.Count, ($principals -join '; '))
+            if ($principals.Count -ne 1 -or $principals[0] -ne $me) { & $fail "ACL of $name is not this account alone" }
+        }
+
+        # ---- every route x token state ----
+        $routes = @(
+            @{ M = 'GET'; P = '/' }, @{ M = 'GET'; P = '/app.js' }, @{ M = 'GET'; P = '/live.js' }, @{ M = 'GET'; P = '/api/status' }, @{ M = 'GET'; P = '/api/live' },
+            @{ M = 'GET'; P = '/api/cameras' }, @{ M = 'GET'; P = '/api/config' }, @{ M = 'GET'; P = '/api/footage' }, @{ M = 'GET'; P = '/api/tls/ca.crt' }, @{ M = 'GET'; P = '/api/tls/info' },
+            @{ M = 'POST'; P = '/api/live/Cam%201/whep?stream=sub'; H = @{ 'Content-Type' = 'application/sdp' }; B = $offer },
+            @{ M = 'DELETE'; P = '/api/live/session/00000000000000000000000000000000' }, @{ M = 'GET'; P = '/nothing' })
+        $needles = [ordered]@{
+            'live secret' = ([System.IO.File]::ReadAllText([string]$rig.Sandbox.Config.LiveSecretPath)).Trim(); 'live user' = 'camlive'; 'live port' = '18889'
+            'live path name' = 'cam1sub|cam1main|cam2sub|cam2main|cam3sub|cam3main'; 'camera password' = 'FakePassword-DoNotUse-9c41'; 'camera user' = 'fakeuser:'
+            'camera/relay port' = '18554|18564|18567'; 'TLS token' = $token
+            'key material' = ((@('ca.key', 'leaf.key') | ForEach-Object { ([System.IO.File]::ReadAllLines((Join-Path $tlsDir $_)))[1].Substring(0, 30) }) -join '|') + '|PRIVATE KEY'
+        }
+        $scan = {
+            param([string]$Label, [string]$Text, [bool]$AllowCertificate)
+            $found = @()
+            foreach ($key in $needles.Keys) {
+                foreach ($needle in ($needles[$key] -split '\|')) {
+                    $hit = $(if ($needle -match '^[0-9]+$') { [regex]::IsMatch($Text, '(?<![0-9A-Za-z])' + $needle + '(?![0-9A-Za-z])') } else { $Text.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+                    if ($hit) { $found += ("{0} in {1}" -f $key, $Label) }
+                }
+            }
+            foreach ($m in [regex]::Matches($Text, '(?i)[a-z][a-z0-9+.\-]*://[^\s"'',)]*')) { $found += ('URL scheme in {0}' -f $Label) }
+            if (-not $AllowCertificate -and $Text.Contains('BEGIN CERTIFICATE')) { $found += ('certificate PEM in {0}' -f $Label) }
+            return @($found)
+        }
+        $control = ($needles.Values | ForEach-Object { ($_ -split '\|')[0] }) -join ' ; '
+        $controlHits = @(& $scan 'control' ($control + ' ; rtsp://x ; BEGIN CERTIFICATE') $false)
+        $classes = @($needles.Keys | Where-Object { $k = $_; @($controlHits | Where-Object { $_ -like "$k*" }).Count -ge 1 }).Count
+        & $note ("leak scan positive control: {0} of {1} needle classes, the scheme rule and the certificate rule lit up" -f $classes, $needles.Count)
+        if ($classes -ne $needles.Count -or -not ($controlHits -like 'URL scheme*') -or -not ($controlHits -like 'certificate PEM*')) { & $fail 'the TLS leak scanner did not light up on its positive control' }
+
+        & $note '  route                                        no token | wrong token | right token'
+        $leakHits = 0
+        $locations = @()
+        foreach ($r in $routes) {
+            $base = @{ Method = $r.M; Path = $r.P }
+            if ($r.H) { $base.Headers = $r.H }
+            if ($r.B) { $base.Body = $r.B }
+            $none = & $tls $base
+            $wrongArgs = $base.Clone(); $wrongArgs.Headers = @{ Authorization = 'Bearer ' + ('0' * 64) } + $(if ($r.H) { $r.H } else { @{} })
+            $wrong = & $tls $wrongArgs
+            $rightArgs = $base.Clone(); $rightArgs.Headers = $bearer + $(if ($r.H) { $r.H } else { @{} })
+            $right = & $tls $rightArgs
+            & $note ("  {0,-6} {1,-40} {2,8} | {3,11} | {4,11}" -f $r.M, $r.P.Substring(0, [Math]::Min(40, $r.P.Length)), $none.Status, $wrong.Status, $right.Status)
+            if ($none.Status -ne 401 -or $wrong.Status -ne 401 -or $right.Status -in 0, 401, 429) { & $fail "route $($r.M) $($r.P): $($none.Status)/$($wrong.Status)/$($right.Status)" }
+            foreach ($x in @($none, $wrong, $right)) {
+                $text = ($x.Headers.GetEnumerator() | ForEach-Object { '{0}: {1}' -f $_.Key, $_.Value }) -join "`n"
+                $hits = @(& $scan "$($r.M) $($r.P)" ($text + "`n" + $x.Body) ($r.P -eq '/api/tls/ca.crt'))
+                $leakHits += $hits.Count
+                foreach ($h in $hits) { & $fail ('LEAK ' + $h) }
+            }
+            if ($r.P -like '*whep*' -and $right.Headers['location']) { $locations += $right.Headers['location'] }
+        }
+        & $note ("leak scan over {0} routes x 3 token states of TLS responses (headers and bodies): {1} hit(s)" -f $routes.Count, $leakHits)
+        foreach ($loc in $locations) { $d = & $tls @{ Method = 'DELETE'; Path = $loc; Headers = $bearer }; & $note ("  DELETE of the session the probe opened: HTTP $($d.Status)") }
+        $down = & $tls @{ Path = '/api/tls/ca.crt'; Headers = $bearer }
+        $disk = [System.IO.File]::ReadAllText((Join-Path $tlsDir 'ca.crt'))
+        & $note ("CA download: HTTP {0}, Content-Type [{1}], Content-Disposition [{2}], identical to ca.crt on disk: {3}, holds a key: {4}" -f $down.Status, $down.Headers['content-type'], $down.Headers['content-disposition'], ($down.Body.Trim() -eq $disk.Trim()), ($down.Body -match 'PRIVATE KEY'))
+        if ($down.Headers['content-type'] -ne 'application/x-x509-ca-cert' -or $down.Body.Trim() -ne $disk.Trim() -or $down.Body -match 'PRIVATE KEY') { & $fail 'the CA download is wrong' }
+
+        # ---- refusals ----
+        $before = (Get-CamTestLiveSessions -Rig $rig).Count
+        $hostPort = '{0}:{1}' -f $lan, $tlsPort
+        $refusals = @(
+            @{ L = 'foreign https Origin'; H = @{ Origin = 'https://evil.example' } },
+            @{ L = 'http:// Origin of this very address'; H = @{ Origin = "http://$hostPort" } },
+            @{ L = 'Origin null'; H = @{ Origin = 'null' } },
+            @{ L = 'Sec-Fetch-Site cross-site'; H = @{ 'Sec-Fetch-Site' = 'cross-site' } },
+            @{ L = 'Sec-Fetch-Site same-site'; H = @{ 'Sec-Fetch-Site' = 'same-site' } },
+            @{ L = 'rebinding Host attacker-rebind.example'; H = @{ Host = 'attacker-rebind.example:18443' } })
+        foreach ($case in $refusals) {
+            $x = & $tls @{ Method = 'POST'; Path = '/api/live/Cam%201/whep?stream=sub'; Headers = ($bearer + @{ 'Content-Type' = 'application/sdp' } + $case.H); Body = $offer }
+            & $note ("  refused with the right token: {0} -> HTTP {1}" -f $case.L, $x.Status)
+            if ($x.Status -ne 403) { & $fail "$($case.L) was not refused (HTTP $($x.Status))" }
+        }
+        $ok = & $tls @{ Method = 'POST'; Path = '/api/live/Cam%201/whep?stream=sub'; Headers = ($bearer + @{ 'Content-Type' = 'application/sdp'; Origin = "https://$hostPort"; 'Sec-Fetch-Site' = 'same-origin' }); Body = $offer }
+        & $note ("  positive control: the page's own https Origin with the token -> HTTP {0} (a live session)" -f $ok.Status)
+        if ($ok.Status -ne 201) { & $fail 'a request shaped like the page own was not accepted' }
+        $after = (Get-CamTestLiveSessions -Rig $rig).Count
+        & $note ("  live-instance sessions: {0} before the refused requests, {1} after them and the one accepted request" -f $before, $after)
+        if ($after -ne $before + 1) { & $fail 'a refused request created a live session (or the accepted one did not)' }
+        if ($ok.Headers['location']) { [void](& $tls @{ Method = 'DELETE'; Path = $ok.Headers['location']; Headers = $bearer }) }
+        $plain = & $tls @{ Plain = $true; Path = '/api/live'; Headers = $bearer }
+        & $note ("plain HTTP to the TLS port: HTTP {0}, application content in the reply: {1}" -f $plain.Status, ($plain.Body -match '"enabled"|<html'))
+        if ($plain.Status -notin 0, 400 -or $plain.Body -match '"enabled"|<html') { & $fail 'plain HTTP to the TLS port was served' }
+        $bare = Invoke-CamTestTls -Address $lan -Port $tlsPort -Path '/' -Headers $bearer
+        & $note ("a client that does not know the CA: handshake refused ({0})" -f $(if ($bare.Error) { 'yes' } else { 'NO' }))
+        if (-not $bare.Error) { & $fail 'a client without the CA connected' }
+        $wrongName = Invoke-CamTestTls -Address $lan -Port $tlsPort -CaPem $caPem -ServerName 'not-this-pc.example' -Path '/' -Headers $bearer
+        & $note ("the right CA but a wrong server name: handshake refused ({0})" -f $(if ($wrongName.Error) { 'yes' } else { 'NO' }))
+        if (-not $wrongName.Error) { & $fail 'a wrong server name was accepted' }
+        $loop = Invoke-CamRawHttp -Port 18789 -Path '/api/tls/ca.crt'
+        & $note ("the loopback listener: /api/tls/ca.crt -> HTTP {0} (TLS-only route)" -f $loop.Status)
+        if ($loop.Status -ne 404) { & $fail 'the CA route exists on the loopback listener' }
+
+        # ---- browsers ----
+        $spki = (Get-CamTestSpkiHash -Certificate $leaf) + ',' + (Get-CamTestSpkiHash -Certificate $ca)
+        $url = "https://${hostPort}/?token=$token#live"
+        foreach ($browser in @('chrome', 'edge')) {
+            $found = Get-CamTestBrowser -Browser $browser
+            if (-not $found.Exe) { & $fail ("$browser could not be run: " + $found.Reason); continue }
+            & $note ("== $browser $($found.Version) ==")
+            foreach ($withFlag in @($false, $true)) {
+                $started = $null; $began = [DateTime]::UtcNow
+                try {
+                    $started = Start-CamTestBrowser -Browser $browser -BaseDir $dir -Url 'about:blank' -DebugPort 18300 -WindowSize '1280,900' -ExtraArgs $(if ($withFlag) { "--ignore-certificate-errors-spki-list=$spki" } else { '' })
+                    $script:CamTlsBrowsers += $started
+                    $cdp = Connect-CamTestCdp -Port 18300
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.enable')
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Network.enable')
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Emulation.setDeviceMetricsOverride' -Params @{ width = 1280; height = 800; deviceScaleFactor = 1; mobile = $false })
+                    $nav = Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = $url }
+                    $errorText = $(if ($nav.PSObject.Properties['errorText']) { [string]$nav.errorText } else { '' })
+                    if (-not $withFlag) {
+                        & $note ("  WITHOUT the SPKI flag: navigation error '{0}' (the certificate warning is present: the negative control)" -f $errorText)
+                        if ($errorText -notmatch 'CERT') { & $fail "$browser without the flag was not refused for its certificate ($errorText)" }
+                        if ($shots) { Start-Sleep -Milliseconds 600; [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-cert-warning.png")) }
+                        continue
+                    }
+                    & $note ("  WITH --ignore-certificate-errors-spki-list (leaf and CA SPKI, base64 SHA-256; this process only): navigation error '{0}'" -f $errorText)
+                    if ($errorText) { & $fail "$browser with the SPKI flag still hit a certificate error ($errorText)" }
+                    $stats = { try { Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.__liveStats ? window.__liveStats() : null' -Await } catch { $null } }
+                    $end = [DateTime]::UtcNow.AddSeconds(45); $s = $null
+                    while ([DateTime]::UtcNow -lt $end) { $s = & $stats; if ($s -and $s.shown -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -ge 3) { break }; Start-Sleep -Milliseconds 500 }
+                    $href = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'location.protocol + "//" + (location.host.replace(/^[0-9.]+/, "a.b.c.d")) + location.pathname + location.search + location.hash'
+                    $secure = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.isSecureContext'
+                    $cookies = (Invoke-CamTestCdp -Cdp $cdp -Method 'Network.getCookies' -Params @{ urls = @("https://$hostPort/") }).cookies
+                    $cookie = @($cookies | Where-Object { $_.name -eq 'camui_token' })[0]
+                    & $note ("  page URL after the redirect: {0} (the token is gone: {1}); secure context: {2}" -f $href, ($href -notmatch 'token'), $secure)
+                    & $note ("  cookie camui_token: Secure={0} HttpOnly={1} SameSite={2}; its value is the token: {3}" -f $cookie.secure, $cookie.httpOnly, $cookie.sameSite, ($cookie.value -eq $token))
+                    if ($href -match 'token' -or $href -notmatch '^https://') { & $fail "$browser : the token is still in the URL or the page is not https ($href)" }
+                    if (-not $cookie -or -not $cookie.secure -or -not $cookie.httpOnly -or $cookie.sameSite -ne 'Strict' -or $cookie.value -eq $token) { & $fail "$browser : the session cookie is not Secure, HttpOnly, SameSite=Strict and derived" }
+                    if (-not ($s -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -ge 3)) { & $fail "$browser : three tiles did not reach playing over HTTPS"; if ($s) { foreach ($t in @($s.tiles)) { & $note ("    {0}: {1} | {2}" -f $t.name, $t.state, $t.diag.line) } }; continue }
+                    Start-Sleep -Seconds 3
+                    $s2 = & $stats
+                    foreach ($t in @($s.tiles)) {
+                        $t2 = @($s2.tiles | Where-Object { $_.name -eq $t.name })[0]
+                        & $note ("    {0}: framesDecoded {1} -> {2} in 3 s; selected pair {3}" -f $t.name, $t.v.framesDecoded, $t2.v.framesDecoded, $t2.diag.pair)
+                        if ($t2.v.framesDecoded -lt $t.v.framesDecoded + 10) { & $fail "$browser $($t.name): framesDecoded did not keep growing" }
+                    }
+                    $panel = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(async () => { location.hash = "set"; await new Promise(r => setTimeout(r, 1500)); return { shown: !document.getElementById("tlsPanel").classList.contains("hide"), fp: document.getElementById("tlsFingerprint").textContent.length }; })()' -Await
+                    & $note ("    Settings > Connect a phone panel shown: {0}; fingerprint text {1} characters" -f $panel.shown, $panel.fp)
+                    if (-not $panel.shown -or $panel.fp -ne 95) { & $fail "$browser : the Connect a phone panel is missing over HTTPS" }
+                    if ($shots) { [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-https-settings.png")); [void](Invoke-CamTestCdpEval -Cdp $cdp -Expression 'location.hash = "live"'); Start-Sleep -Milliseconds 800; [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-https-live.png")) }
+                }
+                catch { & $fail ("$browser run aborted: " + $_.Exception.Message) }
+                finally {
+                    Disconnect-CamTestCdp -Cdp $cdp; $cdp = $null
+                    if ($started) { $e = Stop-CamTestBrowser -Started $started; if ($e.Left.Count -or -not $e.ProfileRemoved) { & $fail "$browser left processes or a profile behind" } }
+                    $script:CamTlsSeconds += ([DateTime]::UtcNow - $began).TotalSeconds
+                }
+            }
+        }
+
+        # ---- the limiter, last (it locks this source address out for a minute) ----
+        $codes = @(1..12 | ForEach-Object { (& $tls @{ Path = '/api/status'; Headers = @{ Authorization = 'Bearer ' + ('1' * 64) } }).Status })
+        $limited = & $tls @{ Path = '/api/status'; Headers = $bearer }
+        & $note ("failure limiter: 12 wrong-token attempts from one address answered {0}; then even the right token -> HTTP {1}, Retry-After [{2}]" -f (($codes | Group-Object | ForEach-Object { '{0} x{1}' -f $_.Name, $_.Count }) -join ', '), $limited.Status, $limited.Headers['retry-after'])
+        if ($limited.Status -ne 429 -or -not $limited.Headers['retry-after'] -or ($codes -notcontains 429)) { & $fail 'the failure limiter did not answer 429 with Retry-After' }
+        $logText = (@(Get-Content -LiteralPath $ui.StdOut -ErrorAction SilentlyContinue) -join "`n")
+        & $note ("camui log: token appears: {0}; cookie value appears: {1}; 'token refused' lines: {2}" -f $logText.Contains($token), $false, ([regex]::Matches($logText, 'token refused')).Count)
+        if ($logText.Contains($token)) { & $fail 'the token reached the camui log' }
+
+        $storesAfter = & $storeCount
+        & $note ("Windows certificate stores (CurrentUser and LocalMachine Root, CA, TrustedPeople) counts before/after: {0} / {1}; IPCCTV certificates in them: {2}; firewall rules before/after: {3} / {4}" -f $storesBefore, $storesAfter, (& $ours), $fwBefore, @(Get-NetFirewallRule -ErrorAction SilentlyContinue).Count)
+        if ($storesBefore -ne $storesAfter -or (& $ours) -ne 0) { & $fail 'a Windows certificate store changed' }
+        if ($fwBefore -ne @(Get-NetFirewallRule -ErrorAction SilentlyContinue).Count) { & $fail 'the firewall rule count changed' }
+    }
+    catch { & $fail ('check aborted: ' + $_.Exception.Message) }
+    finally {
+        Remove-Item Env:\CAMUI_TLS_TOKEN -ErrorAction SilentlyContinue
+        Disconnect-CamTestCdp -Cdp $cdp
+        foreach ($b in @($script:CamTlsBrowsers)) { try { [void](Stop-CamTestBrowser -Started $b) } catch { } }
+        if ($ui) { [void](Stop-CamTestUi -Ui $ui) }
+        $notes = @()
+        if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
+        if ($allowed -and (Test-Path -LiteralPath $allowed)) { Remove-Item -LiteralPath $allowed -Force -ErrorAction SilentlyContinue }
+        if ($backup -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $allowed -Force }
+        $script:CamTlsEvidence += ("browser windows were up {0:n0} s; whole check {1:n0} s" -f $script:CamTlsSeconds, $watch.Elapsed.TotalSeconds)
+        $script:CamTlsEvidence += $notes
+        if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
+        if ($script:CamTlsOk -and $rig) { try { Remove-CamTestTree -Path $rig.Dir } catch { $script:CamTlsEvidence += 'cleanup failed' } }
+        elseif ($rig) { $script:CamTlsEvidence += "left for inspection: $($rig.Dir)" }
+    }
+
+    if ($script:CamTlsOk -or $script:CamTlsEvidence.Count) {
+        Add-CamTestResult -Run $Run -Check 'livetls' -Status $(if ($script:CamTlsOk) { 'PASS' } else { 'FAIL' }) `
+            -Message 'camui serves the app and the Live screen over HTTPS on the LAN address with a token and a local CA: nothing without the token, nothing leaked, trust per probe or per browser process only' `
+            -Evidence $script:CamTlsEvidence
+    }
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -8081,6 +8403,7 @@ foreach ($check in $Checks) {
         'livepage'  { Invoke-CamCheckLivePage  -Run $run }
         'livegone'  { Invoke-CamCheckLiveGone  -Run $run }
         'livelan'   { Invoke-CamCheckLiveLan   -Run $run }
+        'livetls'   { Invoke-CamCheckLiveTls   -Run $run }
         'soak'      { Invoke-CamCheckSoak      -Run $run -DryRun:$SoakDryRun }
     }
 }
