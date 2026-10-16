@@ -8437,40 +8437,6 @@ function Invoke-CamCheckLiveRobust {
                     if ($null -eq $res.Recover) { & $fail "${browser} recover (c): the tiles did not come back after the camera restarted" }
                     $null = & $until { param($s) & $playing $s 6 3 } 20
 
-                    # (d) the page is frozen for 40 s and thawed (the closest to a PC that slept)
-                    $r0 = (& $stats).recoveries
-                    $liveBefore = & $sessions
-                    $t0 = Get-Date
-                    $frozenOk = $true
-                    try { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.setWebLifecycleState' -Params @{ state = 'frozen' }) } catch { $frozenOk = $false; & $note ("  (d) Page.setWebLifecycleState frozen refused: " + $_.Exception.Message) }
-                    if ($frozenOk) {
-                        Start-Sleep -Seconds 40
-                        $liveFrozen = & $sessions
-                        $t1 = Get-Date
-                        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.setWebLifecycleState' -Params @{ state = 'active' })
-                        $res = & $watchRecovery $t1 90
-                        $e = & $stats
-                        & $note ("  (d) page frozen 40 s: live sessions {0} before, {1} at the end of the freeze; thawed: tiles not playing after {2} s, all six playing again {3} s after the thaw; recoveries counted {4}" -f $liveBefore, $liveFrozen, (& $fmt $res.Detect), (& $fmt $res.Recover), ($e.recoveries - $r0))
-                        if ($null -eq $res.Recover -and $null -ne $res.Detect) { & $fail "${browser} recover (d): tiles did not come back after the page thawed" }
-                        if ($null -eq $res.Detect) { $e2 = & $stats; if (-not (& $playing $e2 6 3)) { & $fail "${browser} recover (d): tiles are not playing after the thaw" } else { & $note "      (the pictures never stopped: no recovery was needed)" } }
-                    }
-                    $null = & $until { param($s) & $playing $s 6 3 } 40
-
-                    # (d2) the whole browser is suspended for 40 s (every process of this test browser, by pid): the nearest thing to a PC that slept
-                    $r0 = (& $stats).recoveries
-                    $ids = @(Get-CamTestBrowserPids -Started $started | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue })
-                    $liveBefore = & $sessions
-                    foreach ($id in $ids) { try { Suspend-CamTestProcess -ProcessId $id } catch { } }
-                    Start-Sleep -Seconds 40
-                    foreach ($id in $ids) { try { Suspend-CamTestProcess -ProcessId $id -Resume } catch { } }
-                    $t1 = Get-Date
-                    $liveAfter = & $sessions
-                    $res = & $watchRecovery $t1 90
-                    $e = & $stats
-                    & $note ("  (d2) browser suspended 40 s ({0} processes): live sessions {1} before, {2} right after the thaw; tiles not playing after {3} s, all six playing again {4} s after the thaw; recoveries counted {5}" -f $ids.Count, $liveBefore, $liveAfter, (& $fmt $res.Detect), (& $fmt $res.Recover), ($e.recoveries - $r0))
-                    if ($null -eq $res.Recover -and $null -ne $res.Detect) { & $fail "${browser} recover (d2): tiles did not come back after the browser was suspended" }
-                    $null = & $until { param($s) & $playing $s 6 3 } 40
-                    & $modalProbe 'the browser sleep'
                     [void](& $js "window.__liveTune({ grace: null })")
                 }
 
@@ -8530,6 +8496,7 @@ function Invoke-CamCheckLiveRobust {
                         [int]((Invoke-CamTestCdp -Cdp $cdp -Method 'Runtime.getHeapUsage').usedSize / 1024)
                     }
                     [void](Invoke-CamTestCdp -Cdp $cdp -Method 'HeapProfiler.enable')
+                    [void](& $sessionsIs 6 45)    # sessions orphaned by a hung server time out on their own
                     Start-Sleep -Seconds 2
                     $b = [pscustomobject]@{ Live = (& $sessions); Rx = (& $rx); Heap = (& $heap); Readers = (& $readers) }
                     for ($i = 1; $i -le 10; $i++) {
@@ -8589,6 +8556,54 @@ function Invoke-CamCheckLiveRobust {
                     [void](& $js "window.__liveTune({ offMs: 60000 }); window.scrollTo(0, 0)")
                     & $viewport 1920 1080
                 }
+
+                # ---- sleep: a PC that sleeps ----
+                if (& $want 'sleep') {
+                    & $note "  -- sleep --"
+                    $null = & $until { param($s) & $playing $s } 60
+                    [void](& $js "window.__liveTune({ grace: -1 })")
+                    # the page's renderer process is suspended for 40 s (by pid): the nearest thing to a PC that slept. Suspending the GPU and browser processes too left the headless compositor wedged in a rehearsal, so only renderers are suspended.
+                    $r0 = (& $stats).recoveries
+                    $ids = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, CommandLine | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($started.Profile) -and $_.CommandLine -match '--type=renderer' } | ForEach-Object { [int]$_.ProcessId })
+                    $liveBefore = & $sessions
+                    foreach ($id in $ids) { try { Suspend-CamTestProcess -ProcessId $id } catch { } }
+                    Start-Sleep -Seconds 40
+                    foreach ($id in $ids) { try { Suspend-CamTestProcess -ProcessId $id -Resume } catch { } }
+                    $t1 = Get-Date
+                    $liveAfter = & $sessions
+                    $res = & $watchRecovery $t1 90
+                    $e = & $stats
+                    & $note ("  sleep: renderer suspended 40 s ({0} processes): live sessions {1} before, {2} right after the thaw; tiles not playing after {3} s, all six playing again {4} s after the thaw; recoveries counted {5}" -f $ids.Count, $liveBefore, $liveAfter, (& $fmt $res.Detect), (& $fmt $res.Recover), ($e.recoveries - $r0))
+                    if ($null -eq $res.Recover -and $null -ne $res.Detect) { & $fail "${browser} sleep: tiles did not come back after the browser was suspended" }
+                    $null = & $until { param($s) & $playing $s 6 3 } 40
+                    & $modalProbe 'the renderer sleep'
+                    [void](& $js "window.__liveTune({ grace: null })")
+                }
+
+                # ---- freeze ----
+                if (& $want 'freeze') {
+                    & $note "  -- freeze --"
+                    $null = & $until { param($s) & $playing $s } 60
+                    # the page is frozen (CDP Page.setWebLifecycleState) for 40 s and thawed. LAST in the run: in headless Chrome the page does not paint again after it (rVFC never fires)
+                    $r0 = (& $stats).recoveries
+                    $liveBefore = & $sessions
+                    $t0 = Get-Date
+                    $frozenOk = $true
+                    try { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.setWebLifecycleState' -Params @{ state = 'frozen' }) } catch { $frozenOk = $false; & $note ("  (d) Page.setWebLifecycleState frozen refused: " + $_.Exception.Message) }
+                    if ($frozenOk) {
+                        Start-Sleep -Seconds 40
+                        $liveFrozen = & $sessions
+                        $t1 = Get-Date
+                        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.setWebLifecycleState' -Params @{ state = 'active' })
+                        $res = & $watchRecovery $t1 90
+                        $e = & $stats
+                        & $note ("  freeze: page frozen 40 s: live sessions {0} before, {1} at the end of the freeze; thawed: tiles not playing after {2} s, all six playing again {3} s after the thaw; recoveries counted {4}" -f $liveBefore, $liveFrozen, (& $fmt $res.Detect), (& $fmt $res.Recover), ($e.recoveries - $r0))
+                        if ($null -eq $res.Recover -and $null -ne $res.Detect) { & $fail "${browser} freeze: tiles did not come back after the page thawed" }
+                        if ($null -eq $res.Detect) { $e2 = & $stats; if (-not (& $playing $e2 6 3)) { & $fail "${browser} freeze: tiles are not playing after the thaw" } else { & $note "      (the pictures never stopped: no recovery was needed)" } }
+                    }
+                    $null = & $until { param($s) & $playing $s 6 3 } 40
+                }
+
             }
             catch { & $fail ("$browser run aborted: " + $_.Exception.Message + " (line " + $_.InvocationInfo.ScriptLineNumber + ")") }
             finally {
