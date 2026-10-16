@@ -282,8 +282,13 @@ dialog p{margin:0;color:var(--ink-2)}
   overflow:hidden;cursor:pointer;outline-offset:2px}
 .ltile:focus-visible{outline:2px solid var(--accent)}
 .ltile video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
-.ltile .lover{position:absolute;inset:0;display:grid;place-items:center;text-align:center;padding:20px;
-  color:var(--ink-2);font-size:13px;background:rgba(0,0,0,.45);pointer-events:none}
+.ltile .lover{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;
+  padding:10px 12px 44px;color:var(--ink-2);font-size:13px;background:rgba(0,0,0,.55);pointer-events:none;overflow:hidden}
+.ltile .lover .lh{font-weight:500;color:var(--ink)}
+.ltile .lover .ld{font:11px/1.35 var(--mono);color:var(--ink-3);white-space:pre-line;max-width:100%;overflow-wrap:anywhere}
+.ltile .lover .ld:empty{display:none}
+.ltile .lcopy{pointer-events:auto;background:rgba(35,35,34,.9);border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:11px;color:var(--ink-2)}
+.ltile .lcopy:hover{background:var(--surface-3)}
 .ltile[data-state="live"] .lover{display:none}
 .ltile .lbar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:10px;
   padding:22px 10px 8px;background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0))}
