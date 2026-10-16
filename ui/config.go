@@ -56,6 +56,26 @@ type Config struct {
 	// guard accepts beside localhost, 127.0.0.1, ::1 and the listen host. See
 	// guard.go. Config file only.
 	AllowedHosts []string `json:"allowedHosts"`
+
+	// TLSListen, when set, adds an HTTPS listener on a private IPv4:port of this
+	// PC (for example 192.168.1.50:8443) for phones and other PCs on the LAN. The
+	// loopback listener above is unaffected. Off (empty) by default. Config file
+	// or -tls-listen only.
+	TLSListen string `json:"tlsListen"`
+
+	// TLSHosts are extra names the server certificate covers (private IPv4
+	// literals or names ending .lan, .local, .home.arpa, .internal). The TLSListen
+	// address, 127.0.0.1 and localhost are always covered.
+	TLSHosts []string `json:"tlsHosts"`
+
+	// TLSDir holds the local CA and the server certificate with their keys.
+	// Default %LOCALAPPDATA%\IPCCTV\tls. Never inside the repository.
+	TLSDir string `json:"tlsDir"`
+
+	// TLSToken is the token the LAN listener requires (at least minTokenLength
+	// characters). Falls back to Token. It is separate so that switching the
+	// LAN listener on does not force a token onto the loopback listener.
+	TLSToken string `json:"tlsToken"`
 }
 
 // CamerasFile is the camera list the scripts read, beside them.
@@ -107,8 +127,17 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 	if flags.ScriptDir != "" {
 		cfg.ScriptDir = flags.ScriptDir
 	}
+	if flags.TLSListen != "" {
+		cfg.TLSListen = flags.TLSListen
+	}
+	if flags.TLSDir != "" {
+		cfg.TLSDir = flags.TLSDir
+	}
 	if env := strings.TrimSpace(os.Getenv("CAMUI_TOKEN")); env != "" {
 		cfg.Token = env
+	}
+	if env := strings.TrimSpace(os.Getenv("CAMUI_TLS_TOKEN")); env != "" {
+		cfg.TLSToken = env
 	}
 
 	if cfg.Listen == "" {
@@ -136,6 +165,11 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 		cfg.StatusFile = filepath.Join(cfg.ArchiveRoot, "_state", "status.json")
 	}
 	cfg.Token = strings.TrimSpace(cfg.Token)
+	cfg.TLSToken = strings.TrimSpace(cfg.TLSToken)
+	cfg.TLSListen = strings.TrimSpace(cfg.TLSListen)
+	if cfg.TLSDir == "" {
+		cfg.TLSDir = defaultTLSDir()
+	}
 
 	return cfg, nil
 }
@@ -182,6 +216,52 @@ func (c Config) Validate() error {
 		"  Bind 127.0.0.1 to keep camui local, or set a token of at least %d characters\n"+
 		"  (CAMUI_TOKEN in the environment, or \"token\" in the config file) to expose it deliberately",
 		c.Listen, detail, minTokenLength)
+}
+
+// defaultTLSDir is %LOCALAPPDATA%\IPCCTV\tls: a per-user local folder.
+func defaultTLSDir() string {
+	if local := os.Getenv("LOCALAPPDATA"); local != "" {
+		return filepath.Join(local, "IPCCTV", "tls")
+	}
+	if dir, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(dir, "IPCCTV", "tls")
+	}
+	return filepath.Join(".", "tls")
+}
+
+// EffectiveTLSToken is the token the TLS listener requires.
+func (c Config) EffectiveTLSToken() string {
+	if c.TLSToken != "" {
+		return c.TLSToken
+	}
+	return c.Token
+}
+
+// ValidateTLS checks the LAN listener's settings. With TLSListen empty there is
+// nothing to check. The token is mandatory and independent of the loopback
+// listener: no token, or one that is too short, refuses to start.
+func (c Config) ValidateTLS() error {
+	if c.TLSListen == "" {
+		return nil
+	}
+	ip, _, err := parseTLSListen(c.TLSListen)
+	if err != nil {
+		return err
+	}
+	if _, err := buildCertNames(ip, c.TLSHosts); err != nil {
+		return err
+	}
+	token := c.EffectiveTLSToken()
+	if len(token) >= minTokenLength {
+		return nil
+	}
+	detail := "no token is configured for it"
+	if token != "" {
+		detail = fmt.Sprintf("its token is %d characters, shorter than the %d required", len(token), minTokenLength)
+	}
+	return fmt.Errorf("refusing to start: the TLS listener %q is on the LAN and %s.\n"+
+		"  Set a token of at least %d characters (CAMUI_TLS_TOKEN in the environment, or \"tlsToken\" in the config file;\n"+
+		"  `camui.exe -new-token` prints a fresh one) or remove tlsListen", c.TLSListen, detail, minTokenLength)
 }
 
 // RequiresToken reports whether requests must carry the token.
