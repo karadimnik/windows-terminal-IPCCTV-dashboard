@@ -1034,7 +1034,9 @@ function Invoke-CamUiLeakLivePart {
             $found = @()
             foreach ($key in $needles.Keys) {
                 foreach ($needle in ($needles[$key] -split '\|')) {
-                    if ($Text.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $found += ("{0} ({1}) in {2}" -f $key, $(if ($key -in 'live secret', 'live login (Basic)', 'camera password') { 'value' } else { $needle }), $Label) }
+                    # A bare number (a port) is a hit only as a whole token: the SDP holds long random numbers and ids, and a 5-digit run inside one is not a leak.
+                    $isHit = $(if ($needle -match '^[0-9]+$') { [regex]::IsMatch($Text, '(?<![0-9A-Za-z])' + $needle + '(?![0-9A-Za-z])') } else { $Text.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+                    if ($isHit) { $found += ("{0} ({1}) in {2}" -f $key, $(if ($key -in 'live secret', 'live login (Basic)', 'camera password') { 'value' } else { $needle }), $Label) }
                 }
             }
             foreach ($m in [regex]::Matches($Text, '(?i)[a-z][a-z0-9+.\-]*://[^\s"'',)]*')) { $found += ('URL scheme in {0} :: {1}' -f $Label, $m.Value) }
@@ -6238,7 +6240,9 @@ function Invoke-CamCheckDocSwitches {
     # Parameters of Windows PowerShell itself and of the cmdlets the docs
     # quote, not of this repository.
     $external = @('NoProfile', 'ExecutionPolicy', 'File', 'Command', 'WindowStyle', 'EncodedCommand',
-        'FilterHashtable', 'TaskName', 'Scope', 'Source')
+        'FilterHashtable', 'TaskName', 'Scope', 'Source',
+        # NetSecurity / NetConnection cmdlets quoted in docs/ui.md for the firewall rule (documented, never run by the product)
+        'Action', 'Direction', 'DisplayName', 'InterfaceAlias', 'LocalPort', 'NetworkCategory', 'Profile', 'Program', 'Protocol', 'RemoteAddress')
 
     $declared = @{}
     $any = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
