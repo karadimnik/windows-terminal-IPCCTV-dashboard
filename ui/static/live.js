@@ -1252,7 +1252,7 @@ const Live = (() => {
     const m = view.modal;
     return { open: !!(m && m.opened), dialogOpen: ui.dialog.open, shown: m ? m.shown : null, hd: m ? m.hd : null, subHas: !!ui.vsub.srcObject,
       subVw: ui.vsub.videoWidth, subPaused: ui.vsub.paused, session: !!(m && m.conn.session), http: m && m.conn.diag ? m.conn.diag.http : null, hash: location.hash,
-      fitVw: view.fit ? view.fit.vw : null, fitVh: view.fit ? view.fit.vh : null };
+      fitVw: view.fit ? view.fit.vw : null, fitVh: view.fit ? view.fit.vh : null, hiddenSince: view.hiddenSince, hiddenFor: hiddenSeconds(), freed: view.freed, grace: graceSeconds(), vis: document.visibilityState };
   };
 
   return { onTab };

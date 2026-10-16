@@ -8078,7 +8078,7 @@ function Invoke-CamCheckLiveRobust {
 (() => Array.from(document.querySelectorAll('#lgrid video')).map((v) => ({ t: v.currentTime, paused: v.paused, vw: v.videoWidth })))()
 '@
 
-        foreach ($browser in @('chrome', 'edge')) {
+        foreach ($browser in @($(if ($env:CAMTEST_ROBUST_BROWSERS) { ([string]$env:CAMTEST_ROBUST_BROWSERS) -split ',' } else { @('chrome', 'edge') }))) {
             $found = Get-CamTestBrowser -Browser $browser
             if (-not $found.Exe) { & $fail ("$browser could not be run: " + $found.Reason); continue }
             $cdp = $null; $started = $null
@@ -8122,6 +8122,13 @@ function Invoke-CamCheckLiveRobust {
                 $minimize = {
                     $script:CamRobWindow = Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.getWindowForTarget'
                     [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $script:CamRobWindow.windowId; bounds = @{ windowState = 'minimized' } })
+                }
+                # While the page is minimized a full __liveStats() call (getStats on every connection) can take seconds in headed Chrome and would eat the
+                # grace period being measured: waiting for 'hidden' uses a one-line evaluation instead.
+                $waitHidden = {
+                    $end = [DateTime]::UtcNow.AddSeconds(10); $v = ''
+                    while ([DateTime]::UtcNow -lt $end) { try { $v = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'document.visibilityState' } catch { }; if ($v -eq 'hidden') { return $true }; Start-Sleep -Milliseconds 100 }
+                    return $false
                 }
                 $restore = { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $script:CamRobWindow.windowId; bounds = @{ windowState = 'normal' } }) }
                 # Milliseconds from now until every tile video has advanced its currentTime and is not paused (or $null on timeout).
@@ -8198,18 +8205,22 @@ function Invoke-CamCheckLiveRobust {
                 if (& $want 'quick') {
                     & $note "  -- quick: minimize, wait 5 s (inside camui's 10 s grace), restore --"
                     $s0 = & $stats; $rx0 = & $rx; $live0 = & $sessions
-                    $unmuted = & $js "(() => { const b = document.querySelector('.ltile[data-camera=""Cam 2""] .lmute'); return !!b; })()"
                     & $minimize
-                    $h = & $until { param($s) $s.visibility -eq 'hidden' } 10
-                    Start-Sleep -Seconds 5
-                    $mid = & $stats
+                    $h = & $waitHidden
+                    $trace = @()
+                    foreach ($wait in 1, 1) {
+                        Start-Sleep -Seconds $wait
+                        try { $q = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'JSON.stringify(window.__liveProbe())' | ConvertFrom-Json; $trace += ('hiddenFor {0}s freed {1} grace {2} vis {3}' -f $q.hiddenFor, $q.freed, $q.grace, $q.vis) } catch { $trace += 'probe failed' }
+                    }
+                    & $note ("  while minimized (probes about 1 and 2 s after hidden was seen): " + ($trace -join ' | '))
+                    $mid = & $rx
                     $live1 = & $sessions
                     $t0 = Get-Date
                     & $restore
                     $ms = & $paintAgain $t0
                     $s1 = & $stats; $rx1 = & $rx; $live2 = & $sessions
-                    & $note ("  hidden state while away: open tile connections {0}, frames advanced meanwhile {1} (mode '{2}'); live sessions before {3}, while hidden {4}, after restore {5}; POSTs {6}, DELETEs {7} during the whole cycle; tiles painting again {8} ms after the restore command; RTCPeerConnections {9} -> {10}" -f `
-                        @(@($mid.tiles) | Where-Object { $_.open }).Count, @(0..5 | Where-Object { $mid.tiles[$_].v.framesDecoded -gt $s0.tiles[$_].v.framesDecoded }).Count, $s0.mode, $live0, $live1, $live2, ($rx1.posts - $rx0.posts), ($rx1.deletes - $rx0.deletes), $ms, $rx0.open, $rx1.open)
+                    & $note ("  hidden state while away: open peer connections {0} (mode '{2}'); live sessions before {3}, while hidden {4}, after restore {5}; POSTs {6}, DELETEs {7} during the whole cycle; tiles painting again {8} ms after the restore command; RTCPeerConnections {9} -> {10}" -f `
+                        $mid.open, 0, $s0.mode, $live0, $live1, $live2, ($rx1.posts - $rx0.posts), ($rx1.deletes - $rx0.deletes), $ms, $rx0.open, $rx1.open)
                     if (-not $h) { & $fail "${browser} quick: the window never became hidden" }
                     if ($rx1.posts - $rx0.posts -ne 0 -or $rx1.deletes - $rx0.deletes -ne 0 -or $live2 -ne $live0 -or $live1 -ne $live0) { & $fail "${browser} quick: sessions changed inside the grace period" }
                     if ($null -eq $ms -or $ms -gt 1000) { & $fail "${browser} quick: tiles painted again after $ms ms (wanted <= 1000)" }
@@ -8222,7 +8233,7 @@ function Invoke-CamCheckLiveRobust {
                     else {
                         $rx0 = & $rx; $live0 = & $sessions; $f0 = $m.modal.v.framesDecoded
                         & $minimize
-                        [void](& $until { param($s) $s.visibility -eq 'hidden' } 10)
+                        [void](& $waitHidden)
                         Start-Sleep -Seconds 5
                         $t0 = Get-Date
                         & $restore
@@ -8260,7 +8271,7 @@ function Invoke-CamCheckLiveRobust {
                         [void](& $js ("window.__liveTune({ mode: '" + $variant.Mode + "', grace: " + $variant.Grace + " })"))
                         $live0 = & $sessions; $rx0 = & $rx
                         & $minimize
-                        [void](& $until { param($s) $s.visibility -eq 'hidden' } 10)
+                        [void](& $waitHidden)
                         Start-Sleep -Seconds 5
                         $row = & $measure $variant.Name $true
                         $live1 = & $sessions
@@ -8311,7 +8322,7 @@ function Invoke-CamCheckLiveRobust {
                     Start-Sleep -Milliseconds 1500
                     $a0 = & $stats
                     & $minimize
-                    [void](& $until { param($s) $s.visibility -eq 'hidden' } 10)
+                    [void](& $waitHidden)
                     Start-Sleep -Seconds 3
                     $mid = & $stats
                     $t0 = Get-Date
@@ -8369,7 +8380,7 @@ function Invoke-CamCheckLiveRobust {
                     # negative control 2: a hidden page is never "stalled"
                     $st0 = ($e.tiles | Measure-Object stalls -Sum).Sum
                     & $minimize
-                    [void](& $until { param($s) $s.visibility -eq 'hidden' } 10)
+                    [void](& $waitHidden)
                     Suspend-CamTestProcess -ProcessId $pub.Id
                     Start-Sleep -Seconds 8
                     Suspend-CamTestProcess -ProcessId $pub.Id -Resume
@@ -8516,7 +8527,7 @@ function Invoke-CamCheckLiveRobust {
                     $b2 = $a
                     for ($i = 1; $i -le 10; $i++) {
                         & $minimize
-                        [void](& $until { param($s) $s.visibility -eq 'hidden' } 8 150)
+                        [void](& $waitHidden)
                         Start-Sleep -Milliseconds 1500
                         & $restore
                         [void](& $until { param($s) $s.visibility -eq 'visible' } 8 150)
