@@ -196,16 +196,35 @@
 
   <!-- ============== LIVE ============== -->
   <section data-tab="live" class="hide">
-    <div class="panel lpanel">
-      <header><h2>Live</h2><span class="muted" id="lcount"></span></header>
+    <div class="lwrap" id="lwrap">
+      <div class="ltools">
+        <span class="muted" id="lcount"></span>
+        <span class="muted lhint">Click a camera to enlarge it. Sound is off until you unmute. Pictures stop while this tab is hidden.</span>
+        <button type="button" class="btn small" id="lfs" aria-pressed="false">Fullscreen</button>
+      </div>
       <div id="lnote" class="lnote hide"></div>
       <div class="lgrid" id="lgrid"></div>
+
+      <!-- One camera, large. Inside lwrap so it is still shown while the grid is fullscreen. -->
+      <dialog id="lmodal" class="lmodal" role="dialog" aria-modal="true" aria-labelledby="lmname">
+        <div class="lmbox" id="lmbox" data-show="sub">
+          <div class="lmstage">
+            <video id="lmsub" class="lmv" muted autoplay playsinline></video>
+            <video id="lmmain" class="lmv" muted autoplay playsinline></video>
+            <div id="lmmsg" class="lmmsg"></div>
+          </div>
+          <div class="lmtop">
+            <span class="lmname" id="lmname"></span>
+            <span class="lmchips" id="lmchips"></span>
+            <button type="button" class="lmb hide" id="lmretry">Retry HD</button>
+            <button type="button" class="lmb" id="lmcopy">Copy diagnostics</button>
+            <button type="button" class="lmb" id="lmmute" aria-pressed="false">Unmute</button>
+            <button type="button" class="lmb" id="lmfs">Fullscreen</button>
+            <button type="button" class="lmb" id="lmclose" autofocus>Close</button>
+          </div>
+        </div>
+      </dialog>
     </div>
-    <footer class="note">
-      Tiles show each camera's second stream. Click a tile to watch it on the main stream, and click it or
-      press Esc to go back. Sound is off until you unmute a tile. Pictures stop while this tab is hidden
-      or another tab is open, so a hidden page costs the camera and this PC nothing.
-    </footer>
   </section>
 </div>
 

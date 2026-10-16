@@ -152,6 +152,13 @@ Commissioned on master of the original repository, ahead of this project, as the
   API and the Live screen's own WHEP/session calls; start/stop, settings, camera edits, record toggles and acknowledgements get 403
   before any handler. A test fails when a new route is not classified. The front end hides the controls and says so. `false` makes
   the token full control (documented). The loopback listener is unchanged.
+- **Status (2026-10-16), Live fit on branch `portable-nvr-livefit` (not merged): the Live tab fills the window and a click opens a modal.**
+  Front end only (`live.js`, `style.css`, `index.html`; no Go change). `bestGrid` picks the column count that maximises the 16:9
+  tiles (1920x1080: 3x2 of 633x356, no scrolling; 2560x1440: 846x476; 800x1000: 2 columns; 390x844: 1 full-width column), there is a
+  Fullscreen button, and a click opens a `<dialog>` with the tile's own stream at once and ONE main session swapped in when it has drawn
+  a frame, with no change to the grid (design `live-fit-design.md`, docs `ui.md`). Proven by `livepage` in Chrome and Edge (measured
+  rectangles, instant picture, swap to the 1280x720 main, grid untouched, close/Esc/backdrop/deep link/Back, pre-warm leaves no session,
+  HD-unavailable path, hidden window, fullscreen calls) and `tests/live/bestgrid.test.js`.
 
 ### Stage 3 - the internet
 

@@ -54,7 +54,7 @@ It has four screens:
 * **Dashboard** - start and stop everything, the recorder alone or the viewers alone; a record toggle per camera with what that camera is actually doing; free space and the days of headroom left; the supervisor's recent events; and the state of each service. The actions that stop footage being written ask for confirmation first.
 * **Settings** - the camera list (add, remove, rename, change the IP, the stream and the record flag) and the four recording keys it is allowed to change: segment length, reserve, hysteresis and retention days.
 * **Footage** - camera, then date, then segment, with the player inline. A day's gaps are visible as gaps.
-* **Live** - the cameras as a tile grid in the browser, from the live-view MediaMTX ([docs/ui.md](docs/ui.md#live-view)); off until `LiveViewEnabled` is turned on. Click a tile for the main stream; sound stays muted until you unmute a tile.
+* **Live** - the cameras as a tile grid in the browser, from the live-view MediaMTX ([docs/ui.md](docs/ui.md#live-view)); off until `LiveViewEnabled` is turned on. The grid fills the window; click a tile for that camera in a large modal (main stream); sound stays muted until you unmute.
 
 Recording is opt-in per camera: the record toggle on the Dashboard screen, or `.\cam.recorder.ps1 -Enable <name|all>` and `-Disable`. Footage lands in one folder per camera under `RootPath` (`E:\cameras` unless you change it), in 15-minute MKV segments, and the pruner deletes the oldest when free space runs low - [docs/how-it-works.md](docs/how-it-works.md#recording) has the detail.
 

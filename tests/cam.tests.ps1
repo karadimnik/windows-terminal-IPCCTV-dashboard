@@ -7317,6 +7317,7 @@ function Invoke-CamCheckLivePage {
     $script:CamLivePageEvidence = @()
     $script:CamLivePageBrowsers = @()
     $script:CamLivePageSeconds = 0
+    $script:CamLivePageHd = @()
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $rig = $null; $ui = $null; $uiOff = $null; $evil = $null
     $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livepage'
@@ -7326,11 +7327,12 @@ function Invoke-CamCheckLivePage {
 
     try {
         if (-not $env:CAMUI_TEST_EXE -or -not (Test-Path -LiteralPath $env:CAMUI_TEST_EXE)) { throw 'CAMUI_TEST_EXE must name a camui.exe built from this tree (cross-compile it to a temp path).' }
-        foreach ($p in @(18789, 18790, 18300, 18082)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
+        foreach ($p in @(18789, 18790, 18300, 18082, 18892)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
         if ($shots) { [void](New-Item -ItemType Directory -Path $shots -Force) }
 
         $cameras = 1..6 | ForEach-Object { [pscustomobject]@{ Name = "Cam $_"; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 1) } }
-        $rig = Start-CamTestLiveRig -Name 'livepage' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 4
+        # The camera's main (stream1) is 1280x720 and its sub (stream2) the default 640x360, so the swap from sub to main is visible in videoWidth.
+        $rig = Start-CamTestLiveRig -Name 'livepage' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 4 -LiveApiPort 18892 -VideoSpec @{ stream1 = '1280x720:high' }
         $dir = $rig.Dir
         $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livepage'
         if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
@@ -7381,6 +7383,14 @@ function Invoke-CamCheckLivePage {
         $viewport = {
             param([int]$Width, [int]$Height)
             [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Emulation.setDeviceMetricsOverride' -Params @{ width = $Width; height = $Height; deviceScaleFactor = 1; mobile = $false })
+            # The page re-fits on a debounced timer: wait until it has laid out for this size, or the next click lands on the old layout.
+            $end = [DateTime]::UtcNow.AddSeconds(4)
+            while ([DateTime]::UtcNow -lt $end) {
+                Start-Sleep -Milliseconds 100
+                $probe = $null
+                try { $probe = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.__liveProbe ? window.__liveProbe() : null' } catch { }
+                if (-not $probe -or $null -eq $probe.fitVw -or ($probe.fitVw -eq $Width -and $probe.fitVh -eq $Height)) { break }
+            }
         }
         $click = {
             param([double]$X, [double]$Y)
@@ -7421,105 +7431,432 @@ function Invoke-CamCheckLivePage {
                 [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.enable')
                 & $note ("== $browser $($found.Version) (throwaway profile, DevTools on 18300, the window's own pixels only) ==")
 
-                # ---- desktop ----
+                # ---- helpers for this run ----
+                $js = { param([string]$Code) Invoke-CamTestCdpEval -Cdp $cdp -Expression $Code }
+                $center = {
+                    param([string]$Selector, [double]$FracY = 0.5)
+                    $q = ConvertTo-Json -InputObject $Selector -Compress
+                    & $js ("(() => { const e = document.querySelector($q); if (!e) return null; const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height * $FracY }; })()")
+                }
+                $tileSel = { param([string]$Name) ('.ltile[data-camera="{0}"]' -f $Name) }
+                $clickAt = { param($Point) if (-not $Point) { throw 'nothing to click' }; & $click $Point.x $Point.y }
+                $sessions = { (Get-CamTestLiveSessions -Rig $rig).Count }
+                $sessionsIs = {
+                    param([int]$Want, [int]$Seconds = 10)
+                    $end = [DateTime]::UtcNow.AddSeconds($Seconds); $n = -1
+                    while ([DateTime]::UtcNow -lt $end) { $n = & $sessions; if ($n -eq $Want) { return $n }; Start-Sleep -Milliseconds 400 }
+                    return $n
+                }
+                $rectsOf = { param($S) @(@($S.tiles) | ForEach-Object { '{0},{1},{2},{3}' -f $_.rect.x, $_.rect.y, $_.rect.w, $_.rect.h }) -join ' | ' }
+                $frames = { param($S) @(@($S.tiles) | ForEach-Object { if ($_.v) { [int]$_.v.framesDecoded } else { 0 } }) }
+                $instrument = @'
+(() => {
+  if (window.__fx) return 'already';
+  const orig = window.fetch.bind(window);
+  const fx = window.__fx = { delay: 0, fail: false, posts: [], deletes: 0, probes: [], fs: 0, mfs: 0 };
+  window.fetch = (url, opts) => {
+    const u = String(url), method = opts && opts.method;
+    if (method === 'POST') fx.posts.push((u.match(/stream=(\w+)/) || [])[1]);
+    if (method === 'DELETE') fx.deletes++;
+    const main = method === 'POST' && /stream=main/.test(u);
+    if (main && fx.fail) return Promise.resolve(new Response('{"error":"stream not available"}', { status: 404, headers: { 'Content-Type': 'application/json' } }));
+    if (main && fx.delay) return new Promise((r) => setTimeout(r, fx.delay)).then(() => orig(url, opts));
+    return orig(url, opts);
+  };
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest || !e.target.closest('#lgrid .ltile') || e.target.closest('.lmute,.lcopy,.lchip')) return;
+    const t0 = performance.now();
+    const snap = (label) => { const p = window.__liveProbe(); p.label = label; p.ms = Math.round(performance.now() - t0); fx.probes.push(p); };
+    requestAnimationFrame(() => requestAnimationFrame(() => snap('2raf')));
+    setTimeout(() => snap('100ms'), 100);
+  }, true);
+  const rf = Element.prototype.requestFullscreen;
+  Element.prototype.requestFullscreen = function (...a) { if (this.id === 'lwrap') fx.fs++; else if (this.id === 'lmbox') fx.mfs++; return rf.apply(this, a); };
+  return 'installed';
+})()
+'@
+                $reset = { [void](& $js 'Object.assign(window.__fx, { delay: 0, fail: false, probes: [] })') }
+                $fxState = { & $js 'JSON.stringify({ posts: window.__fx.posts, deletes: window.__fx.deletes, probes: window.__fx.probes, fs: window.__fx.fs, mfs: window.__fx.mfs })' | ConvertFrom-Json }
+                $esc = {
+                    foreach ($t in @('keyDown', 'keyUp')) { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = $t; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 }) }
+                }
+                $modalIs = { param([scriptblock]$Pred, [int]$Seconds = 12) & $until { param($s) $s.modal -and (& $Pred $s.modal) } $Seconds }
+                $closedIs = { param([int]$Seconds = 6) & $until { param($s) -not $s.modal -and $s.hash -eq '#live' } $Seconds }
+                $layout = {
+                    param($S)
+                    $t = @($S.tiles)
+                    $minX = ($t | ForEach-Object { $_.rect.x } | Measure-Object -Minimum).Minimum; $maxX = ($t | ForEach-Object { $_.rect.x + $_.rect.w } | Measure-Object -Maximum).Maximum
+                    $minY = ($t | ForEach-Object { $_.rect.y } | Measure-Object -Minimum).Minimum; $maxY = ($t | ForEach-Object { $_.rect.y + $_.rect.h } | Measure-Object -Maximum).Maximum
+                    $headerBottom = [int](& $js 'Math.round(document.querySelector(''.top'').getBoundingClientRect().bottom)')
+                    $areaW = $S.innerWidth; $areaH = $S.innerHeight - $headerBottom
+                    $tileArea = ($t | ForEach-Object { $_.rect.w * $_.rect.h } | Measure-Object -Sum).Sum
+                    [pscustomobject]@{
+                        MinW = ($t | ForEach-Object { $_.rect.w } | Measure-Object -Minimum).Minimum; MaxW = ($t | ForEach-Object { $_.rect.w } | Measure-Object -Maximum).Maximum
+                        H = $t[0].rect.h; BoxW = $maxX - $minX; BoxH = $maxY - $minY; HeaderBottom = $headerBottom; AreaW = $areaW; AreaH = $areaH
+                        WidthShare = [math]::Round(($maxX - $minX) / $areaW, 3); HeightShare = [math]::Round(($maxY - $minY) / $areaH, 3)
+                        TileShare = [math]::Round($tileArea / ($areaW * $areaH), 3); BoxShare = [math]::Round((($maxX - $minX) * ($maxY - $minY)) / ($areaW * $areaH), 3)
+                        Scrolls = ($S.scrollHeight -gt $S.innerHeight + 1); SideScroll = ($S.scrollWidth -gt $S.clientWidth) }
+                }
+                $sizes = {
+                    param([int]$W, [int]$H, [string]$Label, [bool]$WithShot = $false)
+                    & $viewport $W $H
+                    $s2 = & $until { param($s) $s.innerWidth -eq $W -and $s.fit -and $s.fit.vw -eq $W -and $s.fit.vh -eq $H -and @(@($s.tiles) | Where-Object { $_.rect.w -eq $s.fit.tile }).Count -eq @($s.tiles).Count } 8
+                    if (-not $s2) { $s2 = & $stats; & $fail "${browser} ${Label}: the tiles never took the computed size"; if (-not $s2) { return $null } }
+                    $lay = & $layout $s2
+                    $px = $null
+                    if ($WithShot) { $px = & $shot "$browser-$Label" $s2 }
+                    if ($lay.SideScroll) { & $fail "$browser ${Label}: the page scrolls sideways (scrollWidth $($s2.scrollWidth) > $($s2.clientWidth))" }
+                    & $note ("  {0}: fit {1} cols x {2} rows, tile {3} px (DOM columns {4}); rects {5}; scrolls {6}; header ends at y={7}; tile boxes span {8}x{9} of {10}x{11} content area: width {12:p1}, height {13:p1}, tiles' own area {14:p1}" -f `
+                        $Label, $s2.fit.cols, $s2.fit.rows, $s2.fit.tile, $s2.columns, (& $rectsOf $s2), $lay.Scrolls, $lay.HeaderBottom, $lay.BoxW, $lay.BoxH, $lay.AreaW, $lay.AreaH, $lay.WidthShare, $lay.HeightShare, $lay.TileShare)
+                    return [pscustomobject]@{ Stats = $s2; Layout = $lay; Pixels = $px }
+                }
+
+                $shotModal = {
+                    param([string]$Label, $S)
+                    $file = Join-Path -Path $dir -ChildPath ("shot-$Label.png")
+                    [void](Save-CamTestPageShot -Cdp $cdp -Path $file)
+                    $b = $S.modal.box
+                    $px = @(Get-CamTestPngStats -Path $file -Rects @(@{ X = $b.x; Y = $b.y + 60; W = $b.w; H = [int]($b.h * 0.6) }))
+                    if ($shots) { Copy-Item -LiteralPath $file -Destination (Join-Path $shots "$Label.png") -Force }
+                    return $px[0]
+                }
+
+                # ---- desktop and the other sizes: the grid fills the window ----
                 & $viewport 1920 1080
                 & $navigate "$base/#live"
                 $s = & $until { param($s) & $playing $s }
                 if (-not $s) { $s = & $stats; & $fail "$browser desktop: six tiles never reached playing"; if ($s) { & $describeTiles $s $null }; continue }
-                $px = & $shot "$browser-desktop-1920x1080" $s
-                & $note ("  desktop 1920x1080: {0} columns (DOM), screenshot {1}, six tiles playing" -f $s.columns, $px.Size)
-                & $describeTiles $s $px.Pixels
-                if ($s.columns -ne 3) { & $fail "$browser desktop: $($s.columns) columns, wanted 3" }
-                if (@($px.Pixels | Where-Object { $_.LitShare -lt 0.5 -or $_.Colours -lt 4 }).Count) { & $fail "$browser desktop: a tile rendered black or flat" }
+                & $note ("  instrumentation: " + (& $js $instrument))
+                $r = & $sizes 1920 1080 'desktop-1920x1080' $true
+                $lay = $r.Layout; $s = $r.Stats
+                & $describeTiles $s $r.Pixels.Pixels
+                if ($s.columns -ne 3 -or $s.fit.cols -ne 3) { & $fail "$browser desktop: $($s.columns) columns, wanted 3" }
+                if ($lay.MinW -lt 600) { & $fail "$browser desktop: a tile is only $($lay.MinW) px wide, wanted >= 600" }
+                if ($lay.Scrolls) { & $fail "$browser desktop: the page scrolls" }
+                if ($lay.WidthShare -lt 0.97 -and $lay.HeightShare -lt 0.97) { & $fail "$browser desktop: the tiles fill neither the width nor the height of the content area" }
+                if (@($r.Pixels.Pixels | Where-Object { $_.LitShare -lt 0.5 -or $_.Colours -lt 4 }).Count) { & $fail "$browser desktop: a tile rendered black or flat" }
                 if (@(@($s.tiles) | Where-Object { -not $_.muted }).Count) { & $fail "${browser}: a tile was not muted by default" }
                 if (@(@($s.tiles) | Where-Object { $_.stream -ne 'sub' }).Count) { & $fail "${browser}: a tile was not on the sub stream" }
                 $n = & $readersIs 6
-                & $note ("  stream2 sessions on the camera with six sub tiles: $n")
-                if ($n -ne 6) { & $fail "${browser}: stream2 had $n sessions with six viewers, wanted 6" }
+                $liveN = & $sessions
+                & $note ("  sessions with six sub tiles: camera stream2 readers {0}, live instance WebRTC sessions {1}" -f $n, $liveN)
+                if ($n -ne 6 -or $liveN -ne 6) { & $fail "${browser}: stream2 had $n and the live instance $liveN sessions with six viewers, wanted 6 and 6" }
+                $base0 = $s
 
-                # ---- click to focus, Esc to return ----
-                $cam1 = @($s.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]
-                & $click ($cam1.rect.x + $cam1.rect.w / 2) ($cam1.rect.y + $cam1.rect.h * 0.4)
-                $f = & $until { param($s) $s.focus -eq 'Cam 1' -and @(@($s.tiles) | Where-Object { $_.name -eq 'Cam 1' -and $_.stream -eq 'main' -and $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -eq 1 }
-                if (-not $f) { $f = & $stats; & $fail "${browser}: a click did not put Cam 1 on a playing main stream"; if ($f) { & $describeTiles $f $null } }
-                else {
-                    $px = & $shot "$browser-focus-main" $f
-                    $big = @($f.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]; $small = @($f.tiles | Where-Object { $_.name -eq 'Cam 2' })[0]
-                    & $note ("  click Cam 1: focus {0}, main stream {1}x{2} px of video; tile {3}x{4} versus {5}x{6} for the others; only-one-main: {7} main tile(s)" -f $f.focus, $big.v.w, $big.v.h, $big.rect.w, $big.rect.h, $small.rect.w, $small.rect.h, @(@($f.tiles) | Where-Object { $_.stream -eq 'main' }).Count)
-                    & $describeTiles $f $px.Pixels
-                    if ($big.rect.w -lt 2 * $small.rect.w) { & $fail "${browser}: the focused tile is not larger" }
-                    if (@(@($f.tiles) | Where-Object { $_.stream -eq 'main' }).Count -ne 1) { & $fail "${browser}: more than one main stream" }
-                    if ($big.v.w -lt 100) { & $fail "${browser}: no main-stream picture" }
-                    $n = & $readersIs 5
-                    & $note ("  stream2 sessions with Cam 1 on main (its sub session released): $n")
-                    if ($n -ne 5) { & $fail "${browser}: stream2 had $n sessions with one camera on main, wanted 5" }
+                # bestGrid itself, in the page: the cases the node test also covers
+                $table = & $js '[[1908,976,6],[2548,1336,6],[788,900,6],[378,760,6],[832,330,6],[1900,900,1],[1600,300,6]].map(([w,h,n]) => { const g = window.__liveBestGrid(w,h,n,300,4); return `${w}x${h} n=${n} -> ${g.cols}x${g.rows} tile ${g.tile}${g.scroll ? " scroll" : ""}`; }).join("; ")'
+                & $note ("  bestGrid(width, height, n, 300, 4): " + $table)
+                if ($table -notmatch '1908x976 n=6 -> 3x2 tile 633;' -or $table -notmatch '788x900 n=6 -> 2x3' -or $table -notmatch '378x760 n=6 -> 1x6 tile 378 scroll') { & $fail "${browser}: bestGrid in the page gave $table" }
+
+                $r2 = & $sizes 2560 1440 'desktop-2560x1440'
+                if ($r2) {
+                    if ($r2.Layout.MinW -lt $lay.MinW * 1.2 -or $r2.Layout.Scrolls -or $r2.Stats.columns -ne 3) { & $fail "$browser 2560x1440: tiles $($r2.Layout.MinW) px wide (1920 gave $($lay.MinW)), scrolls $($r2.Layout.Scrolls), $($r2.Stats.columns) columns" }
                 }
-                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyDown'; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 })
-                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyUp'; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 })
-                $e = & $until { param($s) -not $s.focus -and (& $playing $s) -and @(@($s.tiles) | Where-Object { $_.stream -ne 'sub' }).Count -eq 0 }
-                & $note ("  Esc: focus released, all six back on sub and playing: {0}" -f [bool]$e)
-                if (-not $e) { & $fail "${browser}: Esc did not return the tile to the sub stream" }
-                $n = & $readersIs 6
-                if ($n -ne 6) { & $fail "${browser}: stream2 had $n sessions after Esc, wanted 6" }
-
-                # ---- audio: muted by default, unmute one tile ----
-                $e = & $stats
-                $before = @($e.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]
-                $pos = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(() => { const r = document.querySelector(''.ltile[data-camera="Cam 1"] .lmute'').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()'
-                & $click $pos.x $pos.y
-                Start-Sleep -Seconds 3
-                $after = & $stats
-                $tile1 = @($after.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]
-                $others = @(@($after.tiles) | Where-Object { $_.name -ne 'Cam 1' -and -not $_.muted }).Count
-                & $note ("  audio: all tiles muted at the start ({0} muted of 6); after the unmute click Cam 1 muted={1} paused={2} volume={3}, other tiles still unmuted: {4}; Cam 1 audio packets {5} -> {6}, energy {7} -> {8}" -f `
-                    @(@($s.tiles) | Where-Object { $_.muted }).Count, $tile1.muted, $tile1.paused, $tile1.volume, $others, $(if ($before.a) { $before.a.packets } else { 'n/a' }), $(if ($tile1.a) { $tile1.a.packets } else { 'n/a' }), $(if ($before.a) { $before.a.energy } else { 'n/a' }), $(if ($tile1.a) { $tile1.a.energy } else { 'n/a' }))
-                if ($tile1.muted -or $tile1.paused -or $others -ne 0) { & $fail "${browser}: unmute did not unmute exactly Cam 1" }
-                if (-not $tile1.a -or $tile1.a.packets -lt 20 -or ($before.a -and $tile1.a.packets -le $before.a.packets)) { & $fail "${browser}: no audio packets arrive for the unmuted tile" }
-
-                # ---- hidden: minimize the window ----
-                $window = Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.getWindowForTarget'
-                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'minimized' } })
-                $h = & $until { param($s) $s.visibility -eq 'hidden' -and @(@($s.tiles) | Where-Object { $_.open }).Count -eq 0 } 15
-                $n = & $readersIs 0 14
-                & $note ("  window minimized: visibility {0}, open connections {1}, tile states {2}; stream2 sessions on the camera: {3}" -f $(if ($h) { $h.visibility } else { 'not hidden' }), $(if ($h) { @(@($h.tiles) | Where-Object { $_.open }).Count } else { '?' }), $(if ($h) { (@($h.tiles) | ForEach-Object { $_.state } | Select-Object -Unique) -join '/' } else { '?' }), $n)
-                if (-not $h) { & $fail "${browser}: minimizing did not hide the page and close its connections" }
-                if ($n -ne 0) { & $fail "${browser}: stream2 still had $n sessions while the window was minimized" }
-                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'normal' } })
-                $r = & $until { param($s) $s.visibility -eq 'visible' -and (& $playing $s) } 40
-                & $note ("  window restored: six tiles reopened and playing: {0}" -f [bool]$r)
-                if (-not $r) { & $fail "${browser}: restoring the window did not reopen the six tiles" }
-                else { $n = & $readersIs 6; if ($n -ne 6) { & $fail "${browser}: stream2 had $n sessions after the window came back" } }
-
-                # ---- deep link ----
-                & $navigate "$base/#live/Cam%201"
-                $d = & $until { param($s) $s.focus -eq 'Cam 1' -and @(@($s.tiles) | Where-Object { $_.name -eq 'Cam 1' -and $_.stream -eq 'main' -and $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -eq 1 }
-                & $note ("  deep link #live/Cam%201 on a fresh load: Cam 1 on main and playing: {0}" -f [bool]$d)
-                if (-not $d) { & $fail "${browser}: the deep link did not focus Cam 1 on main" }
-
-                # ---- medium and phone ----
-                & $viewport 800 1000
-                Start-Sleep -Milliseconds 400
-                $m = & $stats
-                & $note ("  800 px wide: {0} columns (DOM)" -f $m.columns)
-                if ($m.columns -ne 2) { & $fail "$browser 800 px: $($m.columns) columns, wanted 2" }
-                & $viewport 390 844
-                & $navigate "$base/#live"
-                $s = & $until { param($s) & $playing $s } 50
-                if (-not $s) { $s = & $stats; & $fail "$browser phone: six tiles never reached playing"; if ($s) { & $describeTiles $s $null } }
-                else {
+                $r3 = & $sizes 800 1000 'tablet-800x1000'
+                if ($r3 -and ($r3.Stats.columns -ne 2 -or $r3.Layout.Scrolls)) { & $fail "$browser 800x1000: $($r3.Stats.columns) columns (wanted 2), scrolls $($r3.Layout.Scrolls)" }
+                $r4 = & $sizes 390 844 'phone-390x844'
+                if ($r4) {
+                    $gridW = $r4.Stats.grid.w
+                    if ($r4.Stats.columns -ne 1 -or @(@($r4.Stats.tiles) | Where-Object { $_.rect.w -ne $gridW }).Count) { & $fail "$browser phone: $($r4.Stats.columns) column(s), tiles not the grid's full width ($gridW)" }
+                    if (-not $r4.Layout.Scrolls) { & $fail "$browser phone: six stacked tiles should scroll" }
                     $full = Invoke-CamTestCdp -Cdp $cdp -Method 'Page.captureScreenshot' -Params @{ format = 'png'; captureBeyondViewport = $true }
                     $file = Join-Path -Path $dir -ChildPath "shot-$browser-phone.png"
                     [System.IO.File]::WriteAllBytes($file, [System.Convert]::FromBase64String($full.data))
-                    $rects = @(@($s.tiles) | ForEach-Object { @{ X = $_.rect.x; Y = $_.rect.y + $s.scrollY; W = $_.rect.w; H = [int]($_.rect.h * 0.7) } })
+                    $rects = @(@($r4.Stats.tiles) | ForEach-Object { @{ X = $_.rect.x; Y = $_.rect.y + $r4.Stats.scrollY; W = $_.rect.w; H = [int]($_.rect.h * 0.7) } })
                     $pp = @(Get-CamTestPngStats -Path $file -Rects $rects)
-                    $image = [System.Drawing.Image]::FromFile($file); $size = '{0}x{1}' -f $image.Width, $image.Height; $image.Dispose()
-                    if ($shots) { Copy-Item -LiteralPath $file -Destination (Join-Path $shots "$browser-phone-390x844.png") -Force }
-                    & $note ("  phone 390x844: {0} column(s) (DOM), innerWidth {1}, full-page screenshot {2}, six tiles playing" -f $s.columns, $s.innerWidth, $size)
-                    & $describeTiles $s $pp
-                    if ($s.columns -ne 1) { & $fail "$browser phone: $($s.columns) columns, wanted 1" }
-                    if (@(@($s.tiles) | Where-Object { $_.rect.w -gt 390 }).Count) { & $fail "$browser phone: a tile is wider than the screen" }
+                    if ($shots) { Copy-Item -LiteralPath $file -Destination (Join-Path $shots "$browser-phone-grid-390x844.png") -Force }
                     if (@($pp | Where-Object { $_.LitShare -lt 0.5 -or $_.Colours -lt 4 }).Count) { & $fail "$browser phone: a tile rendered black or flat" }
+                    & $note ("  phone full-page screenshot taken; tile pixels: " + ((@($pp | ForEach-Object { 'luma {0}, lit {1} %' -f $_.Mean, [int](100 * $_.LitShare) })) -join ' | '))
                 }
+
+                # the modal on a phone: the controls sit under the picture, the box fits the screen
+                if ($r4) {
+                    & $clickAt (& $center (& $tileSel 'Cam 1') 0.4)
+                    $h = & $modalIs { param($m) $m.hd -eq 'ready' } 15
+                    if (-not $h) { $h = & $stats; & $fail "${browser} phone: the modal never reached HD" }
+                    if ($h -and $h.modal) {
+                        $bx = $h.modal.box
+                        $pxP = & $shotModal "$browser-modal-phone-390x844" $h
+                        & $note ("  phone modal: box {0}x{1} at ({2},{3}) in a {4}x{5} window, hd {6}, picture mean luma {7}, lit {8} %" -f $bx.w, $bx.h, $bx.x, $bx.y, $h.innerWidth, $h.innerHeight, $h.modal.hd, $pxP.Mean, [int](100 * $pxP.LitShare))
+                        if ($bx.x -lt 0 -or $bx.x + $bx.w -gt $h.innerWidth -or $bx.y -lt 0 -or $bx.y + $bx.h -gt $h.innerHeight) { & $fail "${browser} phone: the modal does not fit the screen" }
+                        if ($pxP.LitShare -lt 0.5 -or $pxP.Colours -lt 4) { & $fail "${browser} phone: the modal picture is black or flat" }
+                    }
+                    & $esc
+                    $c = & $closedIs
+                    if (-not $c) { & $fail "${browser} phone: Esc did not close the modal" }
+                    [void](& $sessionsIs 6 10)
+                }
+
+                # ---- tile audio: muted by default, unmute one tile ----
+                & $viewport 1920 1080
+                $s = & $until { param($s) $s.innerWidth -eq 1920 -and (& $playing $s) } 15
+                if (-not $s) { & $fail "${browser}: the six tiles did not come back at 1920x1080"; continue }
+                $before = @($s.tiles | Where-Object { $_.name -eq 'Cam 2' })[0]
+                $mutePt = & $center ((& $tileSel 'Cam 2') + ' .lmute')
+                & $clickAt $mutePt
+                Start-Sleep -Milliseconds 2200
+                $after = & $stats
+                $tile2 = @($after.tiles | Where-Object { $_.name -eq 'Cam 2' })[0]
+                $others = @(@($after.tiles) | Where-Object { $_.name -ne 'Cam 2' -and -not $_.muted }).Count
+                & $note ("  tile audio: after the unmute click Cam 2 muted={0} paused={1} volume={2}, other tiles unmuted: {3}; Cam 2 audio packets {4} -> {5}" -f $tile2.muted, $tile2.paused, $tile2.volume, $others, $(if ($before.a) { $before.a.packets } else { 'n/a' }), $(if ($tile2.a) { $tile2.a.packets } else { 'n/a' }))
+                if ($tile2.muted -or $tile2.paused -or $others -ne 0) { & $fail "${browser}: unmute did not unmute exactly Cam 2" }
+                if (-not $tile2.a -or $tile2.a.packets -lt 20 -or ($before.a -and $tile2.a.packets -le $before.a.packets)) { & $fail "${browser}: no audio packets arrive for the unmuted tile" }
+                & $clickAt $mutePt     # quiet again
+
+                # ---- diagnostics v2 on a tile ----
+                $c1 = @($after.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]
+                $m = $c1.diag.ms
+                & $note ("  tile diagnostics v2 (Cam 1): gather {0} ms, signalling POST {1} ms, connected {2} ms, first frame {3} ms; line: {4}" -f $m.gather, $m.post, $m.connected, $m.frame, $c1.diag.line)
+                if ($null -eq $m.gather -or $null -eq $m.post -or $null -eq $m.connected -or $null -eq $m.frame) { & $fail "${browser}: the tile diagnostics lack a timing" }
+                if ($c1.diag.line -notmatch '^live-diag/2 .* post=\d+ms .* connected=\d+ms frame=\d+ms ' -or $c1.diag.line -match '\d+\.\d+\.\d+\.\d+|rtsp:|://' -or $c1.diag.line -match "`n") { & $fail "${browser}: the tile diagnostics line is not one address-free live-diag/2 line with the timings" }
+
+                # ---- the modal ----
+                $tileClasses = { & $js 'Array.from(document.querySelectorAll(''.ltile'')).map((e) => e.className + ''/'' + e.style.cssText).join(''|'')' }
+                $classes0 = & $tileClasses
+                $s0 = & $stats
+                $deletes0 = (& $fxState).deletes
+
+                # 1. open, with the main signalling held for 5 s so the picture before the swap can be sampled
+                [void](& $reset)
+                [void](& $js 'window.__fx.delay = 5000')
+                & $clickAt (& $center (& $tileSel 'Cam 1') 0.4)
+                Start-Sleep -Milliseconds 400
+                $m1 = & $stats
+                $liveAtM1 = & $sessions
+                $fx1 = & $fxState
+                $two = @($fx1.probes | Where-Object { $_.label -eq '2raf' })[0]; $hund = @($fx1.probes | Where-Object { $_.label -eq '100ms' })[0]
+                if ($two) { & $note ("  click Cam 1 -> modal after 2 animation frames ({0} ms): open {1}, dialog open {2}, sub picture attached {3}, videoWidth {4}, paused {5}, own session {6}, signalling answer {7}" -f $two.ms, $two.open, $two.dialogOpen, $two.subHas, $two.subVw, $two.subPaused, $two.session, $(if ($null -eq $two.http) { 'none yet' } else { $two.http })) }
+                if ($hund) { & $note ("  ... after {0} ms: open {1}, sub attached {2}, videoWidth {3}, paused {4}, own session {5}, shown {6}, hd {7}" -f $hund.ms, $hund.open, $hund.subHas, $hund.subVw, $hund.subPaused, $hund.session, $hund.shown, $hund.hd) }
+                if (-not $two -or -not $two.open -or -not $two.dialogOpen -or -not $two.subHas -or $two.session) { & $fail "${browser}: two animation frames after the click the modal was not open with the tile's stream attached and no new session" }
+                if (-not $hund -or $hund.subVw -le 0 -or $hund.subPaused -or $hund.session -or $hund.hd -ne 'loading') { & $fail "${browser}: 100 ms after the click the modal did not show a playing picture before the main session existed" }
+                $mm = $m1.modal
+                if (-not $mm -or -not $mm.opened -or $mm.shown -ne 'sub' -or $mm.hd -ne 'loading') { & $fail "${browser}: the modal did not open on the sub picture while HD loads" }
+                else {
+                    & $note ("  modal before the swap (+400 ms): name {0}, shown {1}, hd {2}, chips '{3}', sub videoWidth {4}x{5}, muted {6}, hash {7}, focus inside {8}, box {9}x{10} at ({11},{12}), live sessions {13}" -f `
+                        $mm.name, $mm.shown, $mm.hd, $mm.chips, $mm.sub.vw, $mm.sub.vh, $mm.muted, $mm.hash, $mm.focusInside, $mm.box.w, $mm.box.h, $mm.box.x, $mm.box.y, $liveAtM1)
+                    if ($mm.hash -ne '#live/Cam%201' -or -not $mm.focusInside) { & $fail "${browser}: the modal did not set the hash or take the focus" }
+                    if ($mm.sub.vw -le 0) { & $fail "${browser}: the modal's first picture has no size" }
+                    $pxB = & $shotModal "$browser-modal-before-swap" $m1
+                    & $note ("  modal picture before the swap: mean luma {0}, lit {1} %, {2} colours" -f $pxB.Mean, [int](100 * $pxB.LitShare), $pxB.Colours)
+                    if ($pxB.LitShare -lt 0.5 -or $pxB.Colours -lt 4) { & $fail "${browser}: the modal picture before the swap is black or flat" }
+                }
+                if ((& $rectsOf $m1) -ne (& $rectsOf $s0) -or (& $tileClasses) -ne $classes0) { & $fail "${browser}: the grid changed under the modal (rects or classes)" }
+                else { & $note "  grid underneath: the six rectangles and the tiles' classes are identical to before the click" }
+                $f0 = & $frames $s0; $f1 = & $frames $m1
+                $grew = @(0..5 | Where-Object { $f1[$_] -gt $f0[$_] }).Count
+                & $note ("  framesDecoded before -> during: {0} -> {1} (grew on {2} of 6 tiles)" -f ($f0 -join ','), ($f1 -join ','), $grew)
+                if ($grew -ne 6) { & $fail "${browser}: the tiles stopped playing while the modal was open ($grew of 6 kept growing)" }
+                if ($liveAtM1 -ne 6) { & $fail "${browser}: $liveAtM1 live sessions existed before the main signalling was answered, wanted 6" }
+
+                # 2. unmute in the modal while still on the sub picture, then wait for the swap
+                & $clickAt (& $center '#lmmute')
+                Start-Sleep -Milliseconds 150
+                $mu = & $stats
+                & $note ("  modal Unmute (before the swap): modal muted {0}, sub element muted {1}, main element muted {2}; tile Cam 1 muted {3}" -f $mu.modal.muted, $mu.modal.sub.muted, $mu.modal.main.muted, @($mu.tiles | Where-Object { $_.name -eq 'Cam 1' })[0].muted)
+                if ($mu.modal.muted -or $mu.modal.sub.muted -or -not $mu.modal.main.muted) { & $fail "${browser}: the modal's Unmute did not unmute exactly the shown picture" }
+                if (-not @($mu.tiles | Where-Object { $_.name -eq 'Cam 1' })[0].muted) { & $fail "${browser}: the modal's Unmute changed the tile" }
+                $h = & $modalIs { param($m) $m.hd -eq 'ready' } 12
+                if (-not $h) { $h = & $stats; & $fail "${browser}: the main stream never replaced the sub picture"; if ($h -and $h.modal) { & $note ("      modal state: hd {0}, verdict '{1}', line {2}" -f $h.modal.hd, $h.modal.verdict, $h.modal.line) } }
+                else {
+                    Start-Sleep -Milliseconds 1200
+                    $h = & $stats
+                    $mh = $h.modal
+                    & $note ("  swap done (this open had 5000 ms of artificial hold, so time-to-HD below includes it): hd {0}, shown {1}, chips '{2}', hdMs {3}, main videoWidth {4}x{5} (decoded {6}x{7}, framesDecoded {8}), sub element has a stream {9}, modal muted {10} (kept through the swap), audio packets {11}" -f `
+                        $mh.hd, $mh.shown, $mh.chips, $mh.hdMs, $mh.main.vw, $mh.main.vh, $(if ($mh.v) { $mh.v.w } else { '?' }), $(if ($mh.v) { $mh.v.h } else { '?' }), $(if ($mh.v) { $mh.v.framesDecoded } else { '?' }), $mh.sub.has, $mh.muted, $(if ($mh.a) { $mh.a.packets } else { 'n/a' }))
+                    if ($mh.shown -ne 'main' -or $mh.main.vw -ne 1280 -or $mh.main.vh -ne 720) { & $fail "${browser}: after the swap the modal is not showing the 1280x720 main stream (shown $($mh.shown), $($mh.main.vw)x$($mh.main.vh)); the sub stream is 640x360" }
+                    if ($mh.muted -or $mh.main.muted -or -not $mh.sub.muted) { & $fail "${browser}: the mute choice did not survive the swap" }
+                    if (-not $mh.a -or $mh.a.packets -lt 10) { & $fail "${browser}: no audio packets arrive on the main session" }
+                    if ($mh.sub.has) { & $fail "${browser}: the sub picture was not released after the swap" }
+                    $pxA = & $shotModal "$browser-modal-after-swap" $h
+                    & $note ("  modal picture after the swap: mean luma {0}, lit {1} %, {2} colours" -f $pxA.Mean, [int](100 * $pxA.LitShare), $pxA.Colours)
+                    if ($pxA.LitShare -lt 0.5 -or $pxA.Colours -lt 4) { & $fail "${browser}: the modal picture after the swap is black or flat" }
+                    $liveN = & $sessions; $n = & $readersIs 6
+                    & $note ("  sessions while the modal is open: live instance {0} (6 tiles + 1 main), camera stream2 readers {1} (unchanged)" -f $liveN, $n)
+                    if ($liveN -ne 7) { & $fail "${browser}: the live instance had $liveN sessions with a modal open, wanted 7" }
+                    if ($n -ne 6) { & $fail "${browser}: the camera's stream2 had $n sessions with a modal open, wanted 6" }
+                    if ((& $rectsOf $h) -ne (& $rectsOf $s0) -or (& $tileClasses) -ne $classes0) { & $fail "${browser}: the grid changed while the modal showed the main stream" }
+                    $line = $mh.line
+                    & $note ("  modal diagnostics v2: gather {0} ms, POST {1} ms, connected {2} ms, first frame {3} ms, hd {4} ms; line: {5}" -f $mh.ms.gather, $mh.ms.post, $mh.ms.connected, $mh.ms.frame, $mh.ms.hd, $line)
+                    if ($null -eq $mh.ms.gather -or $null -eq $mh.ms.post -or $null -eq $mh.ms.connected -or $null -eq $mh.ms.frame -or $null -eq $mh.ms.hd) { & $fail "${browser}: the modal diagnostics lack a timing" }
+                    if ($line -notmatch '^live-diag/2 .*stream=main .* post=\d+ms .* connected=\d+ms frame=\d+ms hd=\d+ms ' -or $line -match '\d+\.\d+\.\d+\.\d+|rtsp:|://') { & $fail "${browser}: the modal diagnostics line is not an address-free live-diag/2 line with the timings" }
+                }
+
+                # 3. Close button: session gone, tile unaffected, focus back on the tile, hash back to #live
+                $f2 = & $frames (& $stats)
+                & $clickAt (& $center '#lmclose')
+                $c = & $closedIs
+                $liveN = & $sessionsIs 6 10
+                $fxc = & $fxState
+                $s3 = & $stats
+                $f3 = & $frames $s3
+                & $note ("  Close button: closed {0}, hash '{1}', focus on '{2}', live sessions back to {3}, session DELETEs seen by the page {4}, Cam 1 tile framesDecoded {5} -> {6}, rects identical {7}" -f [bool]$c, $s3.hash, $s3.activeElement, $liveN, ($fxc.deletes - $deletes0), $f2[0], $f3[0], ((& $rectsOf $s3) -eq (& $rectsOf $s0)))
+                if (-not $c) { & $fail "${browser}: the Close button did not close the modal and restore #live" }
+                if ($s3.activeElement -ne 'Cam 1') { & $fail "${browser}: focus did not return to the Cam 1 tile (it is on '$($s3.activeElement)')" }
+                if ($liveN -ne 6 -or ($fxc.deletes - $deletes0) -lt 1) { & $fail "${browser}: closing the modal left its session ($liveN sessions, $($fxc.deletes - $deletes0) DELETEs)" }
+                if ($f3[0] -le $f2[0] -or (& $rectsOf $s3) -ne (& $rectsOf $s0)) { & $fail "${browser}: the Cam 1 tile was disturbed by the modal" }
+                $n = & $readersIs 6
+                if ($n -ne 6) { & $fail "${browser}: stream2 had $n sessions after the modal closed" }
+
+                # 4. a plain open (no artificial delay): time to HD, then Esc closes
+                [void](& $reset)
+                & $clickAt (& $center (& $tileSel 'Cam 1') 0.4)
+                $h = & $modalIs { param($m) $m.hd -eq 'ready' } 10
+                if (-not $h) { & $fail "${browser}: a plain click never reached HD" }
+                else {
+                    $mh = $h.modal
+                    & $note ("  cold open (nothing warmed): time-to-HD {0} ms from the click; gather {1}, POST {2}, connected {3}, first frame {4} ms from the start of the attempt" -f $mh.hdMs, $mh.ms.gather, $mh.ms.post, $mh.ms.connected, $mh.ms.frame)
+                    $script:CamLivePageHd += ("{0} cold {1} ms" -f $browser, $mh.hdMs)
+                }
+                & $esc
+                $c = & $closedIs
+                $s3 = & $stats
+                & $note ("  Esc: closed {0}, hash '{1}', focus on '{2}', page still on the Live tab {3}" -f [bool]$c, $s3.hash, $s3.activeElement, $s3.shown)
+                if (-not $c -or $s3.activeElement -ne 'Cam 1') { & $fail "${browser}: Esc did not close the modal and give the focus back" }
+                [void](& $sessionsIs 6 10)
+
+                # 5. a press held on a tile pre-warms the main session; the click then adopts it; the backdrop closes
+                [void](& $reset)
+                $pt = & $center (& $tileSel 'Cam 3') 0.4
+                foreach ($type in @('mouseMoved', 'mousePressed')) {
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = $type; x = $pt.x; y = $pt.y; button = 'left'; clickCount = 1; buttons = $(if ($type -eq 'mousePressed') { 1 } else { 0 }) })
+                }
+                Start-Sleep -Milliseconds 700
+                $w = & $stats
+                $liveN = & $sessions
+                & $note ("  pre-warm: 700 ms after pointerdown on Cam 3 the page holds a speculative session (modal object {0}, opened {1}, connection {2}); live sessions {3}; dialog open {4}" -f [bool]$w.modal, $(if ($w.modal) { $w.modal.opened } else { '-' }), $(if ($w.modal) { $w.modal.connection } else { '-' }), $liveN, $(if ($w.modal) { $w.modal.dialogOpen } else { $false }))
+                if (-not $w.modal -or $w.modal.opened -or $w.modal.dialogOpen -or $liveN -ne 7) { & $fail "${browser}: pointerdown did not start exactly one speculative session without opening the modal" }
+                foreach ($type in @('mouseReleased')) {
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = $type; x = $pt.x; y = $pt.y; button = 'left'; clickCount = 1; buttons = 0 })
+                }
+                $h = & $modalIs { param($m) $m.hd -eq 'ready' } 8
+                if (-not $h) { & $fail "${browser}: a pre-warmed click never reached HD" }
+                else {
+                    & $note ("  pre-warmed click: modal for {0} reached HD {1} ms after the click (cold was {2}); live sessions {3} (still one extra)" -f $h.modal.name, $h.modal.hdMs, ($script:CamLivePageHd | Select-Object -Last 1), (& $sessions))
+                    $script:CamLivePageHd += ("{0} pre-warmed {1} ms" -f $browser, $h.modal.hdMs)
+                    if ($h.modal.name -ne 'Cam 3') { & $fail "${browser}: the pre-warmed modal is not Cam 3" }
+                    if ((& $sessions) -ne 7) { & $fail "${browser}: the pre-warmed open did not use exactly one extra session" }
+                }
+                & $click 4 4      # on the backdrop, outside the picture
+                $c = & $closedIs
+                $s3 = & $stats
+                & $note ("  backdrop click: closed {0}, hash '{1}', focus on '{2}'" -f [bool]$c, $s3.hash, $s3.activeElement)
+                if (-not $c -or $s3.activeElement -ne 'Cam 3') { & $fail "${browser}: a click on the backdrop did not close the modal with the focus restored" }
+                $liveN = & $sessionsIs 6 10
+                if ($liveN -ne 6) { & $fail "${browser}: after the backdrop close $liveN sessions remain" }
+
+                # 6. pre-warm that never becomes a click: pressed on a tile, released on something else
+                $deletes1 = (& $fxState).deletes
+                $pt = & $center (& $tileSel 'Cam 4') 0.4
+                foreach ($type in @('mouseMoved', 'mousePressed')) {
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = $type; x = $pt.x; y = $pt.y; button = 'left'; clickCount = 1; buttons = $(if ($type -eq 'mousePressed') { 1 } else { 0 }) })
+                }
+                Start-Sleep -Milliseconds 700
+                $liveWarm = & $sessions
+                $away = & $center '#lcount'
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = 'mouseMoved'; x = $away.x; y = $away.y; button = 'left'; buttons = 1 })
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = 'mouseReleased'; x = $away.x; y = $away.y; button = 'left'; clickCount = 1; buttons = 0 })
+                $liveN = & $sessionsIs 6 8
+                $s3 = & $stats
+                & $note ("  pre-warm released elsewhere: sessions while held {0}, back to {1} after the release; modal object {2}; dialog open {3}; DELETEs seen {4}" -f $liveWarm, $liveN, [bool]$s3.modal, [bool]$s3.hash.StartsWith('#live/'), ((& $fxState).deletes - $deletes1))
+                if ($liveWarm -ne 7) { & $fail "${browser}: the held press did not warm a session (sessions $liveWarm)" }
+                if ($liveN -ne 6 -or $s3.modal -or ((& $fxState).deletes - $deletes1) -lt 1) { & $fail "${browser}: a press released elsewhere left a session behind ($liveN sessions)" }
+
+                # 7. deep link, #live, and Back. The page is loaded afresh first. Whether the browser delivers the old page's unload
+                # DELETEs is not what is tested here (livegone closes a real window and counts); sessions are counted relative to
+                # whatever the old page left, so that "closing the modal removes exactly its session" is what is asserted.
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = 'about:blank' })
+                $left = & $sessionsIs 0 5
+                & $note ("  old page navigated away: its sessions left after up to 5 s: {0} (informational)" -f $left)
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = "$base/#live/Cam%201" })
+                $null = & $until { param($s) $s.shown } 20
+                & $note ("  instrumentation after the reload: " + (& $js $instrument))
+                $h = & $modalIs { param($m) $m.opened -and $m.hd -eq 'ready' } 20
+                & $note ("  deep link #live/Cam%201 on a fresh load: modal for {0}, hd {1}, shown {2}, pushed {3}" -f $(if ($h) { $h.modal.name } else { '-' }), $(if ($h) { $h.modal.hd } else { '-' }), $(if ($h) { $h.modal.shown } else { '-' }), $(if ($h) { $h.modal.pushed } else { '-' }))
+                if (-not $h -or $h.modal.name -ne 'Cam 1') { & $fail "${browser}: the deep link did not open the modal for Cam 1" }
+                $liveDeep = & $sessions
+                [void](& $js "location.hash = '#live'")
+                $c = & $closedIs
+                Start-Sleep -Milliseconds 1500
+                $liveAfter = & $sessions
+                & $note ("  live sessions with the deep-linked modal open: {0}; setting #live closes it: {1}, sessions after: {2} (one fewer)" -f $liveDeep, [bool]$c, $liveAfter)
+                if (-not $c -or $liveDeep - $liveAfter -ne 1) { & $fail "${browser}: #live did not close the modal and exactly its session (open $liveDeep, after $liveAfter)" }
+                & $clickAt (& $center (& $tileSel 'Cam 5') 0.4)
+                $h = & $modalIs { param($m) $m.opened -and $m.hd -eq 'ready' -and $m.pushed } 10
+                $liveOpen = & $sessions
+                [void](& $js 'history.back()')
+                $c = & $closedIs
+                Start-Sleep -Milliseconds 1500
+                $liveBack = & $sessions
+                $s3 = & $stats
+                & $note ("  click Cam 5 pushes #live/Cam%205 (pushed {0}); Back closes it: {1}, hash '{2}', page still shows the Live tab {3}; live sessions {4} -> {5} (one fewer)" -f $(if ($h) { $h.modal.pushed } else { '-' }), [bool]$c, $s3.hash, $s3.shown, $liveOpen, $liveBack)
+                if (-not $h -or -not $c -or -not $s3.shown) { & $fail "${browser}: Back did not close the modal and stay on the Live tab" }
+                if ($liveOpen - $liveBack -ne 1) { & $fail "${browser}: Back did not remove exactly the modal's session ($liveOpen -> $liveBack)" }
+                [void](& $sessionsIs 6 30)    # a stale session of the old page, if any, times out on its own
+
+                # 8. the main stream is unavailable: the sub picture stays, "HD unavailable" with Retry
+                [void](& $reset)
+                [void](& $js 'window.__fx.fail = true')
+                & $clickAt (& $center (& $tileSel 'Cam 3') 0.4)
+                $h = & $modalIs { param($m) $m.hd -eq 'unavailable' } 10
+                if (-not $h) { $h = & $stats; & $fail "${browser}: with the main stream unavailable the modal did not say so" }
+                else {
+                    $mh = $h.modal
+                    $retryShown = [bool](& $js '!document.getElementById(''lmretry'').classList.contains(''hide'')')
+                    & $note ("  main unavailable (page-side 404 for stream=main): hd {0}, shown {1}, chips '{2}', sub picture {3}x{4}, Retry button shown {5}, verdict '{6}', live sessions {7}" -f $mh.hd, $mh.shown, $mh.chips, $mh.sub.vw, $mh.sub.vh, $retryShown, $mh.verdict, (& $sessions))
+                    if ($mh.shown -ne 'sub' -or $mh.sub.vw -le 0 -or $mh.chips -notmatch 'HD unavailable' -or -not $retryShown) { & $fail "${browser}: the failure path lost the sub picture or the Retry" }
+                    [void](Start-Sleep -Milliseconds 300)
+                    $pxF = & $shotModal "$browser-modal-hd-unavailable" $h
+                    if ($pxF.LitShare -lt 0.5 -or $pxF.Colours -lt 4) { & $fail "${browser}: the modal went blank when HD was unavailable" }
+                }
+                [void](& $js 'window.__fx.fail = false')
+                & $clickAt (& $center '#lmretry')
+                $h = & $modalIs { param($m) $m.hd -eq 'ready' } 10
+                & $note ("  Retry with the main stream back: hd {0}, shown {1}" -f $(if ($h) { $h.modal.hd } else { 'not ready' }), $(if ($h) { $h.modal.shown } else { '-' }))
+                if (-not $h) { & $fail "${browser}: Retry did not reach HD" }
+
+                # 9. the modal's Fullscreen button calls the API (real fullscreen for a moment)
+                & $clickAt (& $center '#lmfs')
+                Start-Sleep -Milliseconds 700
+                $fsm = & $js '({ el: document.fullscreenElement ? document.fullscreenElement.id : null })'
+                $fxs = & $fxState
+                & $note ("  modal Fullscreen button: requestFullscreen called on the modal box {0} time(s); fullscreenElement '{1}'" -f $fxs.mfs, $fsm.el)
+                if ($fxs.mfs -ne 1) { & $fail "${browser}: the modal's Fullscreen button did not call requestFullscreen" }
+                [void](& $js 'document.fullscreenElement ? document.exitFullscreen() : 0')
+                Start-Sleep -Milliseconds 400
+                & $viewport 1920 1080
+
+                # 10. hidden with the modal open: every connection closes, restoring reopens tiles and modal
+                $mh = (& $stats).modal
+                $window = Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.getWindowForTarget'
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'minimized' } })
+                $hid = & $until { param($s) $s.visibility -eq 'hidden' -and @(@($s.tiles) | Where-Object { $_.open }).Count -eq 0 -and $s.modal -and -not $s.modal.session -and -not $s.modal.connection } 15
+                $liveN = & $sessionsIs 0 14
+                $n = & $readersIs 0 14
+                & $note ("  window minimized with the modal open: visibility {0}, open tile connections {1}, modal session {2}, modal still open {3}; live sessions {4}, camera stream2 readers {5}" -f $(if ($hid) { $hid.visibility } else { 'not hidden' }), $(if ($hid) { @(@($hid.tiles) | Where-Object { $_.open }).Count } else { '?' }), $(if ($hid) { $hid.modal.session } else { '?' }), $(if ($hid) { $hid.modal.dialogOpen } else { '?' }), $liveN, $n)
+                if (-not $hid) { & $fail "${browser}: minimizing did not close the tiles' and the modal's connections" }
+                if ($liveN -ne 0 -or $n -ne 0) { & $fail "${browser}: sessions remained while hidden (live $liveN, stream2 $n)" }
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'normal' } })
+                $r = & $until { param($s) $s.visibility -eq 'visible' -and (& $playing $s) -and $s.modal -and $s.modal.hd -eq 'ready' } 40
+                $liveN = & $sessionsIs 7 10
+                & $note ("  window restored: six tiles playing and the modal back on HD: {0}; live sessions {1}" -f [bool]$r, $liveN)
+                if (-not $r) { & $fail "${browser}: restoring did not reopen the tiles and the modal" }
+                if ($liveN -ne 7) { & $fail "${browser}: $liveN sessions after the restore, wanted 7" }
+                & $esc
+                $c = & $closedIs
+                $liveN = & $sessionsIs 6 10
+                if (-not $c -or $liveN -ne 6) { & $fail "${browser}: closing after the restore left $liveN sessions" }
+
+                # 11. the grid's Fullscreen button
+                $fs0 = (& $fxState).fs
+                & $clickAt (& $center '#lfs')
+                Start-Sleep -Milliseconds 800
+                $fsg = & $stats
+                $fxs = & $fxState
+                & $note ("  grid Fullscreen button: shown {0}, requestFullscreen called {1} time(s), fullscreenElement '{2}'{3}" -f $fsg.fullscreenOk, ($fxs.fs - $fs0), $fsg.fullscreen, $(if ($fsg.fullscreen) { "; in fullscreen the grid is $($fsg.grid.w)x$($fsg.grid.h), $($fsg.fit.cols) columns, tile $($fsg.fit.tile) px" } else { '' }))
+                if (-not $fsg.fullscreenOk -or ($fxs.fs - $fs0) -ne 1) { & $fail "${browser}: the Fullscreen button is missing or did not call requestFullscreen" }
+                [void](& $js 'document.fullscreenElement ? document.exitFullscreen() : 0')
+                Start-Sleep -Milliseconds 400
+                & $viewport 1920 1080
 
                 # ---- live view off: a second camui over a config with the flag off ----
                 & $viewport 1280 800
@@ -7530,7 +7867,7 @@ function Invoke-CamCheckLivePage {
                 & $note ("  live view off (second camui, LiveViewEnabled false): enabled={0}, tiles {1}, message: '{2}'" -f $(if ($o) { $o.enabled } else { '?' }), $(if ($o) { @($o.tiles).Count } else { '?' }), $(if ($o) { $o.note } else { 'none' }))
                 if (-not $o -or $o.enabled -or @($o.tiles).Count -ne 0 -or $o.note -notmatch 'LiveViewEnabled') { & $fail "${browser}: with live view off the tab did not say so" }
             }
-            catch { & $fail ("$browser run aborted: " + $_.Exception.Message) }
+            catch { & $fail ("$browser run aborted: " + $_.Exception.Message + " (line " + $_.InvocationInfo.ScriptLineNumber + ")") }
             finally {
                 Disconnect-CamTestCdp -Cdp $cdp
                 if ($started) { $end = Stop-CamTestBrowser -Started $started } else { $end = [pscustomobject]@{ Left = @(); ProfileRemoved = $true } }
@@ -7619,6 +7956,7 @@ function Invoke-CamCheckLivePage {
         $notes = @()
         if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
         $evidence += ("browser windows were up {0:n0} s in total; whole check {1:n0} s" -f $script:CamLivePageSeconds, $watch.Elapsed.TotalSeconds)
+        $evidence += ("time to HD (click to the main picture shown): " + ($script:CamLivePageHd -join '; '))
         $evidence += $notes
         if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
         if ($script:CamLivePageOk -and $rig) { try { Remove-CamTestTree -Path $rig.Dir } catch { $script:CamLivePageEvidence += 'cleanup failed' } }
@@ -7996,10 +8334,10 @@ function Invoke-CamCheckLiveLan {
             foreach ($type in @('mouseMoved', 'mousePressed', 'mouseReleased')) { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = $type; x = $pos.x; y = $pos.y; button = 'left'; clickCount = 1; buttons = $(if ($type -eq 'mousePressed') { 1 } else { 0 }) }) }
             Start-Sleep -Milliseconds 400
             $label = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'document.querySelector(".ltile .lcopy").textContent'
-            $focused = (& $stats).focus
-            & $note ("  Copy diagnostics clicked: the button now reads '$label'; the click did not focus the tile: $(-not $focused)")
+            $opened = (& $stats).modal
+            & $note ("  Copy diagnostics clicked: the button now reads '$label'; the click did not open the modal: $(-not $opened)")
             if ($label -ne 'Copied') { & $fail "Copy diagnostics did not copy (button reads '$label')" }
-            if ($focused) { & $fail 'clicking Copy diagnostics focused the tile' }
+            if ($opened) { & $fail 'clicking Copy diagnostics opened the camera modal' }
         }
         catch { & $fail ('negative run aborted: ' + $_.Exception.Message) }
         finally {

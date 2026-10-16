@@ -272,14 +272,24 @@ dialog p{margin:0;color:var(--ink-2)}
 }
 
 /* ---- live view ---- */
-.lpanel>.lgrid{padding:var(--pad)}
-.lnote{padding:26px var(--pad);text-align:center;border-bottom:1px solid var(--line-soft)}
+/* The Live tab uses the whole window: no max-width column, a few px of padding. live.js sets --lcols and --ltile
+   (bestGrid) so the tiles are as large as the window allows. */
+body.live-tab .app{max-width:none;padding:6px}
+body.live-tab .top{margin-bottom:6px;gap:12px}
+.lwrap{display:flex;flex-direction:column;gap:4px;background:var(--surface-0)}
+.lwrap:fullscreen{padding:4px;overflow:auto}
+.ltools{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;min-height:30px;padding:0 2px}
+.ltools .lhint{font-size:12px;margin-left:auto}
+.lwrap:fullscreen .ltools{position:absolute;top:8px;right:8px;z-index:3;min-height:0;opacity:.45}
+.lwrap:fullscreen .ltools:hover,.lwrap:fullscreen .ltools:focus-within{opacity:1}
+.lwrap:fullscreen .ltools>:not(#lfs){display:none}
+.lnote{padding:26px var(--pad);text-align:center;border:1px solid var(--line-soft);border-radius:var(--r);background:var(--surface-1)}
 .lnote .lnt{font-size:15px;font-weight:600}
 .lnote .lns{color:var(--ink-3);margin:6px auto 0;max-width:60ch;font-size:13px}
-.lgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.lgrid{display:grid;grid-template-columns:repeat(var(--lcols,3),var(--ltile,minmax(0,1fr)));gap:4px;justify-content:center;align-content:start}
 .lgrid:empty{display:none}
-.ltile{position:relative;aspect-ratio:16/9;background:#000;border:1px solid var(--line-soft);border-radius:var(--r);
-  overflow:hidden;cursor:pointer;outline-offset:2px}
+.ltile{position:relative;aspect-ratio:16/9;background:#000;border:0;border-radius:6px;
+  overflow:hidden;cursor:zoom-in;outline-offset:-2px}
 .ltile:focus-visible{outline:2px solid var(--accent)}
 .ltile video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
 .ltile .lover{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;text-align:center;
@@ -291,19 +301,43 @@ dialog p{margin:0;color:var(--ink-2)}
 .ltile .lcopy:hover{background:var(--surface-3)}
 .ltile[data-state="live"] .lover{display:none}
 .ltile .lbar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:10px;
-  padding:22px 10px 8px;background:linear-gradient(to top,rgba(0,0,0,.78),rgba(0,0,0,0))}
-.ltile .lname{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+  padding:18px 8px 6px;background:linear-gradient(to top,rgba(0,0,0,.72),rgba(0,0,0,0))}
+.ltile .lname{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;text-shadow:0 1px 2px #000}
 .ltile .lchip{margin-right:auto}
-.ltile .lmute{background:rgba(35,35,34,.9);border:1px solid var(--line);border-radius:8px;padding:5px 10px;
-  font-size:12px;color:var(--ink);min-height:30px}
+.ltile .lmute{background:rgba(35,35,34,.9);border:1px solid var(--line);border-radius:8px;padding:4px 10px;
+  font-size:12px;color:var(--ink);min-height:28px}
 .ltile .lmute:hover{background:var(--surface-3)}
 .ltile .lmute[aria-pressed="true"]{background:var(--accent);border-color:transparent}
-.ltile.focus{grid-column:1/-1;order:-1;border-color:var(--accent);max-height:max(320px,calc(100vh - 150px));justify-self:center;width:100%}
-@media(max-width:1000px){.lgrid{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:640px){
-  .lgrid{grid-template-columns:minmax(0,1fr)}
-  .lpanel>.lgrid{padding:10px}
   .ltile .lmute{min-height:36px;padding:6px 12px}
+  .ltools .lhint{display:none}
+  #lfs{margin-left:auto;min-height:36px}
+}
+
+/* ---- the camera modal: a dialog with the sub picture underneath and the main picture staged on top ---- */
+.lmodal{position:fixed;inset:0;width:100%;height:100%;max-width:none;max-height:none;margin:0;padding:0;border:0;background:transparent;color:var(--ink);overflow:hidden}
+.lmodal[open]{display:grid;place-items:center}
+.lmodal::backdrop{background:rgba(0,0,0,.82)}
+.lmbox{position:relative;width:min(calc(100% - 24px),calc((100vh - 24px) * 16 / 9));width:min(calc(100% - 24px),calc((100dvh - 24px) * 16 / 9));
+  background:#000;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.lmbox:fullscreen{width:100vw;height:100vh;border:0;border-radius:0;display:grid;place-items:center}
+.lmstage{position:relative;aspect-ratio:16/9;width:100%;background:#000}
+.lmbox:fullscreen .lmstage{width:min(100vw,calc(100vh * 16 / 9))}
+.lmv{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:transparent}
+.lmbox[data-show="sub"] #lmmain{opacity:0}
+.lmmsg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--ink-2);pointer-events:none}
+.lmtop{position:absolute;left:0;right:0;top:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:8px 10px 22px;background:linear-gradient(to bottom,rgba(0,0,0,.75),rgba(0,0,0,0))}
+.lmname{font-weight:600;font-size:15px;text-shadow:0 1px 2px #000;margin-right:2px}
+.lmchips{display:flex;gap:12px;align-items:center;margin-right:auto}
+.lmb{background:rgba(35,35,34,.92);border:1px solid var(--line);border-radius:8px;padding:5px 12px;font-size:13px;color:var(--ink);min-height:32px}
+.lmb:hover{background:var(--surface-3)}
+.lmb[aria-pressed="true"]{background:var(--accent);border-color:transparent}
+.lmb:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+@media(max-width:640px){
+  .lmbox{width:calc(100% - 12px)}
+  .lmtop{position:static;background:var(--surface-1);padding:8px}
+  .lmb{min-height:40px}
 }
 
 /* ---- view-only (HTTPS LAN listener, tlsReadOnly) ---- */
