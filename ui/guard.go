@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -126,7 +127,7 @@ func newGuard(cfg Config, log *slog.Logger) func(http.Handler) http.Handler {
 					refuse(http.StatusForbidden, "foreign origin", "forbidden: cross-origin request")
 					return
 				}
-				if changesState(r.Method) && r.ContentLength != 0 && !isJSON(r.Header.Get("Content-Type")) {
+				if changesState(r.Method) && r.ContentLength != 0 && !bodyTypeAllowed(r) {
 					refuse(http.StatusUnsupportedMediaType, "content type is not application/json", "unsupported media type: application/json required")
 					return
 				}
@@ -143,6 +144,25 @@ func changesState(method string) bool {
 		return true
 	}
 	return false
+}
+
+// whepRoute is the ONE route that may carry a body that is not JSON: a
+// browser's WebRTC offer is application/sdp. Nothing else is exempt - not
+// another method on this path, not another path, not another type - and the
+// Host, Origin and Sec-Fetch-Site checks above still apply to it.
+var whepRoute = regexp.MustCompile(`^/api/live/[^/]+/whep$`)
+
+func bodyTypeAllowed(r *http.Request) bool {
+	contentType := r.Header.Get("Content-Type")
+	if isJSON(contentType) {
+		return true
+	}
+	return r.Method == http.MethodPost && whepRoute.MatchString(r.URL.Path) && isSDP(contentType)
+}
+
+func isSDP(contentType string) bool {
+	media, _, err := mime.ParseMediaType(contentType)
+	return err == nil && media == "application/sdp"
 }
 
 func isJSON(contentType string) bool {
