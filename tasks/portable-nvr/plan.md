@@ -159,6 +159,12 @@ Commissioned on master of the original repository, ahead of this project, as the
   a frame, with no change to the grid (design `live-fit-design.md`, docs `ui.md`). Proven by `livepage` in Chrome and Edge (measured
   rectangles, instant picture, swap to the 1280x720 main, grid untouched, close/Esc/backdrop/deep link/Back, pre-warm leaves no session,
   HD-unavailable path, hidden window, fullscreen calls) and `tests/live/bestgrid.test.js`.
+- **Status (2026-10-17), Live robustness A on branch `portable-nvr-liverobust` (not merged): a wall that stays on.** A hidden window or
+  another camui tab keeps its streams for a grace period (camui `liveHiddenGraceSeconds`, default 300, 0 = free at once, -1 = never;
+  env `CAMUI_LIVE_HIDDEN_GRACE`; `hiddenGraceSeconds` in `GET /api/live`) and frees them after it; a stalled picture (no decoded frames for 8 s) is
+  rebuilt; killed servers, restarted cameras and camui, a sleeping page and a hung server recover without a reload with capped retry
+  traffic; tiles scrolled out of view are parked; `live-diag/3`. Design `live-robust-design.md`; proven by the new opt-in `liverobust`
+  check in Chrome and Edge (docs `ui.md`).
 
 ### Stage 3 - the internet
 
