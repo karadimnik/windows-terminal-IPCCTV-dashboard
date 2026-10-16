@@ -48,8 +48,11 @@ The binary is never copied anywhere, so a rebuild takes effect the next time the
 | `ui/build.sh [output]` | Cross-compiles `camui.exe` into the repository root, or to `output` if you name one. A bash command, so it needs WSL or another machine with bash, and **Go 1.27 or newer** - `go.mod` asks for it and an apt-packaged Go will refuse the build; [docs/go-toolchain.md](go-toolchain.md) is the one-time install, and the script also finds a toolchain at `~/.local/go/bin`. It finds its own directory, so the directory you run it from does not matter. It runs `gofmt`, `go vet` and `go test` first and stops on any of them, so a build that completes is a build that passed. |
 | `.\camui.exe` | Runs it in the foreground on `http://127.0.0.1:8787/`, with its log on screen. Useful when you want to watch what it is doing; Ctrl+C stops it. |
 | `-listen <host:port>` | Where to bind. Default `127.0.0.1:8787`. It **refuses to start** on any non-loopback address unless a token of at least 16 characters is configured. |
-| `-config <path>` | A JSON config file: `listen`, `archiveRoot`, `statusFile`, `scriptDir`, `token`, `allowedHosts`. The installed launcher passes `camui.config.json` from beside the binary if that file exists, and nothing else needs to change to use it. |
+| `-config <path>` | A JSON config file: `listen`, `archiveRoot`, `statusFile`, `scriptDir`, `token`, `allowedHosts`, `tlsListen`, `tlsHosts`, `tlsDir`, `tlsToken`. The installed launcher passes `camui.config.json` from beside the binary if that file exists, and nothing else needs to change to use it. |
 | `-archive-root <path>` `-status-file <path>` `-script-dir <path>` | Override what it reads. Precedence for the archive root is this flag or `archiveRoot` in the config file, then `RootPath` in the `recorder.config.json` beside the binary, then the built-in `E:\cameras` - so moving the archive needs no second edit here. The status file defaults to `<archive root>\_state\status.json` and the script directory to the directory holding the binary. |
+| `-tls-listen <ip:port>` `-tls-dir <path>` | The HTTPS LAN listener and where its certificates live; see [HTTPS on the LAN](#https-on-the-lan-a-phone-or-a-second-pc). |
+| `-print-ca` | Creates the local certificate authority if needed, prints its file, SHA-256 fingerprint and install steps, and exits. Prints no key. |
+| `-new-token` | Prints a fresh 32-byte hex token and exits. It writes nothing: paste it into `tlsToken` (or `CAMUI_TLS_TOKEN`). |
 | `-version` | Prints the build stamp and exits. |
 
 The binary has to sit beside the scripts: with no `-script-dir` it looks for `cam.ps1`, `cameras.json` and `recorder.config.json` in its own folder.
@@ -102,3 +105,45 @@ Remove-NetFirewallRule -DisplayName 'IPCCTV live view media (UDP 8189)'   # to t
 The rule only helps if the network is a Private one: check with `Get-NetConnectionProfile` and change a Wi-Fi network with `Set-NetConnectionProfile -InterfaceAlias 'Wi-Fi' -NetworkCategory Private`. Use the port from your `LiveUdpAddress` if it is not 8189.
 
 `tests\live\demo.ps1 -Lan` runs the demo with the media advertised on this PC's private address (physical adapters only, the one with the default route; if that is ambiguous or there is none it stops and asks for `-LanAddress 192.168.1.50`). It runs the live instance from `C:\mediamtx\mediamtx.exe` so an existing rule for that program applies, and it never creates a rule. Windows may still ask about the program the first time it listens beyond loopback.
+
+## HTTPS on the LAN: a phone or a second PC
+
+An optional second listener serves the whole web app, the Live screen included, over HTTPS to devices on the home network. It is off by default and the loopback listener (`127.0.0.1:8787`, plain HTTP) is unchanged. There is no plain-HTTP listener on the LAN address and no redirect; a plain request to the HTTPS port gets a bare 400.
+
+**Config** (`camui.config.json` beside `camui.exe`, then restart the UI):
+
+```json
+{
+  "tlsListen": "192.168.1.50:8443",
+  "tlsToken": "<output of camui.exe -new-token>"
+}
+```
+
+- `tlsListen` is a private IPv4 address of this PC and a port (`10.x`, `172.16-31.x`, `192.168.x`). `0.0.0.0`, names, IPv6, loopback and public addresses are refused. The PC's address should be reserved on the router so it stays put.
+- `tlsToken` (or the environment variable `CAMUI_TLS_TOKEN`) must be at least 16 characters; without it, or with a short one, camui **refuses to start**. It falls back to `token` when absent. It is separate from `token` so that switching the LAN listener on does not force a token onto the loopback dashboard. Generate one with `camui.exe -new-token`; nothing is written for you.
+- `tlsHosts` (optional, at most 4): more names the certificate covers, private IPv4 literals or names ending `.lan`, `.local`, `.home.arpa`, `.internal`. The `tlsListen` address, `127.0.0.1` and `localhost` are always included. Anything else is refused.
+- `tlsDir` (default `%LOCALAPPDATA%\IPCCTV\tls`) holds the certificate authority and the server certificate with their keys. Keep it private and out of the repository (`*.key`, `*.pem`, `*.crt` and `tls/` are in `.gitignore`).
+
+**Windows Firewall** (not applied for you; run in an elevated PowerShell, adjust the port): allow the page and the media from this subnet on Private networks only.
+
+```powershell
+New-NetFirewallRule -DisplayName 'IPCCTV camui HTTPS (TCP 8443)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8443 -Program '<path to camui.exe>' -Profile Private -RemoteAddress LocalSubnet
+Remove-NetFirewallRule -DisplayName 'IPCCTV camui HTTPS (TCP 8443)'   # to take it away again
+```
+
+The video itself needs the media settings and the UDP rule from [Live view on the LAN](#live-view-on-the-lan-media-firewall-and-stuck-tiles).
+
+**The certificate authority.** The first start (or `camui.exe -print-ca`) creates a local CA, ECDSA P-256, valid 10 years, and the server certificate it signs. The CA is limited by X.509 name constraints to private addresses (10/8, 172.16/12, 192.168/16, 127/8) and the names `localhost`, `.lan`, `.local`, `.home.arpa`, `.internal`: a leaked CA key cannot vouch for a public website (a test proves the standard verifier refuses `example.com` and a public IP). The server certificate lasts 390 days and is replaced automatically when it is near expiry or when the addresses it must cover change (a new LAN address is just a restart); devices keep trusting the CA. Keys are written through a temp file restricted to your Windows account (`icacls`, inherited access removed) before any secret goes into it, then renamed; only the CA **certificate** is ever served (`/api/tls/ca.crt`, after the token; it is a 404 on the loopback listener). `camui.exe -print-ca` prints its path and SHA-256 fingerprint.
+
+**Install the CA once per device.** Get the file there (open `https://192.168.1.50:8443/?token=...` and use **Settings > Connect a phone** after clicking through the first certificate warning, or copy the file), and check the fingerprint the device shows against `-print-ca` before trusting it.
+- **iPhone/iPad:** open the file, then Settings > General > VPN & Device Management > the profile > Install; then Settings > General > About > Certificate Trust Settings > switch the root on. On some iOS 18 builds the root may not appear in that list (unverified here).
+- **Android:** save the file, Settings > Security > Install a certificate > CA certificate. Chrome trusts a user-installed CA; some apps do not.
+- **Windows:** double-click the file > Install Certificate > Trusted Root Certification Authorities. **macOS:** Keychain Access > import > set to Always Trust. **Linux:** your distribution's `update-ca-certificates` procedure, or the browser's own certificate manager.
+
+Then open `https://192.168.1.50:8443/?token=<token>` once; the token moves into a cookie and the address bar is cleaned.
+
+**Rotate or revoke.** Delete the `tlsDir` folder and restart camui: a new CA and certificate are created; remove the old CA from each device and install the new one. To cut one device off, change `tlsToken`.
+
+**The token on the LAN.** Every request needs it, static files and the Live proxy included, as a cookie, a `Authorization: Bearer` header, or once as `?token=`. The cookie is `Secure; HttpOnly; SameSite=Strict`, lives 30 days and holds a one-way derivation of the token, not the token, so it survives a restart and a copy of it does not reveal the token. After 10 failures in a minute from one address that address gets 429 with `Retry-After`; at most 1024 addresses are tracked. Failures are logged (address, method, path, reason) and never the token. On this listener a page must be `https` and from this address: a foreign site, an `http://` page, a rebinding host name or a cross-site fetch is refused.
+
+**Threat note.** The token and the HTTPS keep other devices out and the traffic private on the LAN. Anyone who can read `tlsDir` can read the private keys: with the CA key they can mint certificates for private addresses and `.lan`-style names (not public ones), and with the server key they can impersonate this PC to a device that trusts the CA. Keep the folder private (it is restricted to your account) and do not copy it. This does not make camui safe to expose to the internet.

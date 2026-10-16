@@ -49,3 +49,6 @@ camui.config.json
 *.crt
 *.pem
 *.pfx
+
+# Local CA and server keys for the LAN HTTPS listener (normally outside the repo, in %LOCALAPPDATA%\IPCCTV\tls)
+tls/
