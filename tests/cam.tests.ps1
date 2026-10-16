@@ -7825,14 +7825,16 @@ function Invoke-CamCheckLivePage {
                 Start-Sleep -Milliseconds 400
                 & $viewport 1920 1080
 
-                # 10. hidden with the modal open: every connection closes, restoring reopens tiles and modal
+                # 10. hidden with the modal open. The default (a grace period) keeps everything; the old behaviour is grace 0, set here through the test hook,
+                # so that the free-and-reopen path stays covered (liverobust measures the default and the expiry).
+                [void](& $js 'window.__liveTune({ grace: 0 })')
                 $mh = (& $stats).modal
                 $window = Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.getWindowForTarget'
                 [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'minimized' } })
                 $hid = & $until { param($s) $s.visibility -eq 'hidden' -and @(@($s.tiles) | Where-Object { $_.open }).Count -eq 0 -and $s.modal -and -not $s.modal.session -and -not $s.modal.connection } 15
                 $liveN = & $sessionsIs 0 14
                 $n = & $readersIs 0 14
-                & $note ("  window minimized with the modal open: visibility {0}, open tile connections {1}, modal session {2}, modal still open {3}; live sessions {4}, camera stream2 readers {5}" -f $(if ($hid) { $hid.visibility } else { 'not hidden' }), $(if ($hid) { @(@($hid.tiles) | Where-Object { $_.open }).Count } else { '?' }), $(if ($hid) { $hid.modal.session } else { '?' }), $(if ($hid) { $hid.modal.dialogOpen } else { '?' }), $liveN, $n)
+                & $note ("  window minimized with the modal open (grace 0): visibility {0}, open tile connections {1}, modal session {2}, modal still open {3}; live sessions {4}, camera stream2 readers {5}" -f $(if ($hid) { $hid.visibility } else { 'not hidden' }), $(if ($hid) { @(@($hid.tiles) | Where-Object { $_.open }).Count } else { '?' }), $(if ($hid) { $hid.modal.session } else { '?' }), $(if ($hid) { $hid.modal.dialogOpen } else { '?' }), $liveN, $n)
                 if (-not $hid) { & $fail "${browser}: minimizing did not close the tiles' and the modal's connections" }
                 if ($liveN -ne 0 -or $n -ne 0) { & $fail "${browser}: sessions remained while hidden (live $liveN, stream2 $n)" }
                 [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'normal' } })
@@ -7845,6 +7847,7 @@ function Invoke-CamCheckLivePage {
                 $c = & $closedIs
                 $liveN = & $sessionsIs 6 10
                 if (-not $c -or $liveN -ne 6) { & $fail "${browser}: closing after the restore left $liveN sessions" }
+                [void](& $js 'window.__liveTune({ grace: null })')
 
                 # 11. the grid's Fullscreen button
                 $fs0 = (& $fxState).fs
