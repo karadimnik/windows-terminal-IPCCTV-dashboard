@@ -8334,10 +8334,10 @@ function Invoke-CamCheckLiveLan {
             foreach ($type in @('mouseMoved', 'mousePressed', 'mouseReleased')) { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = $type; x = $pos.x; y = $pos.y; button = 'left'; clickCount = 1; buttons = $(if ($type -eq 'mousePressed') { 1 } else { 0 }) }) }
             Start-Sleep -Milliseconds 400
             $label = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'document.querySelector(".ltile .lcopy").textContent'
-            $focused = (& $stats).focus
-            & $note ("  Copy diagnostics clicked: the button now reads '$label'; the click did not focus the tile: $(-not $focused)")
+            $opened = (& $stats).modal
+            & $note ("  Copy diagnostics clicked: the button now reads '$label'; the click did not open the modal: $(-not $opened)")
             if ($label -ne 'Copied') { & $fail "Copy diagnostics did not copy (button reads '$label')" }
-            if ($focused) { & $fail 'clicking Copy diagnostics focused the tile' }
+            if ($opened) { & $fail 'clicking Copy diagnostics opened the camera modal' }
         }
         catch { & $fail ('negative run aborted: ' + $_.Exception.Message) }
         finally {
