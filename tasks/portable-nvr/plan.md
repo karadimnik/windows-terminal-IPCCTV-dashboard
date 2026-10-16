@@ -127,6 +127,15 @@ Commissioned on master of the original repository, ahead of this project, as the
   private overlay network.
 - Acceptance: a device without the token gets 401 on every endpoint and every stream; `uileak` re-run against
   the LAN bind; no credential in any response; the firewall rule scoped to the LAN profile.
+- **Status (2026-10-16), step 2a on branch `portable-nvr-2a` (not merged): the media path and the diagnostics only.**
+  A tile that is not playing explains itself (signalling result, ICE states, candidate counts and kinds, "No media after
+  15 s") with a Copy diagnostics line. New keys `LiveAdvertiseHosts` (private IPv4 literals, default empty) and a LAN
+  `LiveUdpAddress` (`0.0.0.0` or one private address), both off by default: the default live config is byte-identical
+  (`livecfg`, golden hash). `livelan` shows Chrome and Edge playing when the answer holds ONLY a non-loopback private
+  candidate (on this PC a virtual adapter's, since it had no physical LAN address at test time). Firewall commands are
+  documented, none applied. Prompted by the Operator's report that tiles stay on "Connecting" in Firefox: the loopback-only
+  hypothesis fits (MediaMTX offers only the loopback host candidate) but is UNVERIFIED until he retests. Still open for
+  Stage 2: camui on the LAN with the token, TLS, a physical-NIC and phone test, whether Firefox is a supported browser.
 
 ### Stage 3 - the internet
 
