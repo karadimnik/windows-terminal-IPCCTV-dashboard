@@ -21,6 +21,17 @@
     rather than a temp copy, so an existing Windows Firewall rule for that program applies and no new prompt for a
     new path is needed; the demo itself never creates a firewall rule. camui (the page) stays on loopback.
 
+    -Tls (implies -Lan) also serves the whole page over HTTPS on the LAN address, for a phone: camui gets an HTTPS listener
+    (-TlsPort, default 18443) with a fresh random token that is passed ONLY through the environment variable CAMUI_TLS_TOKEN
+    and printed once to this console, view-only, with a throwaway certificate authority in the demo's own temp folder (NOT
+    %LOCALAPPDATA%\IPCCTV\tls). It prints the https URL with ?token=, the CA file and SHA-256 fingerprint, short phone steps
+    and the exact ELEVATED firewall commands (Private profile, LocalSubnet); it never applies them. To keep those rules stable
+    camui runs from a FIXED path, %LOCALAPPDATA%\IPCCTV\demo\camui.exe (-ProgramPath), which is left in place afterwards.
+    A temp-path program has no allow rule, and Windows would prompt (a dismissed prompt can create a block rule), so the demo
+    REFUSES to bind beyond loopback, prints the commands and stops, unless a read-only look at the firewall shows an enabled
+    inbound Allow rule for that program (TCP) and for C:\mediamtx\mediamtx.exe (UDP) on the Private profile, or you pass
+    -FirewallReady after running the commands yourself. At the end it deletes the demo TLS folder and every temp folder.
+
     Run it from a LOCAL directory in Windows PowerShell 5.1:
         cd C:\Windows\Temp
         powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\tests\live\demo.ps1 -Minutes 15
@@ -37,7 +48,14 @@ param(
     # Also advertise this PC's private LAN address for the media (browsers that ignore loopback, such as Firefox, need it).
     [switch]$Lan,
     # With -Lan: the address to use, when this PC has several candidates. Must be a private IPv4 of an up adapter here.
-    [string]$LanAddress = ''
+    [string]$LanAddress = '',
+    # Also serve the page over HTTPS on the LAN address (implies -Lan). See above.
+    [switch]$Tls,
+    [ValidateRange(1024, 65535)][int]$TlsPort = 18443,
+    # With -Tls: the program camui runs from. Default %LOCALAPPDATA%\IPCCTV\demo\camui.exe, so a printed firewall rule is stable.
+    [string]$ProgramPath = '',
+    # With -Tls: skip the read-only firewall check because you ran the printed commands (or know a rule covers both programs).
+    [switch]$FirewallReady
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +65,27 @@ $rig = $null; $ui = $null
 $binDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livedemo-bin'
 $uiCopy = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\camui-livedemo'
 $savedExe = $env:CAMUI_TEST_EXE
+$refused = $false
+if ($Tls) { $Lan = $true }
+if (-not $ProgramPath) { $ProgramPath = Join-Path -Path $env:LOCALAPPDATA -ChildPath 'IPCCTV\demo\camui.exe' }
+$mediaProgram = 'C:\mediamtx\mediamtx.exe'
+$mediaPort = 18189
+
+function Test-CamDemoFirewallCovered {
+    # Read-only: is there an ENABLED inbound ALLOW rule for $Program that applies to Private networks and to this protocol/port?
+    param([string]$Program, [string]$Protocol, [int]$LocalPort)
+    foreach ($filter in @(Get-NetFirewallApplicationFilter -ErrorAction SilentlyContinue)) {
+        if ([string]$filter.Program -ne $Program) { continue }
+        $rule = $filter | Get-NetFirewallRule -ErrorAction SilentlyContinue
+        if (-not $rule -or $rule.Enabled -ne 'True' -or $rule.Direction -ne 'Inbound' -or $rule.Action -ne 'Allow' -or [string]$rule.Profile -notmatch 'Private|Any') { continue }
+        $ports = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue)
+        if (-not $ports.Count) { return $true }
+        foreach ($pf in $ports) {
+            if (([string]$pf.Protocol -in 'Any', $Protocol) -and ([string]$pf.LocalPort -eq 'Any' -or @(([string]$pf.LocalPort) -split ',') -contains [string]$LocalPort)) { return $true }
+        }
+    }
+    return $false
+}
 
 try {
     # Its own ports must be free; the real system's are only reported.
@@ -56,24 +95,6 @@ try {
     $real = @(@(8787, 8554, 9997, 8889) | Where-Object { -not (Test-CamTestPortFree -Port $_) })
     if ($real.Count) { Write-Host ("note: port(s) {0} are held by something else (the real system, if it is running). The demo does not use or touch them." -f ($real -join ', ')) -ForegroundColor DarkYellow }
     foreach ($need in @('C:\mediamtx\mediamtx.exe', (Get-CamConfigDefault).FfmpegPath)) { if (-not (Test-Path -LiteralPath $need)) { throw "$need is needed (the demo copies MediaMTX and uses ffmpeg for the synthetic cameras)." } }
-
-    $exe = $CamuiExe
-    if (-not $exe) { $exe = $env:CAMUI_TEST_EXE }
-    if (-not $exe) {
-        Write-Host 'building camui (Go through WSL) ...'
-        [void](New-Item -ItemType Directory -Path $binDir -Force)
-        $exe = Join-Path -Path $binDir -ChildPath 'camui-demo.exe'
-        $uiLinux = ((& wsl.exe -e wslpath -a -u (Join-Path (Get-CamTestRepo) 'ui')) | Select-Object -First 1)
-        $outLinux = ((& wsl.exe -e wslpath -a -u $exe) | Select-Object -First 1)
-        # A tiny script file: quoting a go build line through wsl.exe and bash -c does not survive.
-        $script = Join-Path -Path $binDir -ChildPath 'build.sh'
-        [System.IO.File]::WriteAllText($script, "#!/bin/bash`nexport PATH=`"`$PATH:`$HOME/.local/go/bin`"`ncd `"`$1`" || exit 1`nCGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags `"-s -w -X main.version=demo`" -o `"`$2`" .`n", (New-Object System.Text.UTF8Encoding($false)))
-        $scriptLinux = ((& wsl.exe -e wslpath -a -u $script) | Select-Object -First 1)
-        Push-Location -LiteralPath $env:TEMP
-        try { & wsl.exe -e bash $scriptLinux $uiLinux $outLinux } finally { Pop-Location }
-        if (-not (Test-Path -LiteralPath $exe)) { throw 'could not build camui; pass -CamuiExe (a camui.exe built from this tree).' }
-    }
-    $env:CAMUI_TEST_EXE = $exe
 
     $liveConfig = @{}
     if ($Lan -or $LanAddress) {
@@ -96,18 +117,101 @@ try {
         $liveConfig = @{ LiveUdpAddress = '0.0.0.0:18189'; LiveAdvertiseHosts = @($pick.Address); LiveExePath = 'C:\mediamtx\mediamtx.exe' }
     }
 
+
+    $tlsToken = ''
+    $fwTcp = "New-NetFirewallRule -DisplayName 'IPCCTV demo camui HTTPS (TCP $TlsPort)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $TlsPort -Program '$ProgramPath' -Profile Private -RemoteAddress LocalSubnet"
+    $fwUdp = "New-NetFirewallRule -DisplayName 'IPCCTV demo live media (UDP $mediaPort)' -Direction Inbound -Action Allow -Protocol UDP -LocalPort $mediaPort -Program '$mediaProgram' -Profile Private -RemoteAddress LocalSubnet"
+    $fwRemove = "Remove-NetFirewallRule -DisplayName 'IPCCTV demo camui HTTPS (TCP $TlsPort)', 'IPCCTV demo live media (UDP $mediaPort)'"
+    if ($Tls) {
+        if (-not (Test-CamTestPortFree -Port $TlsPort)) { throw "TCP port $TlsPort (-TlsPort) is already in use; nothing was started." }
+        $coveredTcp = Test-CamDemoFirewallCovered -Program $ProgramPath -Protocol 'TCP' -LocalPort $TlsPort
+        $coveredUdp = Test-CamDemoFirewallCovered -Program $mediaProgram -Protocol 'UDP' -LocalPort $mediaPort
+        Write-Host ("firewall (read-only look): an allow rule covers camui at the demo path on TCP {0}: {1}; MediaMTX on UDP {2}: {3}" -f $TlsPort, $coveredTcp, $mediaPort, $coveredUdp)
+        if (-not (($coveredTcp -and $coveredUdp) -or $FirewallReady)) {
+            $refused = $true
+            Write-Host ''
+            Write-Host 'Not starting: binding beyond loopback with no allow rule would make Windows prompt (and a dismissed prompt can create a block rule).' -ForegroundColor Yellow
+            Write-Host 'Run these in an ELEVATED (Administrator) PowerShell, then start the demo again (add -FirewallReady if you skip the check):'
+            Write-Host "  $fwTcp"
+            Write-Host "  $fwUdp"
+            Write-Host 'Take them away again afterwards with:'
+            Write-Host "  $fwRemove"
+            Write-Host ("Also: the Wi-Fi network must be a Private profile (now '{0}'): Get-NetConnectionProfile; Set-NetConnectionProfile -InterfaceAlias '{1}' -NetworkCategory Private" -f $pick.Profile, $pick.Alias)
+            throw 'refused: no firewall rule is known to cover the demo (nothing was started).'
+        }
+        if ($FirewallReady -and -not ($coveredTcp -and $coveredUdp)) { Write-Host 'warning: -FirewallReady given but no covering rule was found; if you have not run the commands, Windows may prompt.' -ForegroundColor Yellow }
+    }
+
+    $exe = $CamuiExe
+    if (-not $exe) { $exe = $env:CAMUI_TEST_EXE }
+    if (-not $exe) {
+        Write-Host 'building camui (Go through WSL) ...'
+        [void](New-Item -ItemType Directory -Path $binDir -Force)
+        $exe = Join-Path -Path $binDir -ChildPath 'camui-demo.exe'
+        $uiLinux = ((& wsl.exe -e wslpath -a -u (Join-Path (Get-CamTestRepo) 'ui')) | Select-Object -First 1)
+        $outLinux = ((& wsl.exe -e wslpath -a -u $exe) | Select-Object -First 1)
+        # A tiny script file: quoting a go build line through wsl.exe and bash -c does not survive.
+        $script = Join-Path -Path $binDir -ChildPath 'build.sh'
+        [System.IO.File]::WriteAllText($script, "#!/bin/bash`nexport PATH=`"`$PATH:`$HOME/.local/go/bin`"`ncd `"`$1`" || exit 1`nCGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags `"-s -w -X main.version=demo`" -o `"`$2`" .`n", (New-Object System.Text.UTF8Encoding($false)))
+        $scriptLinux = ((& wsl.exe -e wslpath -a -u $script) | Select-Object -First 1)
+        Push-Location -LiteralPath $env:TEMP
+        try { & wsl.exe -e bash $scriptLinux $uiLinux $outLinux } finally { Pop-Location }
+        if (-not (Test-Path -LiteralPath $exe)) { throw 'could not build camui; pass -CamuiExe (a camui.exe built from this tree).' }
+    }
+    $env:CAMUI_TEST_EXE = $exe
+    $tlsExtra = @()
+    $tlsDir = ''
+    if ($Tls) {
+        # The fixed program path keeps the firewall rule stable; the exe copy holds no key and is left in place.
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $ProgramPath) -Force)
+        Copy-Item -LiteralPath $exe -Destination $ProgramPath -Force
+        $tlsToken = (@(& $ProgramPath '-new-token') -join '').Trim()
+        if ($tlsToken -notmatch '^[0-9a-f]{64}$') { throw 'camui -new-token did not print a token.' }
+        $tlsDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livedemo\tls'
+        $tlsExtra = @('-tls-listen', ('{0}:{1}' -f $pick.Address, $TlsPort), '-tls-dir', $tlsDir)
+    }
+
     Write-Host 'starting the rig: supervisor, live-view MediaMTX and six synthetic cameras (about 30 s) ...'
     $cameras = 'Front Entrance', 'Rear Balcony', 'Field Front', 'Car Garage', 'Workshop Entrance', 'Workshop' |
         ForEach-Object { [pscustomobject]@{ Name = $_; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 'Front Entrance') } }
     $rig = Start-CamTestLiveRig -Name 'livedemo' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 10 -Config $liveConfig
-    $ui = Start-CamTestLiveCamui -Rig $rig -Port $Port -Name 'camui-livedemo'
+    if ($Tls) {
+        $tlsDir = Join-Path -Path $rig.Dir -ChildPath 'tls'
+        $tlsExtra = @('-tls-listen', ('{0}:{1}' -f $pick.Address, $TlsPort), '-tls-dir', $tlsDir)
+        # -print-ca creates the throwaway CA in the demo's own folder (never %LOCALAPPDATA%\IPCCTV\tls) and prints its fingerprint.
+        $caText = @(& $ProgramPath '-print-ca' '-tls-dir' $tlsDir)
+        $caFile = ([regex]::Match(($caText -join "`n"), 'file:\s+(\S.*)')).Groups[1].Value.Trim()
+        $caFp = ([regex]::Match(($caText -join "`n"), 'SHA-256:\s+([0-9A-F:]{95})')).Groups[1].Value
+        $env:CAMUI_TLS_TOKEN = $tlsToken
+    }
+    try {
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port $Port -Name 'camui-livedemo' -ExtraArgs $tlsExtra -RunExe $(if ($Tls) { $ProgramPath } else { '' })
+    }
+    finally { Remove-Item Env:\CAMUI_TLS_TOKEN -ErrorAction SilentlyContinue }
     if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
 
     Write-Host ''
     Write-Host ("  Live screen:  http://127.0.0.1:{0}/#live" -f $Port) -ForegroundColor Green
     Write-Host ("  One camera:   http://127.0.0.1:{0}/#live/Front%20Entrance" -f $Port)
     Write-Host '  Token:        none (loopback only)'
-    if ($liveConfig.Count) { Write-Host '  Media:        loopback and the LAN address above. The page itself is still loopback only: other devices cannot open it yet.' }
+    if ($liveConfig.Count -and -not $Tls) { Write-Host '  Media:        loopback and the LAN address above. The page itself is still loopback only: other devices cannot open it yet.' }
+    if ($Tls) {
+        $up = $false
+        for ($i = 0; $i -lt 40 -and -not $up; $i++) { $tcp = New-Object System.Net.Sockets.TcpClient; try { $tcp.Connect($pick.Address, $TlsPort); $up = $true } catch { Start-Sleep -Milliseconds 250 } finally { $tcp.Close() } }
+        if (-not $up) { throw 'the HTTPS listener did not come up.' }
+        Write-Host '  ---- HTTPS for a phone or another PC on this Wi-Fi (view-only, fake cameras) ----' -ForegroundColor Green
+        Write-Host ("  Open:         https://{0}:{1}/?token={2}#live" -f $pick.Address, $TlsPort, $tlsToken) -ForegroundColor Green
+        Write-Host '                (the token is shown once, here only; it is not in any command line or file)'
+        Write-Host ("  CA file:      {0}  (this throwaway CA is deleted when the demo ends)" -f $caFile)
+        Write-Host ("  Fingerprint:  {0}" -f $caFp)
+        Write-Host '  On the phone: 1) be on this PC''s Wi-Fi (a Private network). 2) Open the link; the first certificate warning is expected: continue.'
+        Write-Host '                3) Settings tab > Connect a phone: compare the fingerprint, download the certificate, install it (iPhone: Settings > General > VPN & Device'
+        Write-Host '                Management, then About > Certificate Trust Settings; Android: Settings > Security > Install a certificate > CA certificate), reopen the link.'
+        Write-Host '  Firewall rules this needs (ELEVATED PowerShell; NOT applied by the demo):'
+        Write-Host "    $fwTcp"
+        Write-Host "    $fwUdp"
+        Write-Host "    remove: $fwRemove"
+    }
     Write-Host '  The cameras are synthetic colour bars; nothing real is read or started.'
     Write-Host ("  Press Enter to stop everything, or it stops by itself in {0} minute(s)." -f $Minutes)
     Write-Host ''
@@ -129,5 +233,10 @@ finally {
         if ($path -and (Test-Path -LiteralPath $path)) { try { Remove-CamTestTree -Path $path } catch { Write-Host "  could not remove $path" -ForegroundColor Yellow } }
     }
     $env:CAMUI_TEST_EXE = $savedExe
-    Write-Host 'done: everything the demo started is stopped and its temp folders are removed.'
+    $env:CAMUI_TLS_TOKEN = $null
+    if ($Tls -and -not $refused) {
+        $left = @(Get-CimInstance Win32_Process -Filter "Name = 'camui.exe' or Name = 'mediamtx.exe' or Name = 'ffmpeg.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*livedemo*' })
+        Write-Host ("remaining: demo processes {0}; demo TLS folder (CA and keys) present: {1}; left in place on purpose: {2} (a copy of camui, no key)" -f $left.Count, $(if ($tlsDir) { Test-Path -LiteralPath $tlsDir } else { $false }), $ProgramPath)
+    }
+    Write-Host $(if ($refused) { 'done: nothing was started.' } else { 'done: everything the demo started is stopped and its temp folders are removed.' })
 }
