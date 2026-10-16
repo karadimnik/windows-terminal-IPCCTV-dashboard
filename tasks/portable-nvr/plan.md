@@ -100,6 +100,15 @@ Additive to `camui`; the existing Dashboard, Settings and Footage screens are un
 - Acceptance: `uileak` extended and green; six tiles render in the PC's browser within the CPU budget set in
   Spike B; rendered checks at desktop and phone widths; a 24-hour tab soak with no growth in memory; with the
   flag off, everything behaves as before; the full harness green.
+- **Status (2026-10-16).** 1.1 done and merged (Stage 1A). 1.2 to 1.4 built on branch `portable-nvr-1b` (not merged):
+  the Live tab, the same-origin WHEP proxy with its session caps, `GET /api/live`, one scoped guard exception, `Live.Cameras`
+  in `status.json`; design in `live-1b-design.md`, user documentation in `docs/ui.md`. Proven in Chrome and Edge against the
+  real supervisor and a synthetic camera: six sub tiles play at 1920x1080 (3 columns) and 390x844 (1 column), a click or
+  `#live/<name>` focuses a tile on main, audio is muted until unmuted, hiding the window closes every connection, the camera's
+  `stream2` session count follows the viewers, `uileak` covers the live responses and the SDP answer, and a foreign page, a
+  cross-site request or a rebinding Host gets no session. **Not yet done:** the 24-hour tab soak, the six-tile CPU figure on
+  the real cameras (the synthetic ones are 640x360 only), the real-camera check that H.264 High plays (1A proved High on
+  synthetic clips), the full harness, and the Operator's comparison with the mpv grid.
 - **Gate:** the Operator compares it with the mpv grid. Both keep working.
 
 ### Stage 1b - the mpv password exposure (in the ORIGINAL repository, done BEFORE Stage 0)
