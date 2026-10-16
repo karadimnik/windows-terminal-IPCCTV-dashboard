@@ -266,3 +266,40 @@ func TestRequireToken(t *testing.T) {
 		t.Errorf("loopback with no token must not require one: code %d", recorder.Code)
 	}
 }
+
+func TestLiveHiddenGraceSetting(t *testing.T) {
+	cfg, err := LoadConfig("", Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.LiveHiddenGraceEffective(); got != 300 {
+		t.Errorf("default grace = %d, want 300", got)
+	}
+	file := filepath.Join(t.TempDir(), "camui.config.json")
+	for text, want := range map[string]int{`{"liveHiddenGraceSeconds": 20}`: 20, `{"liveHiddenGraceSeconds": 0}`: 0, `{"liveHiddenGraceSeconds": -1}`: -1,
+		`{"liveHiddenGraceSeconds": -50}`: -1, `{"liveHiddenGraceSeconds": 99999999}`: 86400} {
+		if err := os.WriteFile(file, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := LoadConfig(file, Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.LiveHiddenGraceEffective(); got != want {
+			t.Errorf("%s -> %d, want %d", text, got, want)
+		}
+	}
+	t.Setenv("CAMUI_LIVE_HIDDEN_GRACE", "45")
+	cfg, err = LoadConfig(file, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.LiveHiddenGraceEffective(); got != 45 {
+		t.Errorf("env did not win: %d", got)
+	}
+	t.Setenv("CAMUI_LIVE_HIDDEN_GRACE", "soon")
+	cfg, _ = LoadConfig("", Config{})
+	if got := cfg.LiveHiddenGraceEffective(); got != 300 {
+		t.Errorf("an unparsable env value must fall back to the default, got %d", got)
+	}
+}

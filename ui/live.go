@@ -275,14 +275,17 @@ type liveCameraJSON struct {
 }
 
 type liveListJSON struct {
-	Enabled bool             `json:"enabled"`
-	Alive   bool             `json:"alive"`
-	Cameras []liveCameraJSON `json:"cameras"`
+	Enabled bool `json:"enabled"`
+	Alive   bool `json:"alive"`
+	// HiddenGraceSeconds is camui's liveHiddenGraceSeconds: how long the page keeps
+	// its streams after it is hidden (0 frees at once, -1 never).
+	HiddenGraceSeconds int              `json:"hiddenGraceSeconds"`
+	Cameras            []liveCameraJSON `json:"cameras"`
 }
 
 func (a *API) handleLiveList(w http.ResponseWriter, r *http.Request) {
 	state := a.liveSnapshot(a.liveSettings())
-	body := liveListJSON{Enabled: state.enabled, Alive: state.alive, Cameras: []liveCameraJSON{}}
+	body := liveListJSON{Enabled: state.enabled, Alive: state.alive, HiddenGraceSeconds: a.cfg.LiveHiddenGraceEffective(), Cameras: []liveCameraJSON{}}
 	for _, camera := range state.cameras {
 		body.Cameras = append(body.Cameras, liveCameraJSON{
 			Name: camera.name, Sub: camera.sub, Main: camera.main,
