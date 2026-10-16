@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -7100,6 +7100,360 @@ function Invoke-CamCheckLiveOnDemand {
 }
 
 
+function Invoke-CamCheckLivePage {
+    <#
+        [Stage 1B, opt-in: opens browser windows] The Live screen, rendered.
+        The REAL supervisor with a live instance against a synthetic camera,
+        six cameras (Cam 1 records), camui built to a temp path and run on
+        18789 against the sandbox, Chrome and Edge on a throwaway profile
+        driven through the DevTools protocol (the page's own pixels only).
+
+          desktop 1920x1080   six sub tiles reach playing (framesDecoded from
+                              window.__liveStats), 3 columns, pixel statistics
+                              of each tile; the camera's stream2 has 6 sessions
+          click               Cam 1 goes to main (larger), the others stay sub,
+                              stream2 falls to 5; Esc returns it, back to 6
+          audio               every tile muted; the unmute button unmutes that
+                              tile only and audio packets keep arriving
+          hidden              minimizing the window closes every connection and
+                              stream2 falls to 0; restoring reopens all six
+          deep link           a fresh load of #live/Cam%201 is on main
+          phone 390x844       1 column, six tiles playing; 800 wide gives 2
+          live view off       a second camui over a config with the flag off:
+                              the tab says so, the proxy answers 503
+          foreign page        a page on http://localhost:18082 cannot create a
+                              live session through camui, nor can a request
+                              with a foreign Origin, cross-site Sec-Fetch-Site
+                              or a rebinding Host; the live instance logs no
+                              session for any of them, and the same request
+                              without those headers does (positive control)
+
+        Needs CAMUI_TEST_EXE (a camui.exe built from this tree). Screenshots go
+        to $env:CAMTEST_SHOTS when set (outside the repository), else nowhere.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $fail = { param([string]$Text) $script:CamLivePageOk = $false; $script:CamLivePageEvidence += ('FAIL ' + $Text) }
+    $note = { param([string]$Text) $script:CamLivePageEvidence += $Text }
+    $script:CamLivePageOk = $true
+    $script:CamLivePageEvidence = @()
+    $script:CamLivePageBrowsers = @()
+    $script:CamLivePageSeconds = 0
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $rig = $null; $ui = $null; $uiOff = $null; $evil = $null
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livepage'
+    $shots = [string]$env:CAMTEST_SHOTS
+    $base = 'http://127.0.0.1:18789'
+    $offer = Get-CamTestWhepOffer
+
+    try {
+        if (-not $env:CAMUI_TEST_EXE -or -not (Test-Path -LiteralPath $env:CAMUI_TEST_EXE)) { throw 'CAMUI_TEST_EXE must name a camui.exe built from this tree (cross-compile it to a temp path).' }
+        foreach ($p in @(18789, 18790, 18300, 18082)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
+        if ($shots) { [void](New-Item -ItemType Directory -Path $shots -Force) }
+
+        $cameras = 1..6 | ForEach-Object { [pscustomobject]@{ Name = "Cam $_"; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 1) } }
+        $rig = Start-CamTestLiveRig -Name 'livepage' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 4
+        $dir = $rig.Dir
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livepage'
+        if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
+        $status = (Get-CamTestStatusJson -Sandbox $rig.Sandbox).Snapshot
+        & $note ("supervisor-run live MediaMTX pid {0}; status.json Live.Cameras: {1}" -f $status.Live.Pid, (@($status.Live.Cameras | ForEach-Object { '{0} sub={1} main={2}' -f $_.Name, $_.Sub, $_.Main }) -join '; '))
+        $camuiExe = Get-Item -LiteralPath $env:CAMUI_TEST_EXE
+        & $note ("camui {0} ({1:n0} bytes, built {2}) listening on {3}, serving the sandbox {4}" -f $camuiExe.Name, $camuiExe.Length, $camuiExe.LastWriteTime.ToString('s'), $base, $rig.Sandbox.Dir)
+
+        # A second camui whose config has live view OFF (no recorder, no status file): what the tab and the proxy say then.
+        $offDir = Join-Path -Path $dir -ChildPath 'off'
+        [void](New-Item -ItemType Directory -Path $offDir -Force)
+        [System.IO.File]::WriteAllText((Join-Path $offDir 'recorder.config.json'), '{ "LiveViewEnabled": false }', (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $offDir 'cameras.json'), '[]', (New-Object System.Text.UTF8Encoding($false)))
+        $uiOff = Start-CamTestUi -Port 18790 -Name 'camui-livepage-off' -StatusFile (Join-Path $offDir 'status.json') -ScriptDir $offDir
+        if (-not $uiOff.Started) { throw ('the live-off camui did not start: ' + $uiOff.Reason) }
+
+        # The proxy's own JSON, over plain HTTP.
+        $list = Invoke-CamLiveHttp -Url "$base/api/live"
+        $listJson = ConvertFrom-Json -InputObject $list.Body
+        & $note ("GET /api/live: HTTP {0}, enabled {1}, alive {2}, {3} camera(s), fields {4}" -f $list.Code, $listJson.enabled, $listJson.alive, @($listJson.cameras).Count, ((@($listJson.cameras)[0].PSObject.Properties.Name) -join ','))
+        if ($list.Code -ne 200 -or -not $listJson.enabled -or -not $listJson.alive -or @($listJson.cameras).Count -ne 6) { & $fail 'GET /api/live did not describe six cameras with live view on' }
+
+        $liveLog = Join-Path -Path $rig.Sandbox.Root -ChildPath '_logs\liveview.log'
+        $sessionCount = { @(Get-Content -LiteralPath $liveLog -ErrorAction SilentlyContinue | Where-Object { $_ -match '\[WebRTC\].*created by' }).Count }
+        $readers = { (Get-CamTestPathReaders -ApiPort $rig.CamApi -Path 'stream2').Count }
+
+        # ---- helpers over the DevTools connection ($cdp is set per browser run) ----
+        $stats = { try { Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.__liveStats ? window.__liveStats() : null' -Await } catch { $null } }
+        $until = {
+            param([scriptblock]$Done, [int]$Seconds = 40)
+            $end = [DateTime]::UtcNow.AddSeconds($Seconds); $s = $null
+            while ([DateTime]::UtcNow -lt $end) { $s = & $stats; if ($s -and (& $Done $s)) { return $s }; Start-Sleep -Milliseconds 500 }
+            return $null
+        }
+        $playing = { param($s, [int]$n = 6, [int]$min = 25) $s.shown -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge $min }).Count -ge $n }
+        $readersIs = {
+            param([int]$Want, [int]$Seconds = 14)
+            $end = [DateTime]::UtcNow.AddSeconds($Seconds); $n = -1
+            while ([DateTime]::UtcNow -lt $end) { $n = & $readers; if ($n -eq $Want) { return $n }; Start-Sleep -Milliseconds 500 }
+            return $n
+        }
+        $navigate = {
+            param([string]$Url)
+            [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = 'about:blank' })
+            Start-Sleep -Milliseconds 300
+            [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = $Url })
+        }
+        $viewport = {
+            param([int]$Width, [int]$Height)
+            [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Emulation.setDeviceMetricsOverride' -Params @{ width = $Width; height = $Height; deviceScaleFactor = 1; mobile = $false })
+        }
+        $click = {
+            param([double]$X, [double]$Y)
+            foreach ($type in @('mouseMoved', 'mousePressed', 'mouseReleased')) {
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = $type; x = $X; y = $Y; button = 'left'; clickCount = 1; buttons = $(if ($type -eq 'mousePressed') { 1 } else { 0 }) })
+            }
+        }
+        $shot = {
+            param([string]$Label, $Stats)
+            $file = Join-Path -Path $dir -ChildPath ("shot-$Label.png")
+            [void](Save-CamTestPageShot -Cdp $cdp -Path $file)
+            $rects = @(@($Stats.tiles) | ForEach-Object { @{ X = $_.rect.x; Y = $_.rect.y + $Stats.scrollY; W = $_.rect.w; H = [int]($_.rect.h * 0.7) } })
+            $px = @(Get-CamTestPngStats -Path $file -Rects $rects)
+            $image = [System.Drawing.Image]::FromFile($file); $size = '{0}x{1}' -f $image.Width, $image.Height; $image.Dispose()
+            if ($shots) { Copy-Item -LiteralPath $file -Destination (Join-Path $shots "$Label.png") -Force }
+            return [pscustomobject]@{ Size = $size; Pixels = $px }
+        }
+        $describeTiles = {
+            param($Stats, $Pixels)
+            $i = 0
+            foreach ($t in @($Stats.tiles)) {
+                $p = $(if ($Pixels) { $Pixels[$i] } else { $null })
+                & $note ("      {0}: {1} {2} at ({3},{4}) {5}x{6}, video {7}x{8}, framesDecoded {9}, muted {10}{11}" -f $t.name, $t.stream, $t.state, $t.rect.x, $t.rect.y, $t.rect.w, $t.rect.h, $t.vw, $t.vh, `
+                    $(if ($t.v) { $t.v.framesDecoded } else { 0 }), $t.muted, $(if ($p) { "; pixels mean luma $($p.Mean), lit $([int](100 * $p.LitShare)) %, $($p.Colours) colours" } else { '' }))
+                $i++
+            }
+        }
+
+        foreach ($browser in @('chrome', 'edge')) {
+            $found = Get-CamTestBrowser -Browser $browser
+            if (-not $found.Exe) { & $fail ("$browser could not be run: " + $found.Reason); continue }
+            $cdp = $null; $started = $null
+            $began = [DateTime]::UtcNow
+            try {
+                $started = Start-CamTestBrowser -Browser $browser -BaseDir $dir -Url 'about:blank' -DebugPort 18300 -WindowSize '1280,900'
+                $script:CamLivePageBrowsers += $started
+                $cdp = Connect-CamTestCdp -Port 18300
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.enable')
+                & $note ("== $browser $($found.Version) (throwaway profile, DevTools on 18300, the window's own pixels only) ==")
+
+                # ---- desktop ----
+                & $viewport 1920 1080
+                & $navigate "$base/#live"
+                $s = & $until { param($s) & $playing $s }
+                if (-not $s) { $s = & $stats; & $fail "$browser desktop: six tiles never reached playing"; if ($s) { & $describeTiles $s $null }; continue }
+                $px = & $shot "$browser-desktop-1920x1080" $s
+                & $note ("  desktop 1920x1080: {0} columns (DOM), screenshot {1}, six tiles playing" -f $s.columns, $px.Size)
+                & $describeTiles $s $px.Pixels
+                if ($s.columns -ne 3) { & $fail "$browser desktop: $($s.columns) columns, wanted 3" }
+                if (@($px.Pixels | Where-Object { $_.LitShare -lt 0.5 -or $_.Colours -lt 4 }).Count) { & $fail "$browser desktop: a tile rendered black or flat" }
+                if (@(@($s.tiles) | Where-Object { -not $_.muted }).Count) { & $fail "${browser}: a tile was not muted by default" }
+                if (@(@($s.tiles) | Where-Object { $_.stream -ne 'sub' }).Count) { & $fail "${browser}: a tile was not on the sub stream" }
+                $n = & $readersIs 6
+                & $note ("  stream2 sessions on the camera with six sub tiles: $n")
+                if ($n -ne 6) { & $fail "${browser}: stream2 had $n sessions with six viewers, wanted 6" }
+
+                # ---- click to focus, Esc to return ----
+                $cam1 = @($s.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]
+                & $click ($cam1.rect.x + $cam1.rect.w / 2) ($cam1.rect.y + $cam1.rect.h * 0.4)
+                $f = & $until { param($s) $s.focus -eq 'Cam 1' -and @(@($s.tiles) | Where-Object { $_.name -eq 'Cam 1' -and $_.stream -eq 'main' -and $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -eq 1 }
+                if (-not $f) { $f = & $stats; & $fail "${browser}: a click did not put Cam 1 on a playing main stream"; if ($f) { & $describeTiles $f $null } }
+                else {
+                    $px = & $shot "$browser-focus-main" $f
+                    $big = @($f.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]; $small = @($f.tiles | Where-Object { $_.name -eq 'Cam 2' })[0]
+                    & $note ("  click Cam 1: focus {0}, main stream {1}x{2} px of video; tile {3}x{4} versus {5}x{6} for the others; only-one-main: {7} main tile(s)" -f $f.focus, $big.v.w, $big.v.h, $big.rect.w, $big.rect.h, $small.rect.w, $small.rect.h, @(@($f.tiles) | Where-Object { $_.stream -eq 'main' }).Count)
+                    & $describeTiles $f $px.Pixels
+                    if ($big.rect.w -lt 2 * $small.rect.w) { & $fail "${browser}: the focused tile is not larger" }
+                    if (@(@($f.tiles) | Where-Object { $_.stream -eq 'main' }).Count -ne 1) { & $fail "${browser}: more than one main stream" }
+                    if ($big.v.w -lt 100) { & $fail "${browser}: no main-stream picture" }
+                    $n = & $readersIs 5
+                    & $note ("  stream2 sessions with Cam 1 on main (its sub session released): $n")
+                    if ($n -ne 5) { & $fail "${browser}: stream2 had $n sessions with one camera on main, wanted 5" }
+                }
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyDown'; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 })
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyUp'; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 })
+                $e = & $until { param($s) -not $s.focus -and (& $playing $s) -and @(@($s.tiles) | Where-Object { $_.stream -ne 'sub' }).Count -eq 0 }
+                & $note ("  Esc: focus released, all six back on sub and playing: {0}" -f [bool]$e)
+                if (-not $e) { & $fail "${browser}: Esc did not return the tile to the sub stream" }
+                $n = & $readersIs 6
+                if ($n -ne 6) { & $fail "${browser}: stream2 had $n sessions after Esc, wanted 6" }
+
+                # ---- audio: muted by default, unmute one tile ----
+                $e = & $stats
+                $before = @($e.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]
+                $pos = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(() => { const r = document.querySelector(''.ltile[data-camera="Cam 1"] .lmute'').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()'
+                & $click $pos.x $pos.y
+                Start-Sleep -Seconds 3
+                $after = & $stats
+                $tile1 = @($after.tiles | Where-Object { $_.name -eq 'Cam 1' })[0]
+                $others = @(@($after.tiles) | Where-Object { $_.name -ne 'Cam 1' -and -not $_.muted }).Count
+                & $note ("  audio: all tiles muted at the start ({0} muted of 6); after the unmute click Cam 1 muted={1} paused={2} volume={3}, other tiles still unmuted: {4}; Cam 1 audio packets {5} -> {6}, energy {7} -> {8}" -f `
+                    @(@($s.tiles) | Where-Object { $_.muted }).Count, $tile1.muted, $tile1.paused, $tile1.volume, $others, $(if ($before.a) { $before.a.packets } else { 'n/a' }), $(if ($tile1.a) { $tile1.a.packets } else { 'n/a' }), $(if ($before.a) { $before.a.energy } else { 'n/a' }), $(if ($tile1.a) { $tile1.a.energy } else { 'n/a' }))
+                if ($tile1.muted -or $tile1.paused -or $others -ne 0) { & $fail "${browser}: unmute did not unmute exactly Cam 1" }
+                if (-not $tile1.a -or $tile1.a.packets -lt 20 -or ($before.a -and $tile1.a.packets -le $before.a.packets)) { & $fail "${browser}: no audio packets arrive for the unmuted tile" }
+
+                # ---- hidden: minimize the window ----
+                $window = Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.getWindowForTarget'
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'minimized' } })
+                $h = & $until { param($s) $s.visibility -eq 'hidden' -and @(@($s.tiles) | Where-Object { $_.open }).Count -eq 0 } 15
+                $n = & $readersIs 0 14
+                & $note ("  window minimized: visibility {0}, open connections {1}, tile states {2}; stream2 sessions on the camera: {3}" -f $(if ($h) { $h.visibility } else { 'not hidden' }), $(if ($h) { @(@($h.tiles) | Where-Object { $_.open }).Count } else { '?' }), $(if ($h) { (@($h.tiles) | ForEach-Object { $_.state } | Select-Object -Unique) -join '/' } else { '?' }), $n)
+                if (-not $h) { & $fail "${browser}: minimizing did not hide the page and close its connections" }
+                if ($n -ne 0) { & $fail "${browser}: stream2 still had $n sessions while the window was minimized" }
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'normal' } })
+                $r = & $until { param($s) $s.visibility -eq 'visible' -and (& $playing $s) } 40
+                & $note ("  window restored: six tiles reopened and playing: {0}" -f [bool]$r)
+                if (-not $r) { & $fail "${browser}: restoring the window did not reopen the six tiles" }
+                else { $n = & $readersIs 6; if ($n -ne 6) { & $fail "${browser}: stream2 had $n sessions after the window came back" } }
+
+                # ---- deep link ----
+                & $navigate "$base/#live/Cam%201"
+                $d = & $until { param($s) $s.focus -eq 'Cam 1' -and @(@($s.tiles) | Where-Object { $_.name -eq 'Cam 1' -and $_.stream -eq 'main' -and $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -eq 1 }
+                & $note ("  deep link #live/Cam%201 on a fresh load: Cam 1 on main and playing: {0}" -f [bool]$d)
+                if (-not $d) { & $fail "${browser}: the deep link did not focus Cam 1 on main" }
+
+                # ---- medium and phone ----
+                & $viewport 800 1000
+                Start-Sleep -Milliseconds 400
+                $m = & $stats
+                & $note ("  800 px wide: {0} columns (DOM)" -f $m.columns)
+                if ($m.columns -ne 2) { & $fail "$browser 800 px: $($m.columns) columns, wanted 2" }
+                & $viewport 390 844
+                & $navigate "$base/#live"
+                $s = & $until { param($s) & $playing $s } 50
+                if (-not $s) { $s = & $stats; & $fail "$browser phone: six tiles never reached playing"; if ($s) { & $describeTiles $s $null } }
+                else {
+                    $full = Invoke-CamTestCdp -Cdp $cdp -Method 'Page.captureScreenshot' -Params @{ format = 'png'; captureBeyondViewport = $true }
+                    $file = Join-Path -Path $dir -ChildPath "shot-$browser-phone.png"
+                    [System.IO.File]::WriteAllBytes($file, [System.Convert]::FromBase64String($full.data))
+                    $rects = @(@($s.tiles) | ForEach-Object { @{ X = $_.rect.x; Y = $_.rect.y + $s.scrollY; W = $_.rect.w; H = [int]($_.rect.h * 0.7) } })
+                    $pp = @(Get-CamTestPngStats -Path $file -Rects $rects)
+                    $image = [System.Drawing.Image]::FromFile($file); $size = '{0}x{1}' -f $image.Width, $image.Height; $image.Dispose()
+                    if ($shots) { Copy-Item -LiteralPath $file -Destination (Join-Path $shots "$browser-phone-390x844.png") -Force }
+                    & $note ("  phone 390x844: {0} column(s) (DOM), innerWidth {1}, full-page screenshot {2}, six tiles playing" -f $s.columns, $s.innerWidth, $size)
+                    & $describeTiles $s $pp
+                    if ($s.columns -ne 1) { & $fail "$browser phone: $($s.columns) columns, wanted 1" }
+                    if (@(@($s.tiles) | Where-Object { $_.rect.w -gt 390 }).Count) { & $fail "$browser phone: a tile is wider than the screen" }
+                    if (@($pp | Where-Object { $_.LitShare -lt 0.5 -or $_.Colours -lt 4 }).Count) { & $fail "$browser phone: a tile rendered black or flat" }
+                }
+
+                # ---- live view off: a second camui over a config with the flag off ----
+                & $viewport 1280 800
+                & $navigate 'http://127.0.0.1:18790/#live'
+                $o = & $until { param($s) $s.shown -and $s.note -match 'off' } 15
+                $px = $null
+                if ($o) { $file = Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $dir "shot-$browser-off.png"); if ($shots) { Copy-Item -LiteralPath $file -Destination (Join-Path $shots "$browser-live-off.png") -Force } }
+                & $note ("  live view off (second camui, LiveViewEnabled false): enabled={0}, tiles {1}, message: '{2}'" -f $(if ($o) { $o.enabled } else { '?' }), $(if ($o) { @($o.tiles).Count } else { '?' }), $(if ($o) { $o.note } else { 'none' }))
+                if (-not $o -or $o.enabled -or @($o.tiles).Count -ne 0 -or $o.note -notmatch 'LiveViewEnabled') { & $fail "${browser}: with live view off the tab did not say so" }
+            }
+            catch { & $fail ("$browser run aborted: " + $_.Exception.Message) }
+            finally {
+                Disconnect-CamTestCdp -Cdp $cdp
+                if ($started) { $end = Stop-CamTestBrowser -Started $started } else { $end = [pscustomobject]@{ Left = @(); ProfileRemoved = $true } }
+                $secs = ([DateTime]::UtcNow - $began).TotalSeconds
+                $script:CamLivePageSeconds += $secs
+                & $note ("  $browser window up {0:n0} s; processes left after the kill: {1}; profile removed: {2}" -f $secs, $end.Left.Count, $end.ProfileRemoved)
+                if ($end.Left.Count -or -not $end.ProfileRemoved) { & $fail "$browser left processes or a profile behind" }
+            }
+        }
+
+        # ---- live view off, over plain HTTP ----
+        $off = Invoke-CamLiveHttp -Url 'http://127.0.0.1:18790/api/live/Cam%201/whep?stream=sub' -Method POST -Headers @{ 'Content-Type' = 'application/sdp' } -Body $offer
+        $offList = ConvertFrom-Json -InputObject (Invoke-CamLiveHttp -Url 'http://127.0.0.1:18790/api/live').Body
+        $offStatus = Invoke-CamLiveHttp -Url 'http://127.0.0.1:18790/api/status'
+        & $note ("live view off: POST whep -> HTTP {0} {1}; GET /api/live enabled={2} cameras={3}; GET /api/status -> HTTP {4}" -f $off.Code, $off.Body.Trim(), $offList.enabled, @($offList.cameras).Count, $offStatus.Code)
+        if ($off.Code -ne 503 -or $off.Body -notmatch 'live view is off' -or $offList.enabled -or $offStatus.Code -ne 200) { & $fail 'with live view off the proxy did not answer 503 or the rest of the API changed' }
+
+        # ---- a foreign page, and requests with the headers a browser would send for one ----
+        $before = & $sessionCount
+        $evilTarget = "camui=http://127.0.0.1:18789/api/live/Cam%201{whep}?stream=sub"
+        $evil = Start-CamTestLiveServer -Prefix 'http://localhost:18082/' -PageFile (Join-Path (Get-CamTestRepo) 'tests\live\evil.html') -DataDir $rig.DataDir
+        foreach ($browser in @('chrome', 'edge')) {
+            $found = Get-CamTestBrowser -Browser $browser
+            if (-not $found.Exe) { continue }
+            $runId = "xsite-$browser"
+            $statsFile = Join-Path -Path $rig.DataDir -ChildPath "$runId.jsonl"
+            $started = Start-CamTestBrowser -Browser $browser -BaseDir $dir -Url ("http://localhost:18082/?run={0}&targets={1}" -f $runId, [uri]::EscapeDataString($evilTarget))
+            $script:CamLivePageBrowsers += $started
+            $began = [DateTime]::UtcNow; $results = @()
+            try {
+                $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                while ([DateTime]::UtcNow -lt $deadline) {
+                    Start-Sleep -Seconds 2
+                    $events = @(Read-CamTestLiveStats -Path $statsFile)
+                    $results = @($events | Where-Object { $_.ev -eq 'result' })
+                    if (@($events | Where-Object { $_.ev -eq 'done' }).Count) { break }
+                }
+            } finally {
+                $script:CamLivePageSeconds += ([DateTime]::UtcNow - $began).TotalSeconds
+                $end = Stop-CamTestBrowser -Started $started
+            }
+            if ($end.Left.Count -or -not $end.ProfileRemoved) { & $fail "$browser left processes or a profile behind (foreign page)" }
+            $row = @($results)[0]
+            if (-not $row) { & $fail "${browser}: the foreign page reported nothing"; continue }
+            & $note ("foreign page {0} {1}: origin {2} -> camui whep: {3}; HTTP {4}; frames decoded {5}" -f $browser, $found.Version, $row.origin, $row.outcome, $row.status, $row.framesDecoded)
+            if ($row.outcome -notlike 'blocked by the browser*' -or $row.framesDecoded -gt 0) { & $fail "${browser}: the foreign page was not blocked ($($row.outcome))" }
+        }
+        $raw = @(
+            @{ Label = 'foreign Origin, cross-site, application/sdp'; Headers = @{ Origin = 'http://localhost:18789'; 'Sec-Fetch-Site' = 'cross-site'; 'Content-Type' = 'application/sdp' }; Host = $null },
+            @{ Label = 'foreign Origin only, application/sdp'; Headers = @{ Origin = 'http://localhost:18082'; 'Content-Type' = 'application/sdp' }; Host = $null },
+            @{ Label = 'cross-site Sec-Fetch-Site only, application/sdp'; Headers = @{ 'Sec-Fetch-Site' = 'cross-site'; 'Content-Type' = 'application/sdp' }; Host = $null },
+            @{ Label = 'same-site Sec-Fetch-Site, application/sdp'; Headers = @{ 'Sec-Fetch-Site' = 'same-site'; 'Content-Type' = 'application/sdp' }; Host = $null },
+            @{ Label = 'rebinding Host attacker-rebind.example, application/sdp'; Headers = @{ 'Content-Type' = 'application/sdp' }; Host = 'attacker-rebind.example:18789' },
+            @{ Label = 'no-cors shaped (text/plain, foreign Origin)'; Headers = @{ Origin = 'http://localhost:18082'; 'Sec-Fetch-Site' = 'same-site'; 'Content-Type' = 'text/plain' }; Host = $null })
+        foreach ($case in $raw) {
+            $headers = @{} + $case.Headers
+            if ($case.Host) { $headers['Host'] = $case.Host }
+            $r = Invoke-CamRawHttp -Port 18789 -Method 'POST' -Path '/api/live/Cam%201/whep?stream=sub' -Headers $headers -Body $offer
+            & $note ("  refused: {0} -> HTTP {1}" -f $case.Label, $r.Status)
+            if ($r.Status -notin 403, 415) { & $fail "a $($case.Label) request was not refused (HTTP $($r.Status))" }
+        }
+        $pre = Invoke-CamRawHttp -Port 18789 -Method 'OPTIONS' -Path '/api/live/Cam%201/whep?stream=sub' -Headers @{ Origin = 'http://localhost:18082'; 'Access-Control-Request-Method' = 'POST'; 'Access-Control-Request-Headers' = 'content-type' }
+        & $note ("  preflight from a foreign Origin -> HTTP {0}, Access-Control-Allow-Origin [{1}]" -f $pre.Status, $pre.Headers['access-control-allow-origin'])
+        if ($pre.Status -lt 400 -or $pre.Headers['access-control-allow-origin']) { & $fail 'a foreign preflight was granted' }
+        $mid = & $sessionCount
+        # Positive control: the same request with no foreign header (a script) must create a session, or the count above proves nothing.
+        $good = Invoke-CamRawHttp -Port 18789 -Method 'POST' -Path '/api/live/Cam%201/whep?stream=sub' -Headers @{ 'Content-Type' = 'application/sdp' } -Body $offer
+        Start-Sleep -Milliseconds 800
+        $after = & $sessionCount
+        & $note ("live instance WebRTC sessions logged: before the foreign attempts {0}, after them {1} (new: {2}); positive control, the same offer with no foreign header: HTTP {3}, then {4} (new: {5})" -f $before, $mid, ($mid - $before), $good.Status, $after, ($after - $mid))
+        if ($mid -ne $before) { & $fail 'the live instance created a session for a foreign page or a refused request' }
+        if ($good.Status -ne 201 -or $after -le $mid) { & $fail 'the positive control did not create a session, so the zero above proves nothing' }
+        $location = [string]$good.Headers['location']
+        if ($location -match '^/api/live/session/[0-9a-f]{32}$') {
+            $del = Invoke-CamRawHttp -Port 18789 -Method 'DELETE' -Path $location
+            & $note ("  DELETE of the positive control's session -> HTTP {0}" -f $del.Status)
+            if ($del.Status -ne 204) { & $fail 'DELETE of a minted session was not 204' }
+        } else { & $fail "the answer carried no minted Location ($location)" }
+    }
+    catch { & $fail ('check aborted: ' + $_.Exception.Message) }
+    finally {
+        foreach ($b in @($script:CamLivePageBrowsers)) { try { [void](Stop-CamTestBrowser -Started $b) } catch { } }
+        foreach ($proc in @($evil)) { if ($proc -and -not $proc.HasExited) { try { $proc.Kill(); [void]$proc.WaitForExit(5000) } catch { } } }
+        $uiLog = @()
+        foreach ($instance in @($ui, $uiOff)) { if ($instance) { $uiLog += @(Stop-CamTestUi -Ui $instance) } }
+        $notes = @()
+        if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
+        $evidence += ("browser windows were up {0:n0} s in total; whole check {1:n0} s" -f $script:CamLivePageSeconds, $watch.Elapsed.TotalSeconds)
+        $evidence += $notes
+        if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
+        if ($script:CamLivePageOk -and $rig) { try { Remove-CamTestTree -Path $rig.Dir } catch { $script:CamLivePageEvidence += 'cleanup failed' } }
+        elseif ($rig) { $script:CamLivePageEvidence += "left for inspection: $($rig.Dir)" }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'livepage' -Status $(if ($script:CamLivePageOk) { 'PASS' } else { 'FAIL' }) `
+        -Message 'the Live screen plays six sub tiles in Chrome and Edge at desktop and phone widths, focuses on main, mutes, closes when hidden, says so when live view is off, and a foreign page gets no session' `
+        -Evidence ($evidence + $script:CamLivePageEvidence)
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -7157,6 +7511,7 @@ foreach ($check in $Checks) {
         'livesecret' { Invoke-CamCheckLiveSecret -Run $run }
         'livewhep'  { Invoke-CamCheckLiveWhep  -Run $run }
         'liveondemand' { Invoke-CamCheckLiveOnDemand -Run $run }
+        'livepage'  { Invoke-CamCheckLivePage  -Run $run }
         'soak'      { Invoke-CamCheckSoak      -Run $run -DryRun:$SoakDryRun }
     }
 }

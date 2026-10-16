@@ -1,7 +1,8 @@
 "use strict";
 
-// The control UI. Two screens: the dashboard polls GET /api/status, and the
-// settings screen reads and writes /api/cameras and /api/config.
+// The control UI. The dashboard polls GET /api/status, the settings screen reads
+// and writes /api/cameras and /api/config, the footage screen browses the
+// archive, and the Live screen (live.js) plays the cameras over WebRTC.
 //
 // Three things here are not incidental:
 //
@@ -1178,7 +1179,12 @@ el("fSegs").onclick = (event) => {
 // showTab is driven by the URL fragment, so a screen can be linked to and
 // opened directly - #foot goes straight to the footage browser. An unknown
 // fragment falls back to the first tab.
-function showTab(name) {
+function showTab(fragment) {
+  // "live/<camera>" is the Live screen focused on one camera.
+  const slash = fragment.indexOf("/");
+  const name = slash < 0 ? fragment : fragment.slice(0, slash);
+  let arg;
+  try { arg = slash < 0 ? undefined : decodeURIComponent(fragment.slice(slash + 1)) || undefined; } catch (err) { arg = undefined; }
   const tabs = [...el("tabs").children];
   const button = tabs.find((tab) => tab.dataset.t === name) || tabs[0];
   for (const tab of tabs) tab.removeAttribute("aria-current");
@@ -1193,6 +1199,7 @@ function showTab(name) {
   // Re-read on every visit: a recording camera has new segments by now, and
   // the pruner may have taken the oldest away.
   if (button.dataset.t === "foot") loadFootage();
+  Live.onTab(button.dataset.t, arg);
 }
 
 el("tabs").onclick = (event) => {

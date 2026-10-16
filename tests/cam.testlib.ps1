@@ -345,7 +345,9 @@ function Start-CamTestUi {
         # A different binary to start: this, else CAMUI_TEST_EXE, else the
         # repository's camui.exe. Whichever it is, it is copied, never run in
         # place.
-        [string]$Source
+        [string]$Source,
+        # The folder under cam-tests\ the copy runs from, so a second camui can run beside the first.
+        [string]$Name = 'camui'
     )
 
     if (-not $Source) { $Source = $env:CAMUI_TEST_EXE }
@@ -363,7 +365,7 @@ function Start-CamTestUi {
     # Both endpoints are read-only in this scan; nothing is written.
     if (-not $ScriptDir) { $ScriptDir = Get-CamTestRepo }
 
-    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\camui'
+    $dir = Join-Path -Path $env:TEMP -ChildPath ('cam-tests\' + $Name)
     [void](New-Item -ItemType Directory -Path $dir -Force)
     $exe = Join-Path -Path $dir -ChildPath 'camui.exe'
     Copy-Item -LiteralPath $source -Destination $exe -Force
@@ -2294,7 +2296,10 @@ function Start-CamTestBrowser {
         [Parameter(Mandatory = $true)][string]$Url,
         [Parameter(Mandatory = $true)][string]$BaseDir,
         # Fake capture device and no prompt, which makes Chromium expose decoderImplementation in getStats.
-        [switch]$Capture
+        [switch]$Capture,
+        # DevTools protocol on this loopback port (0 = off), for a test that drives the page and captures its own window.
+        [int]$DebugPort = 0,
+        [string]$WindowSize = '720,520'
     )
 
     $found = Get-CamTestBrowser -Browser $Browser
@@ -2309,7 +2314,8 @@ function Start-CamTestBrowser {
 
     $profile = Join-Path -Path $BaseDir -ChildPath ('prof-{0}-{1}' -f $Browser, [guid]::NewGuid().ToString('n').Substring(0, 8))
     [void](New-Item -ItemType Directory -Path $profile -Force)
-    $arguments = '--user-data-dir="{0}" --new-window --no-first-run --no-default-browser-check --window-position=40,40 --window-size=720,520 --autoplay-policy=no-user-gesture-required --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows{2} "{1}"' -f $profile, $Url, $(if ($Capture) { ' --use-fake-ui-for-media-stream --use-fake-device-for-media-stream' } else { '' })
+    $extra = $(if ($Capture) { ' --use-fake-ui-for-media-stream --use-fake-device-for-media-stream' } else { '' }) + $(if ($DebugPort -gt 0) { " --remote-debugging-port=$DebugPort" } else { '' })
+    $arguments = '--user-data-dir="{0}" --new-window --no-first-run --no-default-browser-check --window-position=40,40 --window-size={3} --autoplay-policy=no-user-gesture-required --disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows{2} "{1}"' -f $profile, $Url, $extra, $WindowSize
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $found.Exe
     $info.Arguments = $arguments
@@ -2602,4 +2608,164 @@ function Find-CamTestNeedleInFiles {
         }
     }
     return [pscustomobject]@{ Hits = @($hits); Files = $count }
+}
+
+
+# ---------------------------------------------------------------------------
+# [Stage 1B] The Live screen: driving a real browser page and looking at it
+# ---------------------------------------------------------------------------
+
+function Connect-CamTestCdp {
+    <# Attaches to the first page of a browser started with -DebugPort (DevTools protocol, loopback). #>
+    param([Parameter(Mandatory = $true)][int]$Port, [int]$TimeoutSeconds = 25)
+
+    $target = $null
+    $deadline = [DateTime]::Now.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::Now -lt $deadline -and -not $target) {
+        try {
+            $client = New-Object System.Net.WebClient
+            $client.Proxy = $null
+            $list = ConvertFrom-Json -InputObject $client.DownloadString("http://127.0.0.1:$Port/json/list")
+            $target = @($list | Where-Object { $_.type -eq 'page' })[0]
+        } catch { }
+        if (-not $target) { Start-Sleep -Milliseconds 300 }
+    }
+    if (-not $target) { throw "the browser did not expose a DevTools page on $Port within $TimeoutSeconds s" }
+    $socket = New-Object System.Net.WebSockets.ClientWebSocket
+    $socket.ConnectAsync([uri]$target.webSocketDebuggerUrl, [System.Threading.CancellationToken]::None).Wait()
+    return [pscustomobject]@{ Socket = $socket; Id = 0; Port = $Port }
+}
+
+
+function Invoke-CamTestCdp {
+    <# One DevTools command; returns its result or throws its error. Events that arrive meanwhile are skipped. #>
+    param(
+        [Parameter(Mandatory = $true)]$Cdp,
+        [Parameter(Mandatory = $true)][string]$Method,
+        $Params = @{},
+        [int]$TimeoutMs = 20000
+    )
+
+    $Cdp.Id++
+    $id = $Cdp.Id
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject @{ id = $id; method = $Method; params = $Params } -Depth 8 -Compress))
+    $source = New-Object System.Threading.CancellationTokenSource($TimeoutMs)
+    $Cdp.Socket.SendAsync([System.ArraySegment[byte]]::new($bytes), 'Text', $true, $source.Token).Wait()
+    while ($true) {
+        $text = New-Object System.Text.StringBuilder
+        $buffer = New-Object byte[] 65536
+        do {
+            $part = $Cdp.Socket.ReceiveAsync([System.ArraySegment[byte]]::new($buffer), $source.Token).GetAwaiter().GetResult()
+            [void]$text.Append([System.Text.Encoding]::UTF8.GetString($buffer, 0, $part.Count))
+        } until ($part.EndOfMessage)
+        $reply = ConvertFrom-Json -InputObject $text.ToString()
+        if ($reply.PSObject.Properties['id'] -and $reply.id -eq $id) {
+            if ($reply.PSObject.Properties['error']) { throw "$Method failed: $($reply.error.message)" }
+            return $reply.result
+        }
+    }
+}
+
+
+function Invoke-CamTestCdpEval {
+    <# Runs a JavaScript expression in the page and returns its value (a promise is awaited with -Await). #>
+    param([Parameter(Mandatory = $true)]$Cdp, [Parameter(Mandatory = $true)][string]$Expression, [switch]$Await)
+
+    $result = Invoke-CamTestCdp -Cdp $Cdp -Method 'Runtime.evaluate' -Params @{ expression = $Expression; returnByValue = $true; awaitPromise = [bool]$Await }
+    if ($result.PSObject.Properties['exceptionDetails']) { throw ('the page raised: ' + $result.exceptionDetails.text) }
+    return $result.result.value
+}
+
+
+function Disconnect-CamTestCdp {
+    param($Cdp)
+
+    if (-not $Cdp) { return }
+    try { [void]$Cdp.Socket.CloseAsync('NormalClosure', 'done', [System.Threading.CancellationToken]::None).Wait(2000) } catch { }
+    try { $Cdp.Socket.Dispose() } catch { }
+}
+
+
+function Save-CamTestPageShot {
+    <#
+        The BROWSER PAGE's own pixels through the DevTools protocol
+        (Page.captureScreenshot): never the screen, so nothing of the desktop
+        can be in it. Returns the file written.
+    #>
+    param([Parameter(Mandatory = $true)]$Cdp, [Parameter(Mandatory = $true)][string]$Path)
+
+    $shot = Invoke-CamTestCdp -Cdp $Cdp -Method 'Page.captureScreenshot' -Params @{ format = 'png' }
+    [System.IO.File]::WriteAllBytes($Path, [System.Convert]::FromBase64String($shot.data))
+    return $Path
+}
+
+
+function Get-CamTestPngStats {
+    <#
+        Pixel statistics of rectangles of a PNG: mean brightness, the share of
+        pixels that are not near black, and the number of distinct coarse
+        colours (a frozen black or a flat fill has 1 or 2). Sampled every
+        $Step pixels. Rects are @{ X; Y; W; H } in image pixels.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][object[]]$Rects, [int]$Step = 5)
+
+    Add-Type -AssemblyName System.Drawing
+    $bitmap = [System.Drawing.Bitmap]::FromFile($Path)
+    try {
+        $rect = New-Object System.Drawing.Rectangle(0, 0, $bitmap.Width, $bitmap.Height)
+        $data = $bitmap.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $bytes = New-Object byte[] ($data.Stride * $bitmap.Height)
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $bytes, 0, $bytes.Length)
+        $stride = $data.Stride
+        $bitmap.UnlockBits($data)
+        $width = $bitmap.Width; $height = $bitmap.Height
+    } finally { $bitmap.Dispose() }
+
+    $out = @()
+    foreach ($r in $Rects) {
+        $x0 = [Math]::Max(0, [int]$r.X); $y0 = [Math]::Max(0, [int]$r.Y)
+        $x1 = [Math]::Min($width, [int]$r.X + [int]$r.W); $y1 = [Math]::Min($height, [int]$r.Y + [int]$r.H)
+        $count = 0; $sum = 0.0; $lit = 0
+        $colours = New-Object 'System.Collections.Generic.HashSet[int]'
+        for ($y = $y0; $y -lt $y1; $y += $Step) {
+            $row = $y * $stride
+            for ($x = $x0; $x -lt $x1; $x += $Step) {
+                $i = $row + 4 * $x
+                $b = $bytes[$i]; $g = $bytes[$i + 1]; $red = $bytes[$i + 2]
+                $luma = 0.2126 * $red + 0.7152 * $g + 0.0722 * $b
+                $sum += $luma; $count++
+                if ($luma -gt 24) { $lit++ }
+                [void]$colours.Add((($red -shr 5) -shl 6) -bor (($g -shr 5) -shl 3) -bor ($b -shr 5))
+            }
+        }
+        $out += [pscustomobject]@{ Samples = $count; Mean = $(if ($count) { [Math]::Round($sum / $count, 1) } else { 0 }); LitShare = $(if ($count) { [Math]::Round($lit / $count, 3) } else { 0 }); Colours = $colours.Count }
+    }
+    return @($out)
+}
+
+
+function Get-CamTestWhepOffer {
+    <#
+        A hand-written but well-formed WebRTC offer (one receive-only H.264
+        video section, a made-up certificate fingerprint), so a leak scan can
+        make the live instance mint a real session without a browser. No
+        peer ever completes the handshake; the session ends by itself.
+    #>
+    $fingerprint = (1..32 | ForEach-Object { '{0:X2}' -f (($_ * 7) % 256) }) -join ':'
+    $lines = @(
+        'v=0', 'o=- 4611731400430051336 2 IN IP4 127.0.0.1', 's=-', 't=0 0', 'a=group:BUNDLE 0', 'a=msid-semantic: WMS',
+        'm=video 9 UDP/TLS/RTP/SAVPF 102', 'c=IN IP4 0.0.0.0', 'a=rtcp:9 IN IP4 0.0.0.0',
+        'a=ice-ufrag:aBcD', 'a=ice-pwd:0123456789abcdef01234567', 'a=ice-options:trickle',
+        "a=fingerprint:sha-256 $fingerprint", 'a=setup:actpass', 'a=mid:0', 'a=recvonly', 'a=rtcp-mux',
+        'a=rtpmap:102 H264/90000', 'a=rtcp-fb:102 nack',
+        'a=fmtp:102 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f')
+    return (($lines -join "`r`n") + "`r`n")
+}
+
+
+function Start-CamTestLiveCamui {
+    <# camui (CAMUI_TEST_EXE, a copy under %TEMP%) on a loopback port against a live rig's sandbox: its script folder and its status file. #>
+    param([Parameter(Mandatory = $true)]$Rig, [Parameter(Mandatory = $true)][int]$Port, [string]$Name = 'camui-live')
+
+    return (Start-CamTestUi -Port $Port -Name $Name -StatusFile (Get-CamStatusFilePath -Config $Rig.Sandbox.Config) -ScriptDir $Rig.Sandbox.Dir)
 }
