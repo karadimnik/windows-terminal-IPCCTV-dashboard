@@ -56,6 +56,8 @@ func main() {
 	flag.StringVar(&configPath, "config", "", "path to a JSON config file")
 	flag.StringVar(&flags.TLSListen, "tls-listen", "", "private IPv4:port for the HTTPS LAN listener, e.g. 192.168.1.50:8443 (needs a token of at least 16 characters; off by default)")
 	flag.StringVar(&flags.TLSDir, "tls-dir", "", "folder for the local CA and server certificate (default %LOCALAPPDATA%\\IPCCTV\\tls)")
+	var tlsReadOnlyFlag string
+	flag.StringVar(&tlsReadOnlyFlag, "tls-readonly", "", "true (default) or false: whether the HTTPS listener is view-only; false gives its token full control")
 	flag.BoolVar(&printCA, "print-ca", false, "create the local CA if needed, print its file, SHA-256 fingerprint and how to install it on a device, and exit")
 	flag.BoolVar(&newTok, "new-token", false, "print a fresh 32-byte hex token for tlsToken / CAMUI_TLS_TOKEN (writes nothing) and exit")
 	flag.BoolVar(&showVer, "version", false, "print the version and exit")
@@ -81,6 +83,12 @@ func main() {
 	cfg, err := LoadConfig(configPath, flags)
 	if err != nil {
 		log.Error("configuration", "error", err)
+		os.Exit(2)
+	}
+	if value, ok := parseBoolSetting(tlsReadOnlyFlag); ok {
+		cfg.TLSReadOnly = &value
+	} else if tlsReadOnlyFlag != "" {
+		fmt.Fprintln(os.Stderr, "-tls-readonly must be true or false")
 		os.Exit(2)
 	}
 	if printCA {

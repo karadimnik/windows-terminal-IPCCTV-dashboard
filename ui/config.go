@@ -76,6 +76,27 @@ type Config struct {
 	// characters). Falls back to Token. It is separate so that switching the
 	// LAN listener on does not force a token onto the loopback listener.
 	TLSToken string `json:"tlsToken"`
+
+	// TLSReadOnly makes the HTTPS listener view-only: it serves the Live and
+	// Footage screens and the read-only API, and refuses everything that
+	// changes state (start/stop, settings, record toggles, acknowledgements).
+	// Absent means true. Only `false` gives a token full control. It never
+	// affects the loopback listener.
+	TLSReadOnly *bool `json:"tlsReadOnly"`
+}
+
+// TLSReadOnlyEffective is TLSReadOnly with its default (true).
+func (c Config) TLSReadOnlyEffective() bool { return c.TLSReadOnly == nil || *c.TLSReadOnly }
+
+// parseBoolSetting reads a boolean from an environment variable or flag value.
+func parseBoolSetting(text string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	}
+	return false, false
 }
 
 // CamerasFile is the camera list the scripts read, beside them.
@@ -138,6 +159,12 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 	}
 	if env := strings.TrimSpace(os.Getenv("CAMUI_TLS_TOKEN")); env != "" {
 		cfg.TLSToken = env
+	}
+	if flags.TLSReadOnly != nil {
+		cfg.TLSReadOnly = flags.TLSReadOnly
+	}
+	if value, ok := parseBoolSetting(os.Getenv("CAMUI_TLS_READONLY")); ok {
+		cfg.TLSReadOnly = &value
 	}
 
 	if cfg.Listen == "" {

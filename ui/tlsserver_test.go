@@ -356,7 +356,8 @@ func TestTLSGuard(t *testing.T) {
 		}
 	}
 	// The WHEP route's single exception holds here too, and only here.
-	if rec := rig.do(tlsReq{method: "POST", path: "/api/acknowledge", headers: map[string]string{"Content-Type": "application/sdp"}, cookie: ok, body: "x"}); rec.Code != 415 {
+	writable := newTLSRig(t, func(c *Config) { off := false; c.TLSReadOnly = &off })
+	if rec := writable.do(tlsReq{method: "POST", path: "/api/acknowledge", headers: map[string]string{"Content-Type": "application/sdp"}, cookie: ok, body: "x"}); rec.Code != 415 {
 		t.Errorf("application/sdp on another route: %d", rec.Code)
 	}
 }
