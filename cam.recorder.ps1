@@ -2419,8 +2419,9 @@ function Start-CamLiveChild {
     $Entry.ReadTask = $Entry.ReadStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
     $Entry.ReasonLogged = ''
 
-    Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message ("start live view pid {0}: {1} serving {2} path(s): {3}" -f `
-            $process.Id, $exePath, $liveMap.Count, (($liveMap.Keys | Sort-Object) -join ', '))
+    # The count, not the names: this line reaches status.json's Events and from there the browser, which has no use for live path names.
+    Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message ("start live view pid {0}: {1} serving {2} path(s)" -f `
+            $process.Id, $exePath, $liveMap.Count)
 }
 
 
@@ -2901,10 +2902,27 @@ function Write-CamStatusFile {
 
     # Present ONLY while live view is enabled, so with it off status.json is
     # exactly what it was. Path names only: no address, no credential.
+    # Cameras is the one place the live path naming rule is applied for readers:
+    # camui looks the sub and main path of a camera up here instead of
+    # re-implementing the rule. camui never passes the path names to a browser.
     $liveSection = $null
     if ($Live) {
         $liveAlive = $false
         if ($Live.Process) { $liveAlive = (-not $Live.Process.HasExited) }
+        $liveCameras = New-Object System.Collections.ArrayList
+        $liveByName = @{}
+        if ($Live.PathMap) {
+            foreach ($livePath in @($Live.PathMap.Keys)) {
+                $liveEntry = $Live.PathMap[$livePath]
+                $liveCameraName = Get-CamRedacted -Text ([string]$liveEntry.Camera.Name)
+                if (-not $liveByName.ContainsKey($liveCameraName)) {
+                    $liveByName[$liveCameraName] = [pscustomobject]@{ Name = $liveCameraName; Sub = $false; Main = $false; SubPath = ''; MainPath = '' }
+                    [void]$liveCameras.Add($liveByName[$liveCameraName])
+                }
+                if ($liveEntry.Kind -eq 'sub') { $liveByName[$liveCameraName].Sub = $true; $liveByName[$liveCameraName].SubPath = [string]$livePath }
+                if ($liveEntry.Kind -eq 'main') { $liveByName[$liveCameraName].Main = $true; $liveByName[$liveCameraName].MainPath = [string]$livePath }
+            }
+        }
         $liveSection = [pscustomobject]@{
             Enabled       = $true
             Pid           = $(if ($liveAlive) { $Live.Process.Id } else { $null })
@@ -2913,6 +2931,7 @@ function Write-CamStatusFile {
             StartedAt     = Format-CamTimestamp -Value $Live.StartedAt
             RestartsTotal = $Live.RestartCount
             Paths         = @($(if ($Live.PathMap) { @($Live.PathMap.Keys) } else { @() }))
+            Cameras       = @($liveCameras)
             LastError     = Get-CamRedacted -Text ([string]$Live.LastError)
             LastErrorAt   = Format-CamTimestamp -Value $Live.LastErrorAt
         }

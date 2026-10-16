@@ -87,6 +87,10 @@ type API struct {
 	// ackMu serialises read-modify-write on the acknowledgement sidecar.
 	ackMu sync.Mutex
 
+	// live is the live-view session table, created on first use (live.go).
+	live     *liveHub
+	liveOnce sync.Once
+
 	mu        sync.Mutex
 	tasks     map[string]TaskInfo
 	tasksRead time.Time
@@ -113,6 +117,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /api/config", a.handlePutConfig)
 	mux.HandleFunc("GET /api/footage", a.handleFootage)
 	mux.HandleFunc("GET /api/clip", a.handleClip)
+	a.liveRoutes(mux)
 }
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +138,7 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		body.StatusFile.Error = err.Error()
 		a.log.Warn("status file unreadable", "path", a.cfg.StatusFile, "error", err)
 	} else {
+		dropLivePaths(status)
 		body.Status = status
 	}
 

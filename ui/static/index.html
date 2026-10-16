@@ -16,6 +16,7 @@
       <button data-t="dash" aria-current="page">Dashboard</button>
       <button data-t="set">Settings</button>
       <button data-t="foot">Footage</button>
+      <button data-t="live">Live</button>
     </nav>
     <div class="feed">
       <span id="feed"></span>
@@ -176,6 +177,20 @@
       plays up to the point it has reached.
     </footer>
   </section>
+
+  <!-- ============== LIVE ============== -->
+  <section data-tab="live" class="hide">
+    <div class="panel lpanel">
+      <header><h2>Live</h2><span class="muted" id="lcount"></span></header>
+      <div id="lnote" class="lnote hide"></div>
+      <div class="lgrid" id="lgrid"></div>
+    </div>
+    <footer class="note">
+      Tiles show each camera's second stream. Click a tile to watch it on the main stream, and click it or
+      press Esc to go back. Sound is off until you unmute a tile. Pictures stop while this tab is hidden
+      or another tab is open, so a hidden page costs the camera and this PC nothing.
+    </footer>
+  </section>
 </div>
 
 <!-- Confirmation for anything that stops footage being recorded. -->
@@ -190,6 +205,7 @@
   </form>
 </dialog>
 
+<script src="live.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

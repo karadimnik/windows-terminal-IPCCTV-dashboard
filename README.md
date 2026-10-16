@@ -49,11 +49,12 @@ For the disk figures - the rate footage is accruing at, free space and the days 
 
 A `curl` to that address **from inside WSL cannot reach it** - WSL's loopback is its own, not the Windows one, so the connection is refused and a perfectly healthy UI looks down.
 
-It has three screens:
+It has four screens:
 
 * **Dashboard** - start and stop everything, the recorder alone or the viewers alone; a record toggle per camera with what that camera is actually doing; free space and the days of headroom left; the supervisor's recent events; and the state of each service. The actions that stop footage being written ask for confirmation first.
 * **Settings** - the camera list (add, remove, rename, change the IP, the stream and the record flag) and the four recording keys it is allowed to change: segment length, reserve, hysteresis and retention days.
 * **Footage** - camera, then date, then segment, with the player inline. A day's gaps are visible as gaps.
+* **Live** - the cameras as a tile grid in the browser, from the live-view MediaMTX ([docs/ui.md](docs/ui.md#live-view)); off until `LiveViewEnabled` is turned on. Click a tile for the main stream; sound stays muted until you unmute a tile.
 
 Recording is opt-in per camera: the record toggle on the Dashboard screen, or `.\cam.recorder.ps1 -Enable <name|all>` and `-Disable`. Footage lands in one folder per camera under `RootPath` (`E:\cameras` unless you change it), in 15-minute MKV segments, and the pruner deletes the oldest when free space runs low - [docs/how-it-works.md](docs/how-it-works.md#recording) has the detail.
 
@@ -84,7 +85,7 @@ Everything that is not on this page is under `docs/`, one file per subject:
 * **Installing from scratch** - [docs/install.md](docs/install.md). The prerequisites, the execution policy, every step in order, the `cameras.json` schema and the credentials.
 * **Troubleshooting** - [docs/troubleshooting.md](docs/troubleshooting.md). Every symptom with its likely cause and fix, and what happens when something stops unexpectedly.
 * **The alerts** - [docs/alerts.md](docs/alerts.md). The three channels, every event id and how to read them back.
-* **The control UI** - [docs/ui.md](docs/ui.md). Its three screens, how it runs and logs, exposing it beyond this machine, and the `camui.exe` flags.
+* **The control UI** - [docs/ui.md](docs/ui.md). Its four screens, how it runs and logs, exposing it beyond this machine, and the `camui.exe` flags.
 * **How it works** - [docs/how-it-works.md](docs/how-it-works.md). Credentials, the grid, recording, retention, the relay, the health strip and autostart.
 * **Command reference** - [docs/reference.md](docs/reference.md). Every command of every script, the granular install switches and the test harness.
 * **Known limitations** - [docs/limitations.md](docs/limitations.md). Thirteen of them, measured rather than theoretical.

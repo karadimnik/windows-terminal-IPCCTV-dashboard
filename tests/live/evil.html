@@ -5,6 +5,7 @@
 <div id="o">this page stands for any web page the Operator might visit. It is served from a different origin than MediaMTX and tries to open a WebRTC session to read a camera, with no login.</div>
 <script>
 // Test page for the Stage 1A hole proof (not part of the product). Query: run=<id>  targets=<label>=<url up to but excluding /whep>,...
+// A url holding {whep} has that marker replaced by /whep, so a query string can follow it (Stage 1B: camui's ?stream=sub).
 // For each target: create a receive-only peer connection, POST the offer to <url>/whep from THIS (foreign) origin, and
 // report whether the request was allowed, whether an answer came back and whether any video frame was decoded.
 const q = new URLSearchParams(location.search);
@@ -21,7 +22,8 @@ async function attempt(t) {
     pc.ontrack = e => { video.srcObject = e.streams[0]; };
     await pc.setLocalDescription(await pc.createOffer()); await gathered(pc, 2000);
     let resp;
-    try { resp = await fetch(t.url + '/whep', { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp }); }
+    const target = t.url.includes('{whep}') ? t.url.replace('{whep}', '/whep') : t.url + '/whep';
+    try { resp = await fetch(target, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp }); }
     catch (e) { r.outcome = 'blocked by the browser: ' + e; return r; }
     r.status = resp.status;
     if (resp.status !== 201) { r.outcome = 'answered HTTP ' + resp.status; return r; }
