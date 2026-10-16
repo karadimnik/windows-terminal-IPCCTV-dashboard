@@ -299,8 +299,14 @@ func TestFailureLimiter(t *testing.T) {
 func TestTLSLimiterOverHTTP(t *testing.T) {
 	rig := newTLSRig(t, nil)
 	src := "192.168.1.99:5555"
-	for i := 0; i < 10; i++ {
+	// Requests with no credential at all are first visits, not guesses: they are never counted.
+	for i := 0; i < 30; i++ {
 		if rec := rig.do(tlsReq{path: "/api/status", remote: src}); rec.Code != 401 {
+			t.Fatalf("no-credential request %d: %d", i, rec.Code)
+		}
+	}
+	for i := 0; i < 10; i++ {
+		if rec := rig.do(tlsReq{path: "/api/status", remote: src, headers: map[string]string{"Authorization": "Bearer wrong"}}); rec.Code != 401 {
 			t.Fatalf("attempt %d: %d", i, rec.Code)
 		}
 	}

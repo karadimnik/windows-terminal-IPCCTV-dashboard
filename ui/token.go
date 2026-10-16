@@ -65,7 +65,11 @@ func requireTokenPolicy(p tokenPolicy, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		presented := false
+		// A credential was offered (and, having got here, is wrong): only that counts toward the limiter. A request with no
+		// credential at all is a first visit, not a guess.
+		_, hasCookie := cookieOf(r)
+		_, hasBearer := bearerToken(r)
+		presented := hasCookie || hasBearer || r.Header.Get("Authorization") != ""
 		if query := r.URL.Query().Get("token"); query != "" {
 			presented = true
 			if tokenMatches(p.Token, query) {
@@ -87,13 +91,13 @@ func requireTokenPolicy(p tokenPolicy, next http.Handler) http.Handler {
 				return
 			}
 		}
-		if p.Limiter != nil {
+		if p.Limiter != nil && presented {
 			p.Limiter.fail(ip)
 		}
 		if p.Log != nil {
 			// Who and what kind of failure, never the token or any part of it.
 			reason := "no token"
-			if presented || r.Header.Get("Authorization") != "" || r.Header.Get("Cookie") != "" {
+			if presented {
 				reason = "wrong token"
 			}
 			p.Log.Warn("token refused", "from", ip, "method", r.Method, "path", r.URL.Path, "reason", reason)
@@ -101,6 +105,14 @@ func requireTokenPolicy(p tokenPolicy, next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		http.Error(w, "a token is required", http.StatusUnauthorized)
 	})
+}
+
+func cookieOf(r *http.Request) (string, bool) {
+	c, err := r.Cookie(tokenCookie)
+	if err != nil {
+		return "", false
+	}
+	return c.Value, true
 }
 
 // sourceIP is the peer address, without port. Forwarding headers are never trusted.
