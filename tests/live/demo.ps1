@@ -14,6 +14,13 @@
     is held it only says so. It refuses to start when one of ITS OWN ports is
     already in use.
 
+    -Lan (or -LanAddress <ip>) makes the live instance listen on 0.0.0.0 and advertise this PC's private IPv4 for the
+    media as well as loopback. The address is auto-detected: physical adapters only (WSL, Hyper-V, VirtualBox, VMware,
+    VPN adapters are skipped), preferring the one with the default route; if that is ambiguous, or there is none, the
+    demo stops and asks for -LanAddress. In this mode the live instance runs from C:\mediamtx\mediamtx.exe (read only)
+    rather than a temp copy, so an existing Windows Firewall rule for that program applies and no new prompt for a
+    new path is needed; the demo itself never creates a firewall rule. camui (the page) stays on loopback.
+
     Run it from a LOCAL directory in Windows PowerShell 5.1:
         cd C:\Windows\Temp
         powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\tests\live\demo.ps1 -Minutes 15
@@ -26,7 +33,11 @@ param(
     [ValidateRange(1, 240)][int]$Minutes = 15,
     # A camui.exe built from this tree; empty builds one into a temp folder.
     [string]$CamuiExe = '',
-    [ValidateRange(1024, 65535)][int]$Port = 18789
+    [ValidateRange(1024, 65535)][int]$Port = 18789,
+    # Also advertise this PC's private LAN address for the media (browsers that ignore loopback, such as Firefox, need it).
+    [switch]$Lan,
+    # With -Lan: the address to use, when this PC has several candidates. Must be a private IPv4 of an up adapter here.
+    [string]$LanAddress = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -64,10 +75,31 @@ try {
     }
     $env:CAMUI_TEST_EXE = $exe
 
+    $liveConfig = @{}
+    if ($Lan -or $LanAddress) {
+        $candidates = @(Get-CamLanCandidates)
+        if ($LanAddress) {
+            $pick = @($candidates | Where-Object { $_.Address -eq $LanAddress })[0]
+            if (-not $pick) { throw "-LanAddress $LanAddress is not a private IPv4 address of an up adapter on this PC (found: $(@($candidates | ForEach-Object { $_.Address }) -join ', '))." }
+        }
+        else {
+            $physical = @($candidates | Where-Object { -not $_.Virtual })
+            $routed = @($physical | Where-Object { $_.Gateway })
+            $list = (@($candidates | ForEach-Object { '{0} {1} ({2}, profile {3}, default route {4})' -f $_.Alias, $_.Address, $(if ($_.Virtual) { 'virtual' } else { 'physical' }), $_.Profile, $_.Gateway }) -join '; ')
+            if ($routed.Count -eq 1) { $pick = $routed[0] }
+            elseif ($routed.Count -eq 0 -and $physical.Count -eq 1) { $pick = $physical[0] }
+            elseif ($physical.Count -eq 0) { throw "no physical private IPv4 address found on this PC (candidates incl. virtual adapters: $list). Pass -LanAddress <ip> to use one anyway." }
+            else { throw "more than one physical private address and no single default route: $list. Pass -LanAddress <ip>." }
+        }
+        Write-Host ("LAN address: {0} on '{1}' ({2}, profile {3})" -f $pick.Address, $pick.Alias, $(if ($pick.Virtual) { 'virtual adapter' } else { 'physical' }), $pick.Profile) -ForegroundColor Cyan
+        if ($pick.Profile -ne 'Private') { Write-Host "warning: that network is '$($pick.Profile)', not Private: a firewall rule scoped to Private networks will not apply to it." -ForegroundColor Yellow }
+        $liveConfig = @{ LiveUdpAddress = '0.0.0.0:18189'; LiveAdvertiseHosts = @($pick.Address); LiveExePath = 'C:\mediamtx\mediamtx.exe' }
+    }
+
     Write-Host 'starting the rig: supervisor, live-view MediaMTX and six synthetic cameras (about 30 s) ...'
     $cameras = 'Front Entrance', 'Rear Balcony', 'Field Front', 'Car Garage', 'Workshop Entrance', 'Workshop' |
         ForEach-Object { [pscustomobject]@{ Name = $_; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 'Front Entrance') } }
-    $rig = Start-CamTestLiveRig -Name 'livedemo' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 10
+    $rig = Start-CamTestLiveRig -Name 'livedemo' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 10 -Config $liveConfig
     $ui = Start-CamTestLiveCamui -Rig $rig -Port $Port -Name 'camui-livedemo'
     if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
 
@@ -75,6 +107,7 @@ try {
     Write-Host ("  Live screen:  http://127.0.0.1:{0}/#live" -f $Port) -ForegroundColor Green
     Write-Host ("  One camera:   http://127.0.0.1:{0}/#live/Front%20Entrance" -f $Port)
     Write-Host '  Token:        none (loopback only)'
+    if ($liveConfig.Count) { Write-Host '  Media:        loopback and the LAN address above. The page itself is still loopback only: other devices cannot open it yet.' }
     Write-Host '  The cameras are synthetic colour bars; nothing real is read or started.'
     Write-Host ("  Press Enter to stop everything, or it stops by itself in {0} minute(s)." -f $Minutes)
     Write-Host ''

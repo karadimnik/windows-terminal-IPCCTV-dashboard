@@ -380,9 +380,12 @@ function Get-CamConfigDefault {
         LiveExePath          = ''
         # A LOCAL NTFS path, like RestreamerConfigPath.
         LiveConfigPath       = 'C:\mediamtx\mediamtx-live.yml'
-        # Loopback only: WebRTC signaling (TCP) and the ICE media port (UDP).
+        # WebRTC signaling (TCP) is loopback only: browsers reach it through camui's proxy. The ICE media port (UDP) is
+        # loopback by default; to serve another device on the LAN set a private IPv4 or 0.0.0.0 here AND list the
+        # address(es) browsers must use in LiveAdvertiseHosts (see docs/configuration.md, "Live view").
         LiveWhepAddress      = '127.0.0.1:8889'
         LiveUdpAddress       = '127.0.0.1:8189'
+        LiveAdvertiseHosts   = @()
         # The camera stream the live grid pulls, on demand.
         LiveSubStream        = 'stream2'
         # How long after the last viewer leaves the camera session is closed.
@@ -490,6 +493,18 @@ function Get-CamConfig {
 }
 
 
+function Test-CamPrivateIPv4 {
+    <# True for a strict dotted-quad IPv4 literal in RFC 1918 space (10/8, 172.16/12, 192.168/16). No names, no IPv6, no leading zeros. #>
+    param([string]$Text)
+
+    $m = [regex]::Match($Text, '^(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})\.(0|[1-9][0-9]{0,2})$')
+    if (-not $m.Success) { return $false }
+    $o = @(1..4 | ForEach-Object { [int]$m.Groups[$_].Value })
+    if (@($o | Where-Object { $_ -gt 255 }).Count) { return $false }
+    return ($o[0] -eq 10 -or ($o[0] -eq 172 -and $o[1] -ge 16 -and $o[1] -le 31) -or ($o[0] -eq 192 -and $o[1] -eq 168))
+}
+
+
 function Assert-CamLiveConfig {
     <#
         Rejects a malformed live-view setting at load rather than at the first
@@ -500,7 +515,7 @@ function Assert-CamLiveConfig {
     #>
     param([Parameter(Mandatory = $true)][hashtable]$Config)
 
-    $known = @('LiveViewEnabled', 'LiveExePath', 'LiveConfigPath', 'LiveWhepAddress', 'LiveUdpAddress', 'LiveSubStream', 'LiveCloseAfterSeconds', 'LiveSecretPath')
+    $known = @('LiveViewEnabled', 'LiveExePath', 'LiveConfigPath', 'LiveWhepAddress', 'LiveUdpAddress', 'LiveAdvertiseHosts', 'LiveSubStream', 'LiveCloseAfterSeconds', 'LiveSecretPath')
     foreach ($key in @($Config.Keys)) {
         if ($key -match '^(?i)live' -and $known -cnotcontains $key) {
             throw "Unknown live-view setting '$key'. The known ones are: $($known -join ', ')."
@@ -521,13 +536,43 @@ function Assert-CamLiveConfig {
     }
 
     $ports = @{}
-    foreach ($key in @('LiveWhepAddress', 'LiveUdpAddress')) {
-        $match = [regex]::Match([string]$Config[$key], '^127\.0\.0\.1:([0-9]{1,5})$')
-        if (-not $match.Success -or [int]$match.Groups[1].Value -lt 1 -or [int]$match.Groups[1].Value -gt 65535) {
-            throw "$key must be 127.0.0.1 and a port such as 127.0.0.1:8889, got '$($Config[$key])'. Live view is loopback only."
-        }
-        $ports[$key] = [string]$Config[$key]
+    $whep = [regex]::Match([string]$Config.LiveWhepAddress, '^127\.0\.0\.1:([0-9]{1,5})$')
+    if (-not $whep.Success -or [int]$whep.Groups[1].Value -lt 1 -or [int]$whep.Groups[1].Value -gt 65535) {
+        throw "LiveWhepAddress must be 127.0.0.1 and a port such as 127.0.0.1:8889, got '$($Config.LiveWhepAddress)'. Signaling is loopback only: browsers reach it through camui."
     }
+    $ports.LiveWhepAddress = [string]$Config.LiveWhepAddress
+
+    # The media port: loopback (the default), 0.0.0.0, or ONE private (RFC 1918) IPv4 of this PC. Never a name, IPv6 or a public address.
+    $udp = [regex]::Match([string]$Config.LiveUdpAddress, '^([0-9.]+):([0-9]{1,5})$')
+    if (-not $udp.Success -or [int]$udp.Groups[2].Value -lt 1 -or [int]$udp.Groups[2].Value -gt 65535) {
+        throw "LiveUdpAddress must be an IPv4 address and a port such as 127.0.0.1:8189, got '$($Config.LiveUdpAddress)'."
+    }
+    $udpHost = $udp.Groups[1].Value
+    if ($udpHost -ne '127.0.0.1' -and $udpHost -ne '0.0.0.0' -and -not (Test-CamPrivateIPv4 -Text $udpHost)) {
+        throw "LiveUdpAddress host must be 127.0.0.1, 0.0.0.0 or a private (10.x, 172.16-31.x, 192.168.x) IPv4 address of this PC, got '$udpHost'. Names, IPv6 and public addresses are refused."
+    }
+    $ports.LiveUdpAddress = [string]$Config.LiveUdpAddress
+
+    $advertise = $Config.LiveAdvertiseHosts
+    if ($null -eq $advertise) { $advertise = @() }
+    if ($advertise -isnot [array]) { throw "LiveAdvertiseHosts must be a JSON array of private IPv4 addresses, got '$advertise'." }
+    if (@($advertise).Count -gt 4) { throw 'LiveAdvertiseHosts may list at most 4 addresses.' }
+    foreach ($item in @($advertise)) {
+        if ($item -isnot [string] -or -not (Test-CamPrivateIPv4 -Text $item)) {
+            throw "LiveAdvertiseHosts entries must be private (10.x, 172.16-31.x, 192.168.x) IPv4 literals such as 192.168.1.50 - no names, IPv6 or public addresses - got '$item'."
+        }
+    }
+    if (@($advertise | Select-Object -Unique).Count -ne @($advertise).Count) { throw 'LiveAdvertiseHosts lists the same address twice.' }
+    if (@($advertise).Count -eq 0 -and $udpHost -ne '127.0.0.1') {
+        throw "LiveUdpAddress '$($Config.LiveUdpAddress)' listens beyond loopback but LiveAdvertiseHosts is empty, so no browser would be told to use it. List the address(es) browsers reach this PC by in LiveAdvertiseHosts, or set LiveUdpAddress back to 127.0.0.1."
+    }
+    if (@($advertise).Count -gt 0 -and $udpHost -eq '127.0.0.1') {
+        throw "LiveAdvertiseHosts is set but LiveUdpAddress is '$($Config.LiveUdpAddress)', which only loopback can reach. Use 0.0.0.0:<port> or this PC's private address."
+    }
+    if (@($advertise).Count -gt 0 -and $udpHost -ne '0.0.0.0' -and @($advertise | Where-Object { $_ -ne $udpHost }).Count) {
+        throw "LiveUdpAddress is bound to $udpHost only, so LiveAdvertiseHosts may list only $udpHost. Use 0.0.0.0:<port> to serve several addresses."
+    }
+    $Config.LiveAdvertiseHosts = @($advertise)
 
     if ([string]$Config.LiveSubStream -notmatch '^[A-Za-z0-9_\-]{1,32}$') {
         throw "LiveSubStream must be a camera stream name such as stream2 (letters, digits, - and _), got '$($Config.LiveSubStream)'."
@@ -1726,6 +1771,8 @@ function Get-CamLiveConfigText {
     )
 
     $udp = [string]$Config.LiveUdpAddress
+    # Loopback always, then the addresses LiveAdvertiseHosts names (empty by default, so the default text is unchanged).
+    $hosts = @('127.0.0.1') + @($Config.LiveAdvertiseHosts | ForEach-Object { [string]$_ })
     $lines = New-Object System.Collections.ArrayList
     foreach ($name in $LivePathMap.Keys) {
         $entry = $LivePathMap[$name]
@@ -1776,7 +1823,7 @@ webrtcLocalUDPAddress: $udp
 webrtcLocalTCPAddress: ""
 webrtcIPsFromInterfaces: no
 webrtcIPsFromInterfacesList: []
-webrtcAdditionalHosts: ["$(($udp -replace ':[0-9]+$', ''))"]
+webrtcAdditionalHosts: [$(($hosts | ForEach-Object { '"' + $_ + '"' }) -join ', ')]
 webrtcICEServers2: []
 
 pathDefaults:

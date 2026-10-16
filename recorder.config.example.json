@@ -20,6 +20,7 @@
   "LiveConfigPath": "C:\\mediamtx\\mediamtx-live.yml",
   "LiveWhepAddress": "127.0.0.1:8889",
   "LiveUdpAddress": "127.0.0.1:8189",
+  "LiveAdvertiseHosts": [],
   "LiveSubStream": "stream2",
   "LiveCloseAfterSeconds": 10,
   "LiveSecretPath": "",

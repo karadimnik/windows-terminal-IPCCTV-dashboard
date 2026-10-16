@@ -85,3 +85,20 @@ From a local directory in Windows PowerShell (not from the `\\wsl.localhost` sha
 `cd C:\Windows\Temp` then `powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\tests\live\demo.ps1 -Minutes 15`.
 Open `http://127.0.0.1:18789/#live`; press Enter in that window, or wait out `-Minutes` (default 15), and it stops exactly what it started and deletes its temp folders.
 It builds camui through WSL unless `-CamuiExe` names an exe built from this tree, refuses to start if one of its own ports (18789, 18554, 18557, 18564, 18567, 18889, UDP 18189) is busy, and never uses or touches 8787, 8554, 9997, 8889 or 8189.
+
+## Live view on the LAN: media, firewall and stuck tiles
+
+**A tile that is not playing says why.** Instead of a bare "Connecting", a stuck tile shows, in plain words: the server's answer (`HTTP 201`, or the error), the ICE and connection state, how many candidates the browser and the server offered and of what kind (`1 host (mDNS)`, `1 host (private)`), and `No media after 15 s` when the connection never came up. It also says when the server offers only loopback addresses, which some browsers refuse. Only counts, kinds and an address class (loopback, private, link-local) appear - never an address. **Copy diagnostics** puts one line on the clipboard (browser family and version, stream, the states, the candidate counts, the elapsed time and the verdict) to paste into a bug report; the same line goes to the browser console. Playing tiles show nothing of this.
+
+**Media on a LAN address.** To let a browser that ignores loopback addresses (Firefox is suspected to; unverified) or another device receive the video, set `LiveUdpAddress` to `0.0.0.0:8189` (or this PC's private address and port) and list the address(es) in `LiveAdvertiseHosts`, for example `["192.168.1.50"]`; see [configuration.md](configuration.md#live-view). Only private (RFC 1918) IPv4 literals are accepted. The page and the signaling stay on loopback: other devices cannot open the page until the HTTPS and token step.
+
+**Windows Firewall (nothing here is applied for you).** A rule is needed for OTHER devices to reach the media port. Whether the same PC needs one is **unverified**: this PC already had an allow rule for the program, so a test could not tell, and a program with no rule makes Windows prompt, which is why no test created or removed one. In an elevated (Administrator) PowerShell, for the live MediaMTX program (`C:\mediamtx\mediamtx.exe`, or your `LiveExePath`), Private networks only, this subnet only:
+
+```powershell
+New-NetFirewallRule -DisplayName 'IPCCTV live view media (UDP 8189)' -Direction Inbound -Action Allow -Protocol UDP -LocalPort 8189 -Program 'C:\mediamtx\mediamtx.exe' -Profile Private -RemoteAddress LocalSubnet
+Remove-NetFirewallRule -DisplayName 'IPCCTV live view media (UDP 8189)'   # to take it away again
+```
+
+The rule only helps if the network is a Private one: check with `Get-NetConnectionProfile` and change a Wi-Fi network with `Set-NetConnectionProfile -InterfaceAlias 'Wi-Fi' -NetworkCategory Private`. Use the port from your `LiveUdpAddress` if it is not 8189.
+
+`tests\live\demo.ps1 -Lan` runs the demo with the media advertised on this PC's private address (physical adapters only, the one with the default route; if that is ambiguous or there is none it stops and asks for `-LanAddress 192.168.1.50`). It runs the live instance from `C:\mediamtx\mediamtx.exe` so an existing rule for that program applies, and it never creates a rule. Windows may still ask about the program the first time it listens beyond loopback.

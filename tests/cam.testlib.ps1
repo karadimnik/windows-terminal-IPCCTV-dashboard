@@ -2437,7 +2437,10 @@ function Start-CamTestLiveRig {
         # TEST ONLY: switch the live instance's control API on at this loopback port, by patching the SANDBOX copy of
         # cam.common.ps1 (never the product): a read-only login gains the api permission, so a check can count its
         # WebRTC sessions (/v3/webrtcsessions/list). Nothing about sessions or timeouts changes.
-        [int]$LiveApiPort = 0
+        [int]$LiveApiPort = 0,
+        # TEST ONLY: advertise ONLY the hosts in LiveAdvertiseHosts (not 127.0.0.1 as well), by patching the SANDBOX copy of
+        # cam.common.ps1, so a check can prove a browser connects to the non-loopback candidate alone.
+        [switch]$LiveOnlyAdvertised
     )
 
     $rig = [pscustomobject]@{
@@ -2459,6 +2462,13 @@ function Start-CamTestLiveRig {
             LiveCloseAfterSeconds = $LiveCloseAfterSeconds }
         foreach ($key in $Config.Keys) { $settings[$key] = $Config[$key] }
         $rig.Sandbox = New-CamTestSandbox -Name $Name -Cameras $Cameras -Config $settings
+        if ($LiveOnlyAdvertised) {
+            $common = Join-Path -Path $rig.Sandbox.Dir -ChildPath 'cam.common.ps1'
+            $text = [System.IO.File]::ReadAllText($common)
+            $needle = '$hosts = @(' + "'127.0.0.1') + @("
+            if (-not $text.Contains($needle)) { throw 'the sandbox copy of cam.common.ps1 has no advertised-hosts line to patch' }
+            [System.IO.File]::WriteAllText($common, $text.Replace($needle, '$hosts = @('), (New-Object System.Text.UTF8Encoding($false)))
+        }
         if ($LiveApiPort) {
             $common = Join-Path -Path $rig.Sandbox.Dir -ChildPath 'cam.common.ps1'
             $text = [System.IO.File]::ReadAllText($common)
@@ -2797,4 +2807,30 @@ function Get-CamTestLiveSessions {
         $json = ConvertFrom-Json -InputObject $reader.ReadToEnd(); $reader.Dispose(); $response.Dispose()
         return [pscustomobject]@{ Count = [int]$json.itemCount; Ids = @($json.items | ForEach-Object { $_.id }) }
     } catch { return [pscustomobject]@{ Count = -1; Ids = @() } }
+}
+
+
+function Get-CamLanCandidates {
+    <#
+        This PC's private (RFC 1918) IPv4 addresses on up adapters, each with the
+        adapter name, whether the adapter looks virtual (Hyper-V/WSL/VirtualBox/
+        VMware/VPN/TAP), whether it carries a default route, and its network
+        profile (Private is what a firewall rule scoped to Private needs).
+        Addresses are read at run time only and never written anywhere.
+    #>
+    $virtual = 'vEthernet|WSL|Hyper-V|Virtual|VMware|VPN|TAP|Tunnel|Loopback|Bluetooth|Host-Only'
+    $routes = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Where-Object { $_.NextHop -ne '0.0.0.0' })
+    $found = @()
+    foreach ($ip in @(Get-NetIPAddress -AddressFamily IPv4 -AddressState Preferred -ErrorAction SilentlyContinue)) {
+        if (-not (Test-CamPrivateIPv4 -Text $ip.IPAddress)) { continue }
+        $adapter = Get-NetAdapter -InterfaceIndex $ip.InterfaceIndex -ErrorAction SilentlyContinue
+        if (-not $adapter -or $adapter.Status -ne 'Up') { continue }
+        $profile = Get-NetConnectionProfile -InterfaceIndex $ip.InterfaceIndex -ErrorAction SilentlyContinue
+        $found += [pscustomobject]@{
+            Address = [string]$ip.IPAddress; Alias = [string]$adapter.Name
+            Virtual = [bool]($adapter.Virtual -or $adapter.InterfaceDescription -match $virtual -or $adapter.Name -match $virtual)
+            Gateway = [bool]@($routes | Where-Object { $_.InterfaceIndex -eq $ip.InterfaceIndex }).Count
+            Profile = $(if ($profile) { [string]$profile.NetworkCategory } else { 'unknown' }) }
+    }
+    return @($found)
 }
