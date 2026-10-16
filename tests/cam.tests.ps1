@@ -8254,6 +8254,36 @@ function Invoke-CamCheckLiveTls {
         & $note ("the loopback listener: /api/tls/ca.crt -> HTTP {0} (TLS-only route)" -f $loop.Status)
         if ($loop.Status -ne 404) { & $fail 'the CA route exists on the loopback listener' }
 
+        # ---- [Stage 2b.1] view-only by default: a valid token can watch but cannot stop or change anything ----
+        $cfgHashBefore = (Get-FileHash -LiteralPath $rig.Sandbox.ConfigPath -Algorithm SHA256).Hash
+        $camHashBefore = (Get-FileHash -LiteralPath $rig.Sandbox.Cameras -Algorithm SHA256).Hash
+        $ackFile = Join-Path -Path (Split-Path -Parent (Get-CamStatusFilePath -Config $rig.Sandbox.Config)) -ChildPath 'camui-acknowledged.json'
+        $pageHeaders = @{ Origin = "https://$hostPort"; 'Sec-Fetch-Site' = 'same-origin'; 'Content-Type' = 'application/json' }
+        $writes = @(
+            @{ L = 'POST /api/control (stop everything)'; M = 'POST'; P = '/api/control'; B = '{"scope":"all","action":"stop"}' },
+            @{ L = 'PUT /api/config'; M = 'PUT'; P = '/api/config'; B = '{"config":{"SegmentSeconds":300}}' },
+            @{ L = 'PUT /api/cameras'; M = 'PUT'; P = '/api/cameras'; B = '{"cameras":[]}' },
+            @{ L = 'POST /api/cameras/Cam 1/record'; M = 'POST'; P = '/api/cameras/Cam%201/record'; B = '{"record":false}' },
+            @{ L = 'POST /api/acknowledge'; M = 'POST'; P = '/api/acknowledge'; B = '{"key":"stopNotice","at":"2026-01-01T00:00:00Z"}' },
+            @{ L = 'DELETE /api/cameras'; M = 'DELETE'; P = '/api/cameras'; B = '' })
+        foreach ($w in $writes) {
+            $args2 = @{ Method = $w.M; Path = $w.P; Headers = ($bearer + $pageHeaders) }
+            if ($w.B) { $args2.Body = $w.B }
+            $x = & $tls $args2
+            & $note ("  view-only, right token and page-shaped headers: {0} -> HTTP {1} {2}" -f $w.L, $x.Status, $x.Body.Trim())
+            if ($x.Status -ne 403 -or $x.Body -notmatch 'read-only: this address can only watch') { & $fail "$($w.L) was not refused as read-only (HTTP $($x.Status))" }
+        }
+        $stat = (Get-CamTestStatusJson -Sandbox $rig.Sandbox).Snapshot
+        $unchanged = (-not $rig.Supervisor.HasExited) -and $stat.State -eq 'running' -and $stat.Live.Alive -and ((Get-FileHash -LiteralPath $rig.Sandbox.ConfigPath -Algorithm SHA256).Hash -eq $cfgHashBefore) -and
+            ((Get-FileHash -LiteralPath $rig.Sandbox.Cameras -Algorithm SHA256).Hash -eq $camHashBefore) -and -not (Test-Path -LiteralPath $ackFile)
+        & $note ("  after those requests: the sandbox supervisor still runs ({0}), status State '{1}', live instance alive {2}, recorder.config.json and cameras.json unchanged, no acknowledgement file written: {3}" -f (-not $rig.Supervisor.HasExited), $stat.State, $stat.Live.Alive, $unchanged)
+        if (-not $unchanged) { & $fail 'a refused write changed something' }
+        $unknown = & $tls @{ Path = '/api/not-a-route'; Headers = $bearer }
+        & $note ("  an unknown /api route with the right token -> HTTP {0} (deny by default)" -f $unknown.Status)
+        if ($unknown.Status -ne 403) { & $fail 'an unknown route was not refused' }
+        $infoRo = & $tls @{ Path = '/api/tls/info'; Headers = $bearer }
+        if ($infoRo.Body -notmatch '"readOnly":\s*true') { & $fail '/api/tls/info does not say readOnly:true' }
+
         # ---- browsers ----
         $spki = (Get-CamTestSpkiHash -Certificate $leaf) + ',' + (Get-CamTestSpkiHash -Certificate $ca)
         $url = "https://${hostPort}/?token=$token#live"
@@ -8302,6 +8332,11 @@ function Invoke-CamCheckLiveTls {
                     $panel = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(async () => { location.hash = "set"; await new Promise(r => setTimeout(r, 1500)); return { shown: !document.getElementById("tlsPanel").classList.contains("hide"), fp: document.getElementById("tlsFingerprint").textContent.length }; })()' -Await
                     & $note ("    Settings > Connect a phone panel shown: {0}; fingerprint text {1} characters" -f $panel.shown, $panel.fp)
                     if (-not $panel.shown -or $panel.fp -ne 95) { & $fail "$browser : the Connect a phone panel is missing over HTTPS" }
+                    $dom = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(async () => { location.hash = "dash"; await new Promise(r => setTimeout(r, 2500)); const vis = (e) => !!e && getComputedStyle(e).display !== "none" && e.getClientRects().length > 0; const tg = Array.from(document.querySelectorAll("#camsA .tgl, #camsC .tgl")); const panels = Array.from(document.querySelectorAll("section[data-tab=set] > .panel:not(#tlsPanel)")); return { viewonly: document.body.classList.contains("viewonly"), banner: vis(document.getElementById("viewOnly")), controlsVisible: vis(document.getElementById("controls")), toggles: tg.length, togglesClickable: tg.filter(t => getComputedStyle(t).pointerEvents !== "none" && vis(t)).length, settingsInert: panels.length > 0 && panels.every(p => p.inert), ackVisible: Array.from(document.querySelectorAll("[data-ack]")).filter(vis).length }; })()' -Await
+                    & $note ("    page in view-only mode: body.viewonly {0}, explanation banner visible {1}, Start/Stop controls visible {2}, record toggles {3} (clickable: {4}), settings panels inert {5}" -f $dom.viewonly, $dom.banner, $dom.controlsVisible, $dom.toggles, $dom.togglesClickable, $dom.settingsInert)
+                    if (-not $dom.viewonly -or -not $dom.banner -or $dom.controlsVisible -or $dom.togglesClickable -ne 0 -or -not $dom.settingsInert -or $dom.toggles -lt 1) { & $fail "$browser : the view-only page still offers controls ($($dom | ConvertTo-Json -Compress))" }
+                    if ($shots) { [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-https-dashboard-viewonly.png")) }
+                    [void](Invoke-CamTestCdpEval -Cdp $cdp -Expression 'location.hash = "set"'); Start-Sleep -Milliseconds 1200
                     if ($shots) { [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-https-settings.png")); [void](Invoke-CamTestCdpEval -Cdp $cdp -Expression 'location.hash = "live"'); Start-Sleep -Milliseconds 800; [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-https-live.png")) }
                 }
                 catch { & $fail ("$browser run aborted: " + $_.Exception.Message) }
@@ -8321,6 +8356,23 @@ function Invoke-CamCheckLiveTls {
         $logText = (@(Get-Content -LiteralPath $ui.StdOut -ErrorAction SilentlyContinue) -join "`n")
         & $note ("camui log: token appears: {0}; cookie value appears: {1}; 'token refused' lines: {2}" -f $logText.Contains($token), $false, ([regex]::Matches($logText, 'token refused')).Count)
         if ($logText.Contains($token)) { & $fail 'the token reached the camui log' }
+
+        # ---- [Stage 2b.1] tlsReadOnly=false: the same POST now reaches its handler (a harmless, invalid one) ----
+        [void](Stop-CamTestUi -Ui $ui)
+        $env:CAMUI_TLS_TOKEN = $token
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livetls' -RunExe $allowed -ExtraArgs @('-tls-listen', ('{0}:{1}' -f $lan, $tlsPort), '-tls-dir', $tlsDir, '-tls-readonly', 'false')
+        Remove-Item Env:\CAMUI_TLS_TOKEN -ErrorAction SilentlyContinue
+        if (-not $ui.Started) { throw ('camui did not restart with -tls-readonly false: ' + $ui.Reason) }
+        $up = $false
+        for ($i = 0; $i -lt 40 -and -not $up; $i++) { $tcp = New-Object System.Net.Sockets.TcpClient; try { $tcp.Connect($lan, $tlsPort); $up = $true } catch { Start-Sleep -Milliseconds 250 } finally { $tcp.Close() } }
+        $open = & $tls @{ Method = 'POST'; Path = '/api/control'; Headers = ($bearer + $pageHeaders); Body = '{"scope":"nothing","action":"nothing"}' }
+        $infoRw = & $tls @{ Path = '/api/tls/info'; Headers = $bearer }
+        & $note ("tlsReadOnly=false: POST /api/control (an invalid scope, so nothing is stopped) -> HTTP {0} {1}; /api/tls/info readOnly false: {2}" -f $open.Status, $open.Body.Trim(), ($infoRw.Body -match '"readOnly":\s*false'))
+        if ($open.Body -match 'read-only' -or $open.Status -eq 0 -or $open.Status -in 401, 429) { & $fail 'with tlsReadOnly=false the request did not reach its handler' }
+        if ($infoRw.Body -notmatch '"readOnly":\s*false') { & $fail '/api/tls/info does not say readOnly:false' }
+        $loopCtl = Invoke-CamRawHttp -Port 18789 -Method POST -Path '/api/control' -Headers @{ 'Content-Type' = 'application/json' } -Body '{"scope":"nothing","action":"nothing"}'
+        & $note ("the loopback listener (unchanged): POST /api/control with an invalid scope -> HTTP {0}, read-only refusal: {1}" -f $loopCtl.Status, ($loopCtl.Body -match 'read-only'))
+        if ($loopCtl.Body -match 'read-only') { & $fail 'the loopback listener refused as read-only' }
 
         $storesAfter = & $storeCount
         & $note ("Windows certificate stores (CurrentUser and LocalMachine Root, CA, TrustedPeople) counts before/after: {0} / {1}; IPCCTV certificates in them: {2}; firewall rules before/after: {3} / {4}" -f $storesBefore, $storesAfter, (& $ours), $fwBefore, @(Get-NetFirewallRule -ErrorAction SilentlyContinue).Count)
@@ -8346,7 +8398,7 @@ function Invoke-CamCheckLiveTls {
 
     if ($script:CamTlsOk -or $script:CamTlsEvidence.Count) {
         Add-CamTestResult -Run $Run -Check 'livetls' -Status $(if ($script:CamTlsOk) { 'PASS' } else { 'FAIL' }) `
-            -Message 'camui serves the app and the Live screen over HTTPS on the LAN address with a token and a local CA: nothing without the token, nothing leaked, trust per probe or per browser process only' `
+            -Message 'camui serves the app and the Live screen over HTTPS on the LAN address with a token and a local CA, view-only by default: nothing without the token, nothing leaked, no write with it, trust per probe or per browser process only' `
             -Evidence $script:CamTlsEvidence
     }
 }
