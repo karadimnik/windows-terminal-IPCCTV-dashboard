@@ -2419,8 +2419,9 @@ function Start-CamLiveChild {
     $Entry.ReadTask = $Entry.ReadStream.ReadAsync($Entry.ReadBuffer, 0, $Entry.ReadBuffer.Length)
     $Entry.ReasonLogged = ''
 
-    Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message ("start live view pid {0}: {1} serving {2} path(s): {3}" -f `
-            $process.Id, $exePath, $liveMap.Count, (($liveMap.Keys | Sort-Object) -join ', '))
+    # The count, not the names: this line reaches status.json's Events and from there the browser, which has no use for live path names.
+    Write-CamLog -Path $SupervisorLog -MaxBytes $Config.LogMaxBytes -Message ("start live view pid {0}: {1} serving {2} path(s)" -f `
+            $process.Id, $exePath, $liveMap.Count)
 }
 
 

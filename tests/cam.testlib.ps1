@@ -523,7 +523,7 @@ function Invoke-CamUiCredentialLeakScan {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$BaseUrl,
-        [string[]]$Paths = @('/', '/index.html', '/style.css', '/app.js', '/api/status', '/api/cameras', '/api/config', '/api/footage'),
+        [string[]]$Paths = @('/', '/index.html', '/style.css', '/app.js', '/live.js', '/api/status', '/api/cameras', '/api/config', '/api/footage', '/api/live'),
         [string[]]$ExtraPaths = @(),
         [int]$MaxBytes = 2097152,
         [string]$Token

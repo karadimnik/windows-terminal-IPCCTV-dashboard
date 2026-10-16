@@ -806,8 +806,16 @@ function Invoke-CamCheckUiLeak {
     param($Run)
 
     if (-not (Test-Path -LiteralPath (Join-Path -Path $repo -ChildPath 'camera_creds.xml'))) {
+        # The real-system scan has no needle without the credential, but the live-view part runs in its own sandbox with fake ones.
+        $livePart = Invoke-CamUiLeakLivePart
+        if ($livePart.Ran) {
+            Add-CamTestResult -Run $Run -Check 'uileak' -Status $(if ($livePart.Ok) { 'PASS' } else { 'FAIL' }) `
+                -Message 'live-view part only (no camera_creds.xml for the real-system part): no live secret, address, path name or scheme:// in any live response' `
+                -Evidence $livePart.Evidence
+            return
+        }
         Add-CamTestResult -Run $Run -Check 'uileak' -Status 'SKIP' `
-            -Message 'no camera_creds.xml, so there is no needle to scan for'
+            -Message 'no camera_creds.xml, so there is no needle to scan for' -Evidence $livePart.Evidence
         return
     }
 
@@ -960,9 +968,137 @@ function Invoke-CamCheckUiLeak {
     }
     $evidence += @($logLines | Where-Object { $_ -match 'msg="camui listening"' } | ForEach-Object { '  ' + $_ })
 
+    # [Stage 1B] The live-view half: GET /api/live, /api/status with a Live section, the WHEP answer and its refusals.
+    $livePart = Invoke-CamUiLeakLivePart
+    $evidence += '-- live-view part --'
+    $evidence += $livePart.Evidence
+    if ($livePart.Ran -and -not $livePart.Ok) { $ok = $false }
+
     Add-CamTestResult -Run $Run -Check 'uileak' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
-        -Message 'no camera password, no credential in URL userinfo shape and no URL of any scheme in any camui response, including the settings endpoints, all three shapes of the footage index and a real clip' `
+        -Message 'no camera password, no credential in URL userinfo shape and no URL of any scheme in any camui response, including the settings endpoints, all three shapes of the footage index and a real clip; and no live secret, address, path name or scheme:// in any live-view response' `
         -Evidence $evidence
+}
+
+
+function Invoke-CamUiLeakLivePart {
+    <#
+        [Stage 1B] The live-view half of uileak: nothing that identifies the
+        live instance or its login may reach the browser. The real supervisor
+        runs a live instance against a synthetic camera (fake credentials), a
+        camui built from this tree serves the sandbox, and every live response
+        - GET /api/live, GET /api/status, the WHEP answer for sub and main with
+        its headers, the refusals (unknown camera, bad stream, wrong type, too
+        large, rebinding Host, unknown session) and the DELETE - plus the two
+        static assets, is scanned for:
+          the live secret (raw, and as the Basic login), the user name, the
+          live instance's address and port, every live path name, the fake
+          camera password, the camera's and the relay's addresses, and a
+          scheme:// of ANY kind.
+        The SDP answer legitimately carries the media candidate (the loopback
+        UDP port the browser sends media to); that port is reported, not
+        scanned for. A synthetic body carrying every needle is run through the
+        same scanner first: if it does not light up, the result is inconclusive.
+        Returns Ran, Ok and Evidence; Ran is false (with the reason) when the
+        prerequisites (a camui.exe, MediaMTX, ffmpeg) are missing.
+    #>
+    $result = [pscustomobject]@{ Ran = $false; Ok = $true; Evidence = @() }
+    $exe = $(if ($env:CAMUI_TEST_EXE) { $env:CAMUI_TEST_EXE } else { Join-Path -Path (Get-CamTestRepo) -ChildPath 'camui.exe' })
+    if (-not (Test-Path -LiteralPath $exe)) { $result.Evidence += 'live part not run: no camui.exe (set CAMUI_TEST_EXE to one built from this tree)'; return $result }
+    if (-not (Test-Path -LiteralPath 'C:\mediamtx\mediamtx.exe')) { $result.Evidence += 'live part not run: no MediaMTX at C:\mediamtx\mediamtx.exe'; return $result }
+    foreach ($p in @(18791)) { if (-not (Test-CamTestPortFree -Port $p)) { $result.Evidence += "live part not run: TCP port $p is in use"; return $result } }
+
+    $result.Ran = $true
+    $rig = $null; $ui = $null
+    $fail = { param([string]$Text) $result.Ok = $false; $result.Evidence += ('HIT ' + $Text) }
+    try {
+        $cameras = 1..3 | ForEach-Object { [pscustomobject]@{ Name = "Cam $_"; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 1) } }
+        $rig = Start-CamTestLiveRig -Name 'uileaklive' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 4
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18791 -Name 'camui-uileak-live'
+        if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
+        $port = 18791
+        $secret = ([System.IO.File]::ReadAllText([string]$rig.Sandbox.Config.LiveSecretPath)).Trim()
+        $login = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes('camlive:' + $secret))
+        $needles = [ordered]@{
+            'live secret'            = $secret
+            'live login (Basic)'     = $login
+            'live user name'         = 'camlive'
+            'live instance port'     = '18889'
+            'live path name'         = 'cam1sub|cam1main|cam2sub|cam2main|cam3sub|cam3main'
+            'camera password'        = 'FakePassword-DoNotUse-9c41'
+            'camera user (userinfo)' = 'fakeuser:'
+            'camera address'         = '18554'
+            'relay address'          = '18564|18567'
+        }
+        $scan = {
+            param([string]$Label, [string]$Text)
+            $found = @()
+            foreach ($key in $needles.Keys) {
+                foreach ($needle in ($needles[$key] -split '\|')) {
+                    if ($Text.IndexOf($needle, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $found += ("{0} ({1}) in {2}" -f $key, $(if ($key -in 'live secret', 'live login (Basic)', 'camera password') { 'value' } else { $needle }), $Label) }
+                }
+            }
+            foreach ($m in [regex]::Matches($Text, '(?i)[a-z][a-z0-9+.\-]*://[^\s"'',)]*')) { $found += ('URL scheme in {0} :: {1}' -f $Label, $m.Value) }
+            return @($found)
+        }
+        # The scanner must see every class of needle in a body that really leaks.
+        $control = ($needles.Values | ForEach-Object { ($_ -split '\|')[0] }) -join ' ; '
+        $control += ' ; rtsp://x'
+        $controlHits = @(& $scan 'positive-control' $control)
+        $classes = @($needles.Keys | Where-Object { $k = $_; @($controlHits | Where-Object { $_ -like "$k*" }).Count -ge 1 }).Count
+        $controlOk = ($classes -eq $needles.Count -and @($controlHits | Where-Object { $_ -like 'URL scheme*' }).Count -ge 1)
+        $result.Evidence += ("positive control: {0} of {1} needle classes and the scheme rule lit up in a synthetic leaking body: {2}" -f $classes, $needles.Count, $(if ($controlOk) { 'ok' } else { 'DID NOT LIGHT UP' }))
+        if (-not $controlOk) { & $fail 'the scanner did not light up on the positive control, so a clean scan would prove nothing' }
+
+        $offer = Get-CamTestWhepOffer
+        $json = @{ 'Content-Type' = 'application/sdp' }
+        $requests = @(
+            @{ L = 'GET /api/live'; M = 'GET'; P = '/api/live' },
+            @{ L = 'GET /api/status'; M = 'GET'; P = '/api/status' },
+            @{ L = 'GET /live.js'; M = 'GET'; P = '/live.js' },
+            @{ L = 'GET /index.html'; M = 'GET'; P = '/index.html' },
+            @{ L = 'WHEP sub'; M = 'POST'; P = '/api/live/Cam%201/whep?stream=sub'; H = $json; B = $offer; Keep = 'sub' },
+            @{ L = 'WHEP main'; M = 'POST'; P = '/api/live/Cam%201/whep?stream=main'; H = $json; B = $offer; Keep = 'main' },
+            @{ L = 'WHEP unknown camera'; M = 'POST'; P = '/api/live/Nobody/whep?stream=sub'; H = $json; B = $offer },
+            @{ L = 'WHEP bad stream'; M = 'POST'; P = '/api/live/Cam%201/whep?stream=cam1sub'; H = $json; B = $offer },
+            @{ L = 'WHEP wrong type'; M = 'POST'; P = '/api/live/Cam%201/whep?stream=sub'; H = @{ 'Content-Type' = 'text/plain' }; B = $offer },
+            @{ L = 'WHEP too large'; M = 'POST'; P = '/api/live/Cam%201/whep?stream=sub'; H = $json; B = ('a' * 70000) },
+            @{ L = 'WHEP rebinding Host'; M = 'POST'; P = '/api/live/Cam%201/whep?stream=sub'; H = @{ 'Content-Type' = 'application/sdp'; Host = 'attacker-rebind.example' }; B = $offer },
+            @{ L = 'DELETE unknown session'; M = 'DELETE'; P = '/api/live/session/00000000000000000000000000000000' })
+        $kept = @()
+        foreach ($request in $requests) {
+            $args = @{ Port = $port; Method = $request.M; Path = $request.P }
+            if ($request.H) { $args.Headers = $request.H }
+            if ($request.B) { $args.Body = $request.B }
+            $r = Invoke-CamRawHttp @args
+            $headerText = (@($r.Headers.GetEnumerator() | ForEach-Object { '{0}: {1}' -f $_.Key, $_.Value }) -join "`n")
+            $found = @(& $scan $request.L ($headerText + "`n" + $r.Body))
+            $result.Evidence += ("  {0,-26} HTTP {1}, {2} body byte(s), headers [{3}], hits {4}" -f $request.L, $r.Status, $r.Body.Length, ((@($r.Headers.Keys) | Sort-Object) -join ','), $found.Count)
+            foreach ($f in $found) { & $fail $f }
+            if ($request.Keep) { $kept += [pscustomobject]@{ Label = $request.L; Result = $r } }
+        }
+        foreach ($k in $kept) {
+            $answer = $k.Result
+            $candidates = @(([regex]::Matches($answer.Body, '(?m)^a=candidate:[^\r\n]*')) | ForEach-Object { $_.Value })
+            $result.Evidence += ("  {0}: HTTP {1}, Content-Type [{2}], Location [{3}], answer {4} byte(s) starting '{5}', media candidate(s): {6}" -f $k.Label, $answer.Status, $answer.Headers['content-type'], $answer.Headers['location'], $answer.Body.Length, $answer.Body.Substring(0, [Math]::Min(3, $answer.Body.Length)), ($candidates -join ' | '))
+            if ($answer.Status -ne 201 -or $answer.Headers['content-type'] -ne 'application/sdp' -or $answer.Headers['location'] -notmatch '^/api/live/session/[0-9a-f]{32}$') { & $fail ($k.Label + ': not a 201 application/sdp answer with a minted Location') }
+            else { $del = Invoke-CamRawHttp -Port $port -Method 'DELETE' -Path $answer.Headers['location']; $found = @(& $scan 'DELETE' ((@($del.Headers.GetEnumerator() | ForEach-Object { '{0}: {1}' -f $_.Key, $_.Value }) -join "`n") + $del.Body)); foreach ($f in $found) { & $fail $f }; $result.Evidence += ("  DELETE of that session: HTTP {0}, hits {1}" -f $del.Status, $found.Count); if ($del.Status -ne 204) { & $fail 'DELETE of a minted session was not 204' } }
+        }
+        # The scanner looks at what camui sends, not at a document that never held the names: the supervisor's own file does.
+        $raw = Get-CamFileText -Path (Get-CamStatusFilePath -Config $rig.Sandbox.Config)
+        $rawHits = @(& $scan 'status.json (the file, before camui)' $raw | Where-Object { $_ -like 'live path name*' })
+        $result.Evidence += ("  status.json on disk names the live paths ({0} path-name hit(s)); /api/status above carried none" -f $rawHits.Count)
+        if ($rawHits.Count -lt 1) { & $fail 'status.json holds no live path name, so the absence in /api/status proves nothing' }
+    }
+    catch { & $fail ('live part aborted: ' + $_.Exception.Message) }
+    finally {
+        if ($ui) { [void](Stop-CamTestUi -Ui $ui) }
+        $notes = @()
+        if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
+        $result.Evidence += $notes
+        if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
+        if ($rig) { try { Remove-CamTestTree -Path $rig.Dir } catch { $result.Evidence += 'cleanup failed' } }
+    }
+    return $result
 }
 
 
