@@ -299,6 +299,44 @@ the product's control-API login does not govern it. That is acceptable on loopba
    response or SDP contains a camera URL or credential; `Authorization` never reaches the browser; the wrong-ufrag probe
    yields no media.
 
+## Cross-cutting: no stray processes (Operator's rule, 2026-10-16) - TASKS, NOT BUILT
+
+**The rule.** Nothing may run that should not be running, and the Operator must be told when something does. This
+section is the task list only; nothing here is implemented. It was raised after leftovers were found in the session
+(stuck agent shells, a test browser left up, a `camui` that outlived its window) and the Operator asked how he would
+know if three recorders ran, or if live-view tabs left things behind.
+
+**What exists today (verified in the code, 2026-10-16).**
+- One supervisor per archive: a check of the status file's heartbeat and recorded pid, refused at start
+  (`cam.recorder.ps1`, "One supervisor per archive"). It is check-then-act, not an OS lock, so it can race in the first
+  seconds and is blind if the status file is missing, unreadable or points at another root.
+- Kernel-enforced children: the supervisor owns a job object (`cam.supervisor.<hash>`) that holds MediaMTX, the live
+  instance and every ffmpeg; the NVR warden owns `cam.nvr`. Killing the supervisor kills them.
+- `cam.ps1 -Status` lists the process roles and flags orphaned dashboard panes and mpv; `-Stop` reaps orphans.
+- The live-view control API is OFF on purpose: MediaMTX permissions are per action, not per endpoint, and the `api`
+  action would also expose the path configuration (the relay-API leak of item [89]).
+
+**What does not exist.** No continuous comparison of the running processes with what should be running; no alert; nothing
+on the health strip; no detection of a duplicate ffmpeg for one camera, an extra MediaMTX or `camui`; no count of live
+view sessions or their ages. Today he finds out only by running `-Status` and reading the table.
+
+**Decisions.** Alert first; never kill by process name alone (the Operator may run other `ffmpeg` or `mediamtx`
+processes); no stress tests (feasibility scenarios, one clean run each, each detector with a negative control that can
+fail). The Operator declined a change to his shell aliases (`cp`, `rm`, `mv` are interactive there): agents keep using
+the explicit force forms.
+
+| Task | What | Acceptance |
+|---|---|---|
+| **S1 Hard single-instance lock** | A named OS mutex `Global\IPCCTV.supervisor.<hash of RootPath>` held for the supervisor's life, plus an exclusive lock file in `_state`; an abandoned mutex (previous owner died) is taken, not refused; the heartbeat check stays as the second signal. | Two starts at once: exactly one runs. Kill the supervisor hard, the next start succeeds. Delete or corrupt `status.json`: a second start is still refused. Refusal message names the owner pid. |
+| **S2 Continuous census** | The expected set as data: 1 NVR host, 1 warden, 1 supervisor, 1 relay MediaMTX, 1 live MediaMTX when enabled, exactly one ffmpeg per recording camera (matched by its relay path in the command line), at most one `camui`. Identity by pid plus start time and job membership. A violation (extra, duplicate, missing, not in our job) must persist for 2 cycles. Output: `Census` in `status.json`, a `-Status` section, a chip on the health strip, a new alert id (next free after 130) on the event log and toast. | Scenarios, each with a negative control: duplicate supervisor start, a second ffmpeg for one camera, an extra MediaMTX, an extra `camui`, an ffmpeg orphaned by a hard supervisor kill (the job must already have removed it: the census confirms zero), a missing camera child. Normal start, stop and restart raise nothing. |
+| **S3 Reap policy** | `cam.ps1 -Clean -WhatIf` lists provable orphans only: parent gone, not in our job, image path equal to the configured executable, command line naming our relay or live path. Reaping needs an explicit setting (default off) or an explicit `-Clean`. | A look-alike process of the Operator's (same image name, different command line) is never listed. |
+| **S4 Live-session hygiene** | `camui` keeps a ledger of the sessions it minted with their ages (exposed in `/api/live` as counts and oldest age, no ids); a session older than a limit raises a flag. An independent OS check: with an empty ledger for 60 s, the live MediaMTX must hold no connection to a camera's RTSP port. Optional `LiveIdleMinutes` (default 0 = off) closes a forgotten foreground tab's streams. | Open and close tabs in Chrome and Edge, kill a browser, close the tab mid-connect: the ledger and the OS check return to zero within the measured bounds (about 5 s on tab close, 42 s on a hard kill) and no flag is raised; a deliberately leaked session raises one. |
+| **S5 Leak assertion for tests and agents** | `Assert-CamNoStrays` in the harness: snapshot before and after each check, by marker and by image path, and fail on anything extra; sandbox rigs run inside a job object so they die with the test; a final sweep at the end of a `-Checks` run. The commission template asks every agent to list processes before and after and report the diff. | A check that leaves a process behind fails, a clean check passes, and the sweep removes only marked rig processes. |
+| **S6 Carry into the Go supervisor (Stage 5)** | S1 to S3 are the specification of the portable supervisor's lock, process group or job, and census, on Windows and Linux. | Re-expressed as Go tests, green on both. |
+
+**Open question.** S1 to S3 would also protect the original PowerShell system that runs from `master`. The portable plan
+may never reach `master`, so a backport is a separate commission on `master`, with the Operator's approval.
+
 ## Order and what each stage depends on
 
 Stage 0 -> Stage 1 -> (Stage 1b any time) -> Stage 2 -> Stage 4 -> Stage 5, with Stage 3 only after Stage 2 has
