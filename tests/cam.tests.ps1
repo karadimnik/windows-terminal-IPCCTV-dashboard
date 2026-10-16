@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'livegone')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -7590,6 +7590,214 @@ function Invoke-CamCheckLivePage {
 }
 
 
+function Invoke-CamCheckLiveGone {
+    <#
+        [Stage 1B, opt-in: opens browser windows] Everything a viewer opened is
+        gone when the viewer is. The Operator's condition: "any related stream,
+        thread, process, whatever is terminated once the browser tab is closed;
+        nothing may run in the background that should not".
+
+        Real supervisor, synthetic camera, six tiles playing, then for Chrome
+        and Edge, each time in a fresh browser:
+          1 tab close    DevTools Page.close (the browser is not killed): did the
+                         DELETE arrive, and how long until the camera's stream2
+                         sessions and the live instance's WebRTC sessions are 0
+          2 hard kill    taskkill /T /F on the browser's own pid, so no pagehide
+                         and no DELETE can run: the ICE timeout path
+          3 camui killed the proxy dies while the tiles play: do sessions
+                         persist, does the page keep playing, and after the tab
+                         is closed do they reach 0 anyway
+        Each is a time series (seconds since the event) of: camera stream2
+        sessions, live-instance WebRTC sessions (its control API, switched on in the SANDBOX copy of the generated config only), mediamtx and ffmpeg
+        processes of the rig that were not there before it (by pid), browser
+        processes carrying the profile marker. A final idle snapshot follows,
+        including whether the live instance itself stays up with no viewer.
+        Needs CAMUI_TEST_EXE.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $fail = { param([string]$Text) $script:CamGoneOk = $false; $script:CamGoneEvidence += ('FAIL ' + $Text) }
+    $note = { param([string]$Text) $script:CamGoneEvidence += $Text }
+    $script:CamGoneOk = $true
+    $script:CamGoneEvidence = @()
+    $script:CamGoneBrowsers = @()
+    $script:CamGoneSeconds = 0
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $rig = $null; $ui = $null
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livegone'
+    $base = 'http://127.0.0.1:18789'
+    $browserOf = { param($b) @(Get-CamTestBrowserPids -Started $b | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }) }
+    $cdp = $null
+
+    try {
+        if (-not $env:CAMUI_TEST_EXE -or -not (Test-Path -LiteralPath $env:CAMUI_TEST_EXE)) { throw 'CAMUI_TEST_EXE must name a camui.exe built from this tree.' }
+        foreach ($p in @(18789, 18300, 18892)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
+        $baseline = @(Get-CimInstance Win32_Process -Filter "Name = 'mediamtx.exe' or Name = 'ffmpeg.exe'" | ForEach-Object { [int]$_.ProcessId })
+        $cameras = 1..6 | ForEach-Object { [pscustomobject]@{ Name = "Cam $_"; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 1) } }
+        $rig = Start-CamTestLiveRig -Name 'livegone' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 4 -LiveApiPort 18892
+        $dir = $rig.Dir
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livegone'
+        if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
+        $liveLog = Join-Path -Path $rig.Sandbox.Root -ChildPath '_logs\liveview.log'
+        $rigProcs = { @(Get-CimInstance Win32_Process -Filter "Name = 'mediamtx.exe' or Name = 'ffmpeg.exe'" | Where-Object { $baseline -notcontains [int]$_.ProcessId } | ForEach-Object { [int]$_.ProcessId } | Sort-Object) }
+        $idleProcs = & $rigProcs
+        $livePid = [int](Get-CamTestStatusJson -Sandbox $rig.Sandbox).Snapshot.Live.Pid
+        & $note ("rig processes (mediamtx and ffmpeg not there before the rig): {0} pid(s) {1}; the live instance is pid {2}; camui pid {3}; no process of the Operator's own was counted ({4} existed before)" -f $idleProcs.Count, ($idleProcs -join ','), $livePid, $ui.Process.Id, $baseline.Count)
+
+        $stats = { try { Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.__liveStats ? window.__liveStats() : null' -Await } catch { $null } }
+        $playing = { param($s) $s -and $s.shown -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -ge 6 }
+        $camuiDeletes = { @(Get-Content -LiteralPath $ui.StdOut -ErrorAction SilentlyContinue | Where-Object { $_ -match 'method=DELETE path=/api/live/session/' }) }
+
+        # A browser with six playing tiles: returns what it started and its DevTools connection.
+        $launch = {
+            param([string]$Browser)
+            $started = Start-CamTestBrowser -Browser $Browser -BaseDir $dir -Url 'about:blank' -DebugPort 18300 -WindowSize '1280,900'
+            $script:CamGoneBrowsers += $started
+            $cdp = Connect-CamTestCdp -Port 18300
+            [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.enable')
+            [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Emulation.setDeviceMetricsOverride' -Params @{ width = 1280; height = 800; deviceScaleFactor = 1; mobile = $false })
+            [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = "$base/#live" })
+            $end = [DateTime]::UtcNow.AddSeconds(45); $s = $null
+            while ([DateTime]::UtcNow -lt $end) { $s = & $stats; if (& $playing $s) { break }; Start-Sleep -Milliseconds 500 }
+            if (-not (& $playing $s)) { throw "${Browser}: six tiles did not reach playing" }
+            return @{ Started = $started; Cdp = $cdp }
+        }
+
+        # Samples until everything is 0 (twice in a row) or the cap, from the moment the event ran. Returns the rows.
+        $observe = {
+            param([string]$Label, $Started, [scriptblock]$Event, [int]$Cap, [switch]$Page)
+            $before = [pscustomobject]@{ S2 = (Get-CamTestPathReaders -ApiPort $rig.CamApi -Path 'stream2').Count; Live = (Get-CamTestLiveSessions -Rig $rig).Count }
+            $deletesBefore = @(& $camuiDeletes).Count
+            $clock = [System.Diagnostics.Stopwatch]::StartNew()
+            & $Event
+            $rows = New-Object System.Collections.ArrayList
+            $zero = 0
+            while ($clock.Elapsed.TotalSeconds -lt $Cap) {
+                $row = [pscustomobject]@{
+                    T = [Math]::Round($clock.Elapsed.TotalSeconds, 1)
+                    S2 = (Get-CamTestPathReaders -ApiPort $rig.CamApi -Path 'stream2').Count
+                    Live = (Get-CamTestLiveSessions -Rig $rig).Count
+                    Procs = @(& $rigProcs).Count
+                    Browser = @(& $browserOf $Started).Count
+                    Page = ''
+                }
+                if ($Page) {
+                    $s = & $stats
+                    $row.Page = $(if ($s) { 'open {0}, frames {1}, {2}' -f @(@($s.tiles) | Where-Object { $_.open }).Count, (@($s.tiles) | ForEach-Object { if ($_.v) { $_.v.framesDecoded } else { 0 } } | Measure-Object -Sum).Sum, ((@($s.tiles) | ForEach-Object { $_.state } | Select-Object -Unique) -join '/') } else { 'page gone' })
+                }
+                [void]$rows.Add($row)
+                if ($row.S2 -eq 0 -and $row.Live -eq 0) { $zero++ } else { $zero = 0 }
+                if ($zero -ge 2 -and ($Page -or $row.Browser -eq 0 -or $Label -like '*hard*' -or $Label -like '*close*')) { break }
+                Start-Sleep -Milliseconds 700
+            }
+            $firstZero = { param($prop) $r = @($rows | Where-Object { $_.$prop -eq 0 })[0]; if ($r) { $r.T } else { $null } }
+            $res = [pscustomobject]@{ Rows = @($rows); Before = $before; S2Zero = (& $firstZero 'S2'); LiveZero = (& $firstZero 'Live'); BrowserZero = (& $firstZero 'Browser')
+                Deletes = (@(& $camuiDeletes).Count - $deletesBefore) }
+            & $note ("  {0}: before the event stream2 {1}, live sessions {2}; camui DELETEs that arrived: {3}; stream2 reached 0 at +{4} s, live-instance sessions at +{5} s, browser processes at +{6} s" -f $Label, $before.S2, $before.Live, $res.Deletes, $res.S2Zero, $res.LiveZero, $res.BrowserZero)
+            & $note '    t(s)  stream2  live-sessions  rig-procs  browser-procs  page'
+            $prev = ''
+            foreach ($r in $rows) {
+                $key = '{0}|{1}|{2}|{3}' -f $r.S2, $r.Live, $r.Procs, $r.Browser
+                if ($key -ne $prev -or $r -eq $rows[-1] -or $r -eq $rows[0]) { & $note ("    {0,5}  {1,7}  {2,13}  {3,9}  {4,13}  {5}" -f $r.T, $r.S2, $r.Live, $r.Procs, $r.Browser, $r.Page) }
+                $prev = $key
+            }
+            if (@($rows | Where-Object { $_.Procs -ne $idleProcs.Count }).Count) { & $fail "$Label : the rig's mediamtx/ffmpeg process count changed (a process appeared or died)" }
+            return $res
+        }
+        $finish = {
+            param($Started)
+            Disconnect-CamTestCdp -Cdp $cdp
+            $end = Stop-CamTestBrowser -Started $Started
+            if ($end.Left.Count -or -not $end.ProfileRemoved) { & $fail "a browser left processes or a profile behind ($($end.Left.Count), profile removed $($end.ProfileRemoved))" }
+        }
+        $settle = {
+            # Idle before the next scenario so a late session cannot be blamed on it.
+            $end = [DateTime]::UtcNow.AddSeconds(90)
+            while ([DateTime]::UtcNow -lt $end) { if ((Get-CamTestPathReaders -ApiPort $rig.CamApi -Path 'stream2').Count -eq 0 -and (Get-CamTestLiveSessions -Rig $rig).Count -eq 0) { return $true }; Start-Sleep -Seconds 1 }
+            return $false
+        }
+
+        foreach ($browser in @('chrome', 'edge')) {
+            $found = Get-CamTestBrowser -Browser $browser
+            if (-not $found.Exe) { & $fail ("$browser could not be run: " + $found.Reason); continue }
+            & $note ("== $browser $($found.Version) ==")
+            $began = [DateTime]::UtcNow
+
+            # 1 normal tab close
+            $l = & $launch $browser; $started = $l.Started; $cdp = $l.Cdp
+            $r = & $observe "$browser 1 tab close (Page.close)" $started { try { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.close' -TimeoutMs 5000) } catch { } } 60
+            if ($r.S2Zero -eq $null -or $r.LiveZero -eq $null) { & $fail "$browser tab close: sessions did not reach 0 within 60 s" }
+            if ($r.Deletes -lt 1) { & $fail "${browser} tab close: no DELETE reached camui (they are best effort, but a tab close should send some)" }
+            & $finish $started
+            if (-not (& $settle)) { & $fail "${browser}: sessions did not settle to 0 after the tab close" }
+
+            # 2 hard kill of the browser's process tree
+            $l = & $launch $browser; $started = $l.Started; $cdp = $l.Cdp
+            $r = & $observe "$browser 2 hard kill (taskkill /T /F on pid $($started.Pid))" $started { & cmd.exe /c "taskkill.exe /T /F /PID $($started.Pid) >nul 2>&1" } 150
+            if ($r.S2Zero -eq $null -or $r.LiveZero -eq $null) { & $fail "$browser hard kill: sessions did not reach 0 within 150 s" }
+            elseif ($r.S2Zero -gt 35 -or $r.LiveZero -gt 35) { & $note ("  NOTE $browser hard kill took longer than 35 s: stream2 {0} s, live {1} s" -f $r.S2Zero, $r.LiveZero) }
+            if ($r.Deletes -ne 0) { & $fail "$browser hard kill: a DELETE arrived ($($r.Deletes)) although nothing could send one" }
+            & $finish $started
+            if (-not (& $settle)) { & $fail "${browser}: sessions did not settle to 0 after the hard kill" }
+
+            # 3 camui killed while the tiles play, then the tab closed
+            $l = & $launch $browser; $started = $l.Started; $cdp = $l.Cdp
+            $uiPid = $ui.Process.Id
+            $r = & $observe "$browser 3a camui killed (pid $uiPid), page left open" $started { Stop-Process -Id $uiPid -Force } 25 -Page
+            [void]$r
+            $s = & $stats
+            & $note ("  after 25 s without camui the page reports: {0}" -f $(if ($s) { 'open {0} of 6, states {1}, note [{2}]' -f @(@($s.tiles) | Where-Object { $_.open }).Count, ((@($s.tiles) | ForEach-Object { $_.state } | Select-Object -Unique) -join '/'), $s.note } else { 'nothing (page gone)' }))
+            $r = & $observe "$browser 3b then the tab closed (camui still dead)" $started { try { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.close' -TimeoutMs 5000) } catch { } } 60
+            if ($r.S2Zero -eq $null -or $r.LiveZero -eq $null) { & $fail "${browser}: sessions did not reach 0 after camui died and the tab closed" }
+            & $finish $started
+            [void](& $settle)
+            $script:CamGoneSeconds += ([DateTime]::UtcNow - $began).TotalSeconds
+            # camui back for the next browser
+            $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livegone'
+            if (-not $ui.Started) { throw ('camui did not restart: ' + $ui.Reason) }
+        }
+
+        # ---- the final idle snapshot ----
+        Start-Sleep -Seconds 3
+        $s2 = (Get-CamTestPathReaders -ApiPort $rig.CamApi -Path 'stream2').Count
+        $liveN = (Get-CamTestLiveSessions -Rig $rig).Count
+        $procs = & $rigProcs
+        $status = (Get-CamTestStatusJson -Sandbox $rig.Sandbox).Snapshot
+        $proc = Get-Process -Id $livePid -ErrorAction SilentlyContinue
+        $cpu0 = $(if ($proc) { $proc.TotalProcessorTime.TotalSeconds } else { 0 })
+        Start-Sleep -Seconds 5
+        $proc = Get-Process -Id $livePid -ErrorAction SilentlyContinue
+        $cpuPct = $(if ($proc) { [Math]::Round(($proc.TotalProcessorTime.TotalSeconds - $cpu0) / 5 * 100, 2) } else { -1 })
+        & $note ("final idle snapshot: stream2 sessions {0}; live-instance sessions {1}; rig processes {2} (idle set was {3}) same set: {4}; live instance pid {5} {6}, status Live.Alive {7}, CPU {8} % over 5 s, handles {9}, threads {10}, working set {11:n1} MB" -f `
+            $s2, $liveN, $procs.Count, $idleProcs.Count, (($procs -join ',') -eq ($idleProcs -join ',')), $livePid, $(if ($proc) { 'running' } else { 'GONE' }), $status.Live.Alive, $cpuPct, $(if ($proc) { $proc.HandleCount } else { '-' }), $(if ($proc) { $proc.Threads.Count } else { '-' }), $(if ($proc) { $proc.WorkingSet64 / 1MB } else { 0 }))
+        if ($s2 -ne 0 -or $liveN -ne 0) { & $fail 'a session survived to the idle snapshot' }
+        if (($procs -join ',') -ne ($idleProcs -join ',')) { & $fail 'the rig process set changed' }
+        if (-not $proc -or -not $status.Live.Alive) { & $fail 'the live instance did not stay up with no viewer' }
+    }
+    catch { & $fail ('check aborted: ' + $_.Exception.Message) }
+    finally {
+        Disconnect-CamTestCdp -Cdp $cdp
+        foreach ($b in @($script:CamGoneBrowsers)) { try { [void](Stop-CamTestBrowser -Started $b) } catch { } }
+        $profiles = @(Get-ChildItem -LiteralPath $dir -Directory -Filter 'prof-*' -ErrorAction SilentlyContinue)
+        if ($ui) { [void](Stop-CamTestUi -Ui $ui) }
+        $notes = @()
+        if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
+        $after = @(Get-CimInstance Win32_Process -Filter "Name = 'mediamtx.exe' or Name = 'ffmpeg.exe'" | Where-Object { $baseline -notcontains [int]$_.ProcessId } | ForEach-Object { [int]$_.ProcessId })
+        $evidence += ("throwaway browser profiles left: {0}; after the rig stopped: mediamtx/ffmpeg not in the pre-rig set: {1}; camui from this check still running: {2}; scenarios' browser windows up {3:n0} s; whole check {4:n0} s" -f $profiles.Count, $after.Count, [bool]($ui -and -not $ui.Process.HasExited), $script:CamGoneSeconds, $watch.Elapsed.TotalSeconds)
+        $evidence += $notes
+        if ($profiles.Count -or $after.Count) { & $fail 'something of the rig or a profile was left behind' }
+        if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
+        if ($script:CamGoneOk -and $rig) { try { Remove-CamTestTree -Path $rig.Dir } catch { $script:CamGoneEvidence += 'cleanup failed' } }
+        elseif ($rig) { $script:CamGoneEvidence += "left for inspection: $($rig.Dir)" }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'livegone' -Status $(if ($script:CamGoneOk) { 'PASS' } else { 'FAIL' }) `
+        -Message 'closing a tab (or killing the browser, or camui) ends every session and stream the viewer opened, and nothing of the rig is left running' `
+        -Evidence ($evidence + $script:CamGoneEvidence)
+}
+
+
 foreach ($check in $Checks) {
     if ($check -eq 'relay' -and -not $Live) {
         Add-CamTestResult -Run $run -Check 'relay' -Status 'SKIP' `
@@ -7648,6 +7856,7 @@ foreach ($check in $Checks) {
         'livewhep'  { Invoke-CamCheckLiveWhep  -Run $run }
         'liveondemand' { Invoke-CamCheckLiveOnDemand -Run $run }
         'livepage'  { Invoke-CamCheckLivePage  -Run $run }
+        'livegone'  { Invoke-CamCheckLiveGone  -Run $run }
         'soak'      { Invoke-CamCheckSoak      -Run $run -DryRun:$SoakDryRun }
     }
 }

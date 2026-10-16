@@ -2433,14 +2433,18 @@ function Start-CamTestLiveRig {
         [Parameter(Mandatory = $true)][string[]]$CameraPath,
         [hashtable]$Config = @{},
         [hashtable]$VideoSpec = @{},
-        [int]$LiveCloseAfterSeconds = 4
+        [int]$LiveCloseAfterSeconds = 4,
+        # TEST ONLY: switch the live instance's control API on at this loopback port, by patching the SANDBOX copy of
+        # cam.common.ps1 (never the product): a read-only login gains the api permission, so a check can count its
+        # WebRTC sessions (/v3/webrtcsessions/list). Nothing about sessions or timeouts changes.
+        [int]$LiveApiPort = 0
     )
 
     $rig = [pscustomobject]@{
         Name = $Name; Dir = (Join-Path -Path $env:TEMP -ChildPath "cam-tests\$Name"); CamPort = 18554; CamApi = 18557; RelayPort = 18564; RelayApi = 18567
         WhepPort = 18889; UdpPort = 18189; Sandbox = $null; Camera = $null; Supervisor = $null; DataDir = $null; Alerts = $null
     }
-    foreach ($p in @($rig.CamPort, $rig.CamApi, $rig.RelayPort, $rig.RelayApi, $rig.WhepPort)) {
+    foreach ($p in @($rig.CamPort, $rig.CamApi, $rig.RelayPort, $rig.RelayApi, $rig.WhepPort) + $(if ($LiveApiPort) { @($LiveApiPort) } else { @() })) {
         if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the live rig needs it free." }
     }
     if (-not (Test-CamTestUdpPortFree -Port $rig.UdpPort)) { throw "UDP port $($rig.UdpPort) is already in use; the live rig needs it free." }
@@ -2455,6 +2459,14 @@ function Start-CamTestLiveRig {
             LiveCloseAfterSeconds = $LiveCloseAfterSeconds }
         foreach ($key in $Config.Keys) { $settings[$key] = $Config[$key] }
         $rig.Sandbox = New-CamTestSandbox -Name $Name -Cameras $Cameras -Config $settings
+        if ($LiveApiPort) {
+            $common = Join-Path -Path $rig.Sandbox.Dir -ChildPath 'cam.common.ps1'
+            $text = [System.IO.File]::ReadAllText($common)
+            $needle = "      - action: read`n`napi: no`n"
+            if (-not $text.Contains($needle)) { throw 'the sandbox copy of cam.common.ps1 has no live api line to patch' }
+            [System.IO.File]::WriteAllText($common, $text.Replace($needle, "      - action: read`n      - action: api`n`napi: yes`napiAddress: 127.0.0.1:$LiveApiPort`n"), (New-Object System.Text.UTF8Encoding($false)))
+            Add-Member -InputObject $rig -NotePropertyName LiveApiPort -NotePropertyValue $LiveApiPort
+        }
         $rig.Alerts = Set-CamTestAlertStub -Sandbox $rig.Sandbox
         $rig.DataDir = Join-Path -Path $rig.Dir -ChildPath 'data'
         [void](New-Item -ItemType Directory -Path (Join-Path $rig.Dir 'bin'), $rig.DataDir -Force)
@@ -2768,4 +2780,21 @@ function Start-CamTestLiveCamui {
     param([Parameter(Mandatory = $true)]$Rig, [Parameter(Mandatory = $true)][int]$Port, [string]$Name = 'camui-live')
 
     return (Start-CamTestUi -Port $Port -Name $Name -StatusFile (Get-CamStatusFilePath -Config $Rig.Sandbox.Config) -ScriptDir $Rig.Sandbox.Dir)
+}
+
+
+function Get-CamTestLiveSessions {
+    <# The live instance's WebRTC sessions (count and ids) from its control API; needs a rig built with -LiveApiPort. Count -1 when it does not answer. #>
+    param([Parameter(Mandatory = $true)]$Rig)
+
+    $secret = ([System.IO.File]::ReadAllText([string]$Rig.Sandbox.Config.LiveSecretPath)).Trim()
+    $request = [System.Net.HttpWebRequest]::Create("http://127.0.0.1:$($Rig.LiveApiPort)/v3/webrtcsessions/list")
+    $request.Proxy = $null; $request.Timeout = 3000
+    $request.Headers['Authorization'] = 'Basic ' + [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes('camlive:' + $secret))
+    try {
+        $response = $request.GetResponse()
+        $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+        $json = ConvertFrom-Json -InputObject $reader.ReadToEnd(); $reader.Dispose(); $response.Dispose()
+        return [pscustomobject]@{ Count = [int]$json.itemCount; Ids = @($json.items | ForEach-Object { $_.id }) }
+    } catch { return [pscustomobject]@{ Count = -1; Ids = @() } }
 }
