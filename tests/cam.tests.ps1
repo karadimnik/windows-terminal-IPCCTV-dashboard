@@ -8205,6 +8205,8 @@ function Invoke-CamCheckLiveTls {
             foreach ($x in @($none, $wrong, $right)) {
                 $text = ($x.Headers.GetEnumerator() | ForEach-Object { '{0}: {1}' -f $_.Key, $_.Value }) -join "`n"
                 $hits = @(& $scan "$($r.M) $($r.P)" ($text + "`n" + $x.Body) ($r.P -eq '/api/tls/ca.crt'))
+                # /api/cameras is the one response that carries camera ADDRESSES by design (the Operator types them; no credential, no URL): the address needle is not a leak there.
+                if ($r.P -eq '/api/cameras') { $hits = @($hits | Where-Object { $_ -notlike 'camera/relay port*' }) }
                 $leakHits += $hits.Count
                 foreach ($h in $hits) { & $fail ('LEAK ' + $h) }
             }
