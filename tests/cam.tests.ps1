@@ -6500,7 +6500,13 @@ function Invoke-CamCheckLiveCfg {
             @{ Key = 'LiveWhepAddress'; Value = '0.0.0.0:8889' }, @{ Key = 'LiveWhepAddress'; Value = '127.0.0.1:99999' },
             @{ Key = 'LiveUdpAddress'; Value = 'localhost:8189' }, @{ Key = 'LiveWhepAddress'; Value = '127.0.0.1:9997' },
             @{ Key = 'LiveCloseAfterSeconds'; Value = 0 }, @{ Key = 'LiveCloseAfterSeconds'; Value = 'soon' }, @{ Key = 'LiveSubStream'; Value = '../x' },
-            @{ Key = 'LiveConfigPath'; Value = '\\wsl.localhost\Ubuntu-20.04\x.yml' }, @{ Key = 'LiveConfigPath'; Value = '' }, @{ Key = 'LiveSecretPath'; Value = '\\server\share\s.txt' })
+            @{ Key = 'LiveConfigPath'; Value = '\\wsl.localhost\Ubuntu-20.04\x.yml' }, @{ Key = 'LiveConfigPath'; Value = '' }, @{ Key = 'LiveSecretPath'; Value = '\\server\share\s.txt' },
+            # [Stage 2a] the LAN media address and the hosts advertised for it
+            @{ Key = 'LiveUdpAddress'; Value = '8.8.8.8:8189' }, @{ Key = 'LiveUdpAddress'; Value = '[::1]:8189' }, @{ Key = 'LiveUdpAddress'; Value = 'pc.local:8189' },
+            @{ Key = 'LiveUdpAddress'; Value = '192.168.1.50:8189' }, @{ Key = 'LiveUdpAddress'; Value = '0.0.0.0:8189' },
+            @{ Key = 'LiveAdvertiseHosts'; Value = @('192.168.1.50') }, @{ Key = 'LiveAdvertiseHosts'; Value = '192.168.1.50' },
+            @{ Key = 'LiveAdvertiseHosts'; Value = @('8.8.8.8') }, @{ Key = 'LiveAdvertiseHosts'; Value = @('pc.local') }, @{ Key = 'LiveAdvertiseHosts'; Value = @('fe80::1') },
+            @{ Key = 'LiveAdvertiseHosts'; Value = @('192.168.01.50') }, @{ Key = 'LiveAdvertiseHosts'; Value = @('172.32.0.1') }, @{ Key = 'LiveAdvertiseHosts'; Value = @('169.254.1.1') })
         $refused = 0
         foreach ($case in $rejects) {
             $path = Join-Path $masterDir 'bad.json'
@@ -6517,6 +6523,30 @@ function Invoke-CamCheckLiveCfg {
             $refused, $rejects.Count, $goodOk, ($defaults.LiveViewEnabled -eq $false))
         $evidence += ("    default keys: LiveViewEnabled={0} LiveConfigPath={1} LiveWhepAddress={2} LiveUdpAddress={3} LiveSubStream={4} LiveCloseAfterSeconds={5} LiveExePath='{6}' LiveSecretPath='{7}'" -f `
             $defaults.LiveViewEnabled, $defaults.LiveConfigPath, $defaults.LiveWhepAddress, $defaults.LiveUdpAddress, $defaults.LiveSubStream, $defaults.LiveCloseAfterSeconds, $defaults.LiveExePath, $defaults.LiveSecretPath)
+
+        # [Stage 2a] LAN settings accepted when consistent; the default live config text is byte-identical to Stage 1B's; hosts reach the config.
+        $lanGood = @(
+            @{ L = '0.0.0.0 + two private hosts'; K = @{ LiveUdpAddress = '0.0.0.0:28189'; LiveAdvertiseHosts = @('192.168.1.50', '10.0.0.7') }; Hosts = '["127.0.0.1", "192.168.1.50", "10.0.0.7"]' },
+            @{ L = 'one private address bound and advertised'; K = @{ LiveUdpAddress = '172.16.5.9:28189'; LiveAdvertiseHosts = @('172.16.5.9') }; Hosts = '["127.0.0.1", "172.16.5.9"]' })
+        foreach ($case in $lanGood) {
+            $path = Join-Path $masterDir 'lan.json'
+            [System.IO.File]::WriteAllText($path, (ConvertTo-Json -InputObject ($case.K + @{ LiveViewEnabled = $true }) -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
+            $lanText = ''; $lanErr = ''
+            try { $lanCfg = Get-CamConfig -Path $path; $lanText = Get-CamLiveConfigText -Config $lanCfg -LivePathMap $liveMap -LiveCredential $liveCred } catch { $lanErr = $_.Exception.Message }
+            $hostsLine = @($lanText -split "`r`n" | Where-Object { $_ -match '^webrtcAdditionalHosts:' })
+            $evidence += ("(d2) {0}: accepted {1}; {2}; udp {3}" -f $case.L, (-not $lanErr), ($hostsLine -join ''), (@($lanText -split "`r`n" | Where-Object { $_ -match '^webrtcLocalUDPAddress:' }) -join ''))
+            if ($lanErr -or $hostsLine.Count -ne 1 -or $hostsLine[0] -ne ('webrtcAdditionalHosts: ' + $case.Hosts)) { & $fail ("LAN settings '$($case.L)' did not produce $($case.Hosts): $lanErr $($hostsLine -join '')") }
+        }
+        $goldenPath = Join-Path $masterDir 'golden.json'
+        [System.IO.File]::WriteAllText($goldenPath, '{ "LiveViewEnabled": true, "RestreamerEnabled": true }', (New-Object System.Text.UTF8Encoding($false)))
+        $goldenCfg = Get-CamConfig -Path $goldenPath
+        $goldenCams = @([pscustomobject]@{ Name = 'Front Entrance'; IP = '127.0.0.1:1'; Quality = 'stream1' }, [pscustomobject]@{ Name = 'Rear Balcony'; IP = '127.0.0.1:1'; Quality = 'stream2' })
+        $goldenText = Get-CamLiveConfigText -Config $goldenCfg -LivePathMap (Get-CamLivePathMap -Config $goldenCfg -RelayPathMap (Get-CamRelayPathMap -Cameras $goldenCams)) `
+            -LiveCredential (New-Object System.Management.Automation.PSCredential('camlive', (ConvertTo-SecureString ('ab' * 32) -AsPlainText -Force)))
+        $goldenHash = ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($goldenText))) -replace '-', '').ToLowerInvariant()
+        $goldenWant = '2e304d8dc41ac06b7fdf47c7fd9c3a265af556f36ea1867f8b57d28d158b9c94'   # Stage 1B's text for these inputs (1400 characters), captured before Stage 2a changed anything
+        $evidence += ("(e) default live config (all Live keys at their defaults, two cameras, fixed secret): {0} characters, sha256 {1}...; Stage 1B's was 1400 characters {2}...; identical: {3}" -f $goldenText.Length, $goldenHash.Substring(0, 12), $goldenWant.Substring(0, 12), ($goldenHash -eq $goldenWant))
+        if ($goldenHash -ne $goldenWant -or $goldenText.Length -ne 1400) { & $fail 'with the defaults the generated live config is no longer byte-identical to Stage 1B''s' }
 
         # ---------------- (b) flag off: status.json, -Status and -Install -WhatIf against master
             $inst = New-CamTestInstallSandbox -Name 'livecfg-inst'
