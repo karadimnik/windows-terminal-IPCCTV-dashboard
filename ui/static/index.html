@@ -135,6 +135,19 @@
       </div>
     </div>
 
+    <!-- Shown only when this page is served by the HTTPS LAN listener (api/tls/info exists there and nowhere else). -->
+    <div class="panel hide" id="tlsPanel" style="margin-top:16px">
+      <header><h2>Connect a phone or another PC</h2></header>
+      <div class="form">
+        <p class="hint">Install this PC's own certificate authority once on each device so it trusts this address, then open the same address with the token.
+          Before you trust it, check that the device shows this fingerprint:</p>
+        <p><code id="tlsFingerprint" style="word-break:break-all"></code></p>
+        <div class="actions"><a class="btn primary" href="api/tls/ca.crt" download="ipcctv-local-ca.crt">Download the certificate</a></div>
+        <p class="hint">iPhone: open the file, install it under Settings &gt; General &gt; VPN &amp; Device Management, then turn it on under Settings &gt; General &gt; About &gt; Certificate Trust Settings.
+          Android: Settings &gt; Security &gt; Install a certificate &gt; CA certificate. Steps and removal are in docs/ui.md.</p>
+      </div>
+    </div>
+
     <footer class="note">
       Writes go through the same atomic save the CLI uses, preserving every field and the file's
       byte-order mark. A camera change is picked up by the running recorder within seconds;

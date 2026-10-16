@@ -1179,6 +1179,18 @@ el("fSegs").onclick = (event) => {
 // showTab is driven by the URL fragment, so a screen can be linked to and
 // opened directly - #foot goes straight to the footage browser. An unknown
 // fragment falls back to the first tab.
+// The "Connect a phone" panel exists only on the HTTPS LAN listener: api/tls/info is
+// answered there and is a 404 on the loopback listener, which keeps the panel hidden.
+async function loadTlsPanel() {
+  try {
+    const info = await getJSON("api/tls/info");
+    el("tlsFingerprint").textContent = info.caFingerprintSha256;
+    el("tlsPanel").classList.remove("hide");
+  } catch (err) {
+    el("tlsPanel").classList.add("hide");
+  }
+}
+
 function showTab(fragment) {
   // "live/<camera>" is the Live screen focused on one camera.
   const slash = fragment.indexOf("/");
@@ -1196,6 +1208,7 @@ function showTab(fragment) {
     loadCameras();
     loadConfig();
   }
+  if (button.dataset.t === "set") loadTlsPanel();
   // Re-read on every visit: a recording camera has new segments by now, and
   // the pruner may have taken the oldest away.
   if (button.dataset.t === "foot") loadFootage();
