@@ -17,6 +17,11 @@
 
 const POLL_MS = 5000;
 
+// True when this page is served by the HTTPS LAN listener in its default view-only
+// mode: api/tls/info (a 404 on the loopback listener) says readOnly. Everything that
+// changes state is hidden or inert then, and the server refuses it anyway.
+let viewOnly = false;
+
 const el = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const num = (value, places = 1) => (typeof value === "number" && isFinite(value) ? value.toFixed(places) : "-");
@@ -421,6 +426,7 @@ function noticeHTML(notice, record, current) {
 // timestamp. Rendered from the response rather than from the next poll, which
 // is up to five seconds away.
 async function acknowledgeNotice(button) {
+  if (viewOnly) return;
   button.disabled = true;
   try {
     const { ok, payload } = await sendJSON("POST", "api/acknowledge",
@@ -487,6 +493,7 @@ async function sendJSON(method, path, body) {
 }
 
 async function runControl(scope, action) {
+  if (viewOnly) return;
   if (anyBusy()) return;
 
   // Stopping the recorder, or everything, stops footage being written.
@@ -551,6 +558,7 @@ async function runControl(scope, action) {
 }
 
 async function toggleRecord(name, enable) {
+  if (viewOnly) return;
   if (anyBusy()) return;
 
   if (!enable) {
@@ -642,6 +650,7 @@ function renderCameraRows() {
 }
 
 async function saveCameras() {
+  if (viewOnly) return;
   if (!rows) return;
 
   // Confirmed here rather than per keystroke: this is the moment the change
@@ -749,6 +758,7 @@ function configChanged() {
 }
 
 async function saveConfig() {
+  if (viewOnly) return;
   el("saveConfig").disabled = true;
   el("saveConfig").setAttribute("aria-busy", "true");
   note("configNote", "", "Saving…");
@@ -1179,6 +1189,18 @@ el("fSegs").onclick = (event) => {
 // showTab is driven by the URL fragment, so a screen can be linked to and
 // opened directly - #foot goes straight to the footage browser. An unknown
 // fragment falls back to the first tab.
+async function detectViewOnly() {
+  try {
+    viewOnly = (await getJSON("api/tls/info")).readOnly === true;
+  } catch (err) {
+    viewOnly = false;
+  }
+  document.body.classList.toggle("viewonly", viewOnly);
+  el("viewOnly").classList.toggle("hide", !viewOnly);
+  // inert: not focusable, not clickable, hidden from assistive technology as editable.
+  for (const panel of document.querySelectorAll('section[data-tab="set"] > .panel:not(#tlsPanel)')) panel.inert = viewOnly;
+}
+
 // The "Connect a phone" panel exists only on the HTTPS LAN listener: api/tls/info is
 // answered there and is a 404 on the loopback listener, which keeps the panel hidden.
 async function loadTlsPanel() {
@@ -1242,6 +1264,7 @@ async function poll() {
   }
 }
 
+detectViewOnly();
 poll();
 setInterval(poll, POLL_MS);
 document.addEventListener("visibilitychange", () => {

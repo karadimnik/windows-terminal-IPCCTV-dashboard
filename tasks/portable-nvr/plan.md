@@ -147,6 +147,11 @@ Commissioned on master of the original repository, ahead of this project, as the
   created), play the tiles over HTTPS; without the flag they show the certificate warning. NOT done (2c): a real phone and a second
   PC (the Operator's steps are in docs/ui.md), a physical NIC, the firewall rules (documented, never applied), HSTS/CSP hardening,
   and the Operator's decision whether a LAN device may see camera addresses through /api/cameras.
+- **Status (2026-10-16), step 2b.1 on branch `portable-nvr-2b1` (not merged): the HTTPS listener is VIEW-ONLY by default** (`tlsReadOnly`,
+  default true). After the token check (401 beats 403) a deny-by-default allow-list gate lets through only the page, the read-only
+  API and the Live screen's own WHEP/session calls; start/stop, settings, camera edits, record toggles and acknowledgements get 403
+  before any handler. A test fails when a new route is not classified. The front end hides the controls and says so. `false` makes
+  the token full control (documented). The loopback listener is unchanged.
 
 ### Stage 3 - the internet
 

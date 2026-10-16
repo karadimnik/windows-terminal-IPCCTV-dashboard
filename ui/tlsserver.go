@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -67,9 +69,14 @@ func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNam
 			"caSubject":           info.Subject,
 			"caNotAfter":          info.NotAfter.Format("2006-01-02"),
 			"download":            "api/tls/ca.crt",
+			"readOnly":            cfg.TLSReadOnlyEffective(),
 		})
 	})
 	guarded := logRequests(log, newGuardScheme(tlsGuardConfig(cfg, names), log, "https")(mux))
+	if cfg.TLSReadOnlyEffective() {
+		// After the token (401 beats 403) and before the guard and any handler.
+		guarded = readOnlyGate(log, guarded)
+	}
 	policy := tokenPolicy{Token: cfg.EffectiveTLSToken(), Strict: true, Limiter: limiter, Log: log}
 	protected := requireTokenPolicy(policy, guarded)
 	// Outermost, so the redirect after ?token= and every refusal carry it too.
@@ -136,4 +143,52 @@ func runPrintCA(cfg Config, out, errOut io.Writer) int {
 	fmt.Fprintln(out, "     Android: Settings > Security > Install a certificate > CA certificate. Windows: double-click > Install > Local Machine/Current User > Trusted Root Certification Authorities.")
 	fmt.Fprintln(out, "  Details and removal: docs/ui.md.")
 	return 0
+}
+
+// ---------------------------------------------------------------------------
+// View-only mode for the HTTPS listener. A lost or leaked LAN token must be able
+// to WATCH but not to stop recording or reconfigure anything, so the gate is an
+// allow-list: a route that is not named here is refused, including one added
+// later until someone deliberately allows it.
+// ---------------------------------------------------------------------------
+
+const readOnlyMessage = "read-only: this address can only watch"
+
+var (
+	readOnlyGETPaths = map[string]bool{
+		"/api/status": true, "/api/live": true, "/api/cameras": true, "/api/config": true,
+		"/api/footage": true, "/api/clip": true, "/api/tls/ca.crt": true, "/api/tls/info": true,
+	}
+	readOnlyWhep    = regexp.MustCompile(`^/api/live/[^/]+/whep$`)
+	readOnlySession = regexp.MustCompile(`^/api/live/session/[^/]+$`)
+)
+
+// readOnlyAllowed reports whether a request may pass in view-only mode.
+// POST /api/acknowledge is refused on purpose: it is harmless but it changes
+// state, and the rule is "nothing that changes state except what the Live
+// screen needs" (opening and closing its own viewing sessions).
+func readOnlyAllowed(method, path string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead:
+		if strings.HasPrefix(path, "/api/") {
+			return readOnlyGETPaths[path]
+		}
+		return true // the embedded page and its assets
+	case http.MethodPost:
+		return readOnlyWhep.MatchString(path)
+	case http.MethodDelete:
+		return readOnlySession.MatchString(path)
+	}
+	return false
+}
+
+func readOnlyGate(log *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !readOnlyAllowed(r.Method, r.URL.Path) {
+			log.Warn("request refused", "method", r.Method, "path", r.URL.Path, "reason", "read-only listener")
+			writeAPIError(w, http.StatusForbidden, readOnlyMessage)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
