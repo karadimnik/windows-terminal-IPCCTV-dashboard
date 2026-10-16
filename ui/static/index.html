@@ -196,16 +196,15 @@
 
   <!-- ============== LIVE ============== -->
   <section data-tab="live" class="hide">
-    <div class="panel lpanel">
-      <header><h2>Live</h2><span class="muted" id="lcount"></span></header>
+    <div class="lwrap" id="lwrap">
+      <div class="ltools">
+        <span class="muted" id="lcount"></span>
+        <span class="muted lhint">Click a camera to enlarge it. Sound is off until you unmute. Pictures stop while this tab is hidden.</span>
+        <button type="button" class="btn small" id="lfs" aria-pressed="false">Fullscreen</button>
+      </div>
       <div id="lnote" class="lnote hide"></div>
       <div class="lgrid" id="lgrid"></div>
     </div>
-    <footer class="note">
-      Tiles show each camera's second stream. Click a tile to watch it on the main stream, and click it or
-      press Esc to go back. Sound is off until you unmute a tile. Pictures stop while this tab is hidden
-      or another tab is open, so a hidden page costs the camera and this PC nothing.
-    </footer>
   </section>
 </div>
 

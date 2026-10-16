@@ -23,12 +23,31 @@
 //
 // getJSON, el and esc are app.js's; they are looked up when called.
 
+// <bestGrid
+// The column count that gives the biggest 16:9 tiles for n tiles in width x height (CSS px, `gap` between tiles).
+// Tile width per column count c is min(W/c, H/rows*16/9); ties go to fewer columns. When even the best is narrower than
+// minTileWidth the answer is one column (the page scrolls), as wide as the screen but no taller than it.
+function bestGrid(width, height, n, minTileWidth = 300, gap = 0) {
+  if (!(n > 0) || !(width > 0) || !(height > 0)) return { cols: 1, rows: Math.max(n, 0), tile: Math.max(Math.floor(width) || 0, 0), scroll: false };
+  let best = null;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const tile = Math.min((width - gap * (cols - 1)) / cols, ((height - gap * (rows - 1)) / rows) * 16 / 9);
+    if (!best || tile > best.tile + 1e-6) best = { cols, rows, tile };
+  }
+  if (best.tile < minTileWidth) return { cols: 1, rows: n, tile: Math.floor(Math.min(width, height * 16 / 9)), scroll: true };
+  return { cols: best.cols, rows: best.rows, tile: Math.floor(best.tile), scroll: false };
+}
+// bestGrid>
+
 const Live = (() => {
   const GATHER_MS = 2000;                        // non-trickle: wait this long for candidates, at most
   const CONNECT_MS = 15000;                      // an answer that never turns into media is a failure
   const DISCONNECT_MS = 4000;                    // a transient 'disconnected' may heal on its own
   const BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
   const REFRESH_MS = 10000;
+  const GRID_GAP = 4;                            // px between tiles
+  const MIN_TILE = 300;                          // narrower than this: one column and the page scrolls
   const STAGGER_MS = 150;                        // between tiles opening, so six sources do not start in one burst
 
   const view = {
@@ -40,6 +59,8 @@ const Live = (() => {
     shown: false,        // the Live tab is the one on screen
     hidden: document.hidden,
     timer: null,
+    fit: null,           // the last bestGrid answer applied to the grid
+    fitTimer: null,
   };
 
   const CHIP = {
@@ -243,6 +264,7 @@ const Live = (() => {
       paint(tile);
     }
     applyFocusClass();
+    fit();
   }
 
   function updateTile(tile, cam) {
@@ -464,16 +486,63 @@ const Live = (() => {
     if (focused) focused.root.scrollIntoView({ block: "nearest" });
   }
 
+  // ---- the grid fills the screen -------------------------------------------
+
+  function fit() {
+    const g = grid();
+    if (!g || !view.shown || !view.tiles.size) return;
+    const full = !!document.fullscreenElement;
+    const box = g.getBoundingClientRect();
+    const top = full ? box.top : box.top + window.scrollY;
+    const height = window.innerHeight - top - GRID_GAP - 2;
+    view.fit = bestGrid(g.clientWidth, height, view.tiles.size, MIN_TILE, GRID_GAP);
+    g.style.setProperty("--lcols", view.fit.cols);
+    g.style.setProperty("--ltile", view.fit.tile + "px");
+    g.classList.toggle("scroll", view.fit.scroll);
+  }
+
+  function fitSoon() {
+    clearTimeout(view.fitTimer);
+    view.fitTimer = setTimeout(fit, 60);
+  }
+
+  const fullscreenOk = !!(document.fullscreenEnabled && Element.prototype.requestFullscreen);
+
+  function toggleFullscreen(target) {
+    if (document.fullscreenElement === target) return document.exitFullscreen();
+    return target.requestFullscreen().catch(() => {});
+  }
+
+  function paintFullscreen() {
+    const button = el("lfs");
+    const on = document.fullscreenElement === el("lwrap");
+    button.classList.toggle("hide", !fullscreenOk);
+    button.textContent = on ? "Exit fullscreen" : "Fullscreen";
+    button.setAttribute("aria-pressed", String(on));
+  }
+
+  window.addEventListener("resize", fitSoon);
+  window.addEventListener("orientationchange", fitSoon);
+  document.addEventListener("fullscreenchange", () => { paintFullscreen(); fit(); fitSoon(); });
+  if (window.ResizeObserver) {
+    const watcher = new ResizeObserver(fitSoon);
+    watcher.observe(document.body);
+    watcher.observe(el("lwrap"));
+  }
+  paintFullscreen();
+
   // ---- the page ------------------------------------------------------------
 
   function onTab(name, arg) {
     const shown = name === "live";
+    document.body.classList.toggle("live-tab", shown);
     if (shown && arg) view.wantFocus = arg;
     if (shown === view.shown && !arg) return;
     view.shown = shown;
     clearInterval(view.timer);
     view.timer = null;
     if (shown) {
+      fitSoon();
       view.timer = setInterval(() => { if (!view.hidden) refresh(); }, REFRESH_MS);
       refresh();
     } else {
@@ -497,6 +566,7 @@ const Live = (() => {
   });
 
   document.addEventListener("click", (event) => {
+    if (event.target.closest("#lfs")) return void toggleFullscreen(el("lwrap"));
     const root = event.target.closest("#lgrid .ltile");
     if (!root) return;
     const tile = view.tiles.get(root.dataset.camera);
@@ -553,8 +623,10 @@ const Live = (() => {
       tiles.push(row);
     }
     return { shown: view.shown, hidden: view.hidden, visibility: document.visibilityState, enabled: view.info ? view.info.enabled : null,
-      alive: view.info ? view.info.alive : null, focus: view.focus, columns, innerWidth: window.innerWidth, scrollY: window.scrollY, note: !el("lnote").classList.contains("hide") ? el("lnote").textContent : "", tiles };
+      alive: view.info ? view.info.alive : null, focus: view.focus, columns, fit: view.fit, fullscreen: !!document.fullscreenElement, fullscreenOk, innerWidth: window.innerWidth, scrollY: window.scrollY, note: !el("lnote").classList.contains("hide") ? el("lnote").textContent : "", tiles };
   };
+
+  window.__liveBestGrid = bestGrid;
 
   return { onTab };
 })();
