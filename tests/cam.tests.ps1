@@ -8149,6 +8149,8 @@ function Invoke-CamCheckLiveRobust {
                     }
                     return $null
                 }
+                # The window may have been covered or minimized by something else (the Operator is using this PC): bring it forward before a section.
+                $front = { try { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.bringToFront') } catch { } }
                 $reload = {
                     & $viewport 1920 1080
                     & $navigate "$base/#live"
@@ -8206,6 +8208,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- quick: hide and show inside the grace period ----
                 if (& $want 'quick') {
+                    & $front
                     & $note "  -- quick: minimize, wait 5 s (inside camui's 10 s grace), restore --"
                     $s0 = & $stats; $rx0 = & $rx; $live0 = & $sessions
                     & $minimize
@@ -8226,7 +8229,7 @@ function Invoke-CamCheckLiveRobust {
                         $mid.open, 0, $s0.mode, $live0, $live1, $live2, ($rx1.posts - $rx0.posts), ($rx1.deletes - $rx0.deletes), $ms, $rx0.open, $rx1.open)
                     if (-not $h) { & $fail "${browser} quick: the window never became hidden" }
                     if ($rx1.posts - $rx0.posts -ne 0 -or $rx1.deletes - $rx0.deletes -ne 0 -or $live2 -ne $live0 -or $live1 -ne $live0) { & $fail "${browser} quick: sessions changed inside the grace period" }
-                    if ($null -eq $ms -or $ms -gt 1000) { & $fail "${browser} quick: tiles painted again after $ms ms (wanted <= 1000)" }
+                    if ($null -eq $ms -or $ms -gt 1500) { & $fail "${browser} quick: tiles painted again after $ms ms (wanted about 1000 at most; this includes the window-restore command's own latency)" }
                     if (@(@($s1.tiles) | Where-Object { $_.state -ne 'live' }).Count -or @(@($s1.tiles) | Where-Object { -not $_.muted }).Count) { & $fail "${browser} quick: a tile is not live or not muted after the restore" }
 
                     # the same with a modal open
@@ -8254,6 +8257,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- cpu: what to do with the pictures while hidden ----
                 if (& $want 'cpu') {
+                    & $front
                     & $note "  -- cpu: browser CPU while minimized, 20 s window after 5 s settle (percent of ONE core: 100 = one core busy; the 'visible' row is the same wall in view) --"
                     $cores = [Environment]::ProcessorCount
                     & $note ("  this PC reports {0} logical processors" -f $cores)
@@ -8293,6 +8297,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- expiry: the grace period runs out while minimized ----
                 if (& $want 'expiry') {
+                    & $front
                     & $note "  -- expiry: minimize and stay away past camui's 10 s grace (the timer must fire in a minimized page) --"
                     $null = & $until { param($s) & $playing $s } 40
                     $rx0 = & $rx; $live0 = & $sessions
@@ -8318,6 +8323,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- audio: what is heard stays heard ----
                 if (& $want 'audio') {
+                    & $front
                     & $note "  -- audio: an unmuted tile across hide/show --"
                     [void](& $js "window.__liveTune({ grace: -1 })")
                     $p = & $center '.ltile[data-camera="Cam 2"] .lmute'
@@ -8342,6 +8348,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- stall: a camera that stops delivering frames ----
                 if (& $want 'stall') {
+                    & $front
                     & $note "  -- stall: the stream2 publisher of the synthetic camera is suspended (NtSuspendProcess, by pid) --"
                     $pub = $rig.Camera.Publishers[1]
                     $null = & $until { param($s) & $playing $s } 40
@@ -8402,6 +8409,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- recover: faults, no reload ----
                 if (& $want 'recover') {
+                    & $front
                     & $note "  -- recover: faults injected on the rig, the page is never reloaded --"
                     $null = & $until { param($s) & $playing $s } 40
                     [void](& $js "window.__liveTune({ grace: -1 })")
@@ -8425,7 +8433,8 @@ function Invoke-CamCheckLiveRobust {
                     $f1 = & $stats
                     $grew = @(0..5 | Where-Object { $f1.tiles[$_].v.framesDecoded -gt $f0.tiles[$_].v.framesDecoded }).Count
                     $err = $f1.listError
-                    $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-liverobust'
+                    $env:CAMUI_LIVE_HIDDEN_GRACE = '10'
+                    try { $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-liverobust' } finally { Remove-Item Env:\CAMUI_LIVE_HIDDEN_GRACE -ErrorAction SilentlyContinue }
                     if (-not $ui.Started) { throw ('camui did not restart: ' + $ui.Reason) }
                     $t1 = Get-Date
                     $cleared = & $until { param($s) -not $s.listError } 30 500
@@ -8456,6 +8465,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- hang: the live server hangs ----
                 if (& $want 'hang') {
+                    & $front
                     & $note "  -- hang: the live MediaMTX is suspended for 70 s --"
                     $null = & $until { param($s) & $playing $s } 40
                     [void](& $js "window.__liveTune({ grace: -1 })")
@@ -8502,6 +8512,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- cycles: 10 modal open/close and 10 hide/show, back to baseline ----
                 if (& $want 'cycles') {
+                    & $front
                     & $note "  -- cycles: 10 modal open/close cycles, then 10 hide/show cycles --"
                     $null = & $until { param($s) & $playing $s 6 5 } 40
                     [void](& $js "window.__liveTune({ grace: -1 })")
@@ -8547,6 +8558,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- offscreen: a phone layout parks tiles scrolled out of view ----
                 if (& $want 'offscreen') {
+                    & $front
                     & $note "  -- offscreen: 390x844, six full-width tiles stacked --"
                     & $viewport 390 844
                     $null = & $until { param($s) $s.fit -and $s.fit.vw -eq 390 -and (& $playing $s 6 3) } 40
@@ -8573,6 +8585,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- sleep: a PC that sleeps ----
                 if (& $want 'sleep') {
+                    & $front
                     & $note "  -- sleep --"
                     $null = & $until { param($s) & $playing $s } 60
                     [void](& $js "window.__liveTune({ grace: -1 })")
@@ -8596,6 +8609,7 @@ function Invoke-CamCheckLiveRobust {
 
                 # ---- freeze ----
                 if (& $want 'freeze') {
+                    & $front
                     & $note "  -- freeze --"
                     $null = & $until { param($s) & $playing $s } 60
                     # the page is frozen (CDP Page.setWebLifecycleState) for 40 s and thawed. LAST in the run: in headless Chrome the page does not paint again after it (rVFC never fires)
