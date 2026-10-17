@@ -134,8 +134,9 @@ Commissioned on master of the original repository, ahead of this project, as the
   (`livecfg`, golden hash). `livelan` shows Chrome and Edge playing when the answer holds ONLY a non-loopback private
   candidate (on this PC a virtual adapter's, since it had no physical LAN address at test time). Firewall commands are
   documented, none applied. Prompted by the Operator's report that tiles stay on "Connecting" in Firefox: the loopback-only
-  hypothesis fits (MediaMTX offers only the loopback host candidate) but is UNVERIFIED until he retests. Still open for
-  Stage 2: a physical-NIC and phone test, whether Firefox is a supported browser.
+  hypothesis fits (MediaMTX offers only the loopback host candidate) and was CONFIRMED by the Operator on 2026-10-16: with
+  `LiveUdpAddress` 0.0.0.0:8189 and `LiveAdvertiseHosts` set to the LAN address, Firefox plays on the real system.
+  Still open for Stage 2: a physical-NIC and phone test on the real system.
 - **Status (2026-10-16), step 2b on branch `portable-nvr-2b` (not merged): camui over HTTPS on the LAN.** An optional second
   listener (`tlsListen`, a private IPv4:port, off by default) serves the whole app and the Live screen with a MANDATORY token
   (`tlsToken` / `CAMUI_TLS_TOKEN`, separate from the loopback `token`), a Secure/HttpOnly/SameSite=Strict cookie holding a
