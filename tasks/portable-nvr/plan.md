@@ -1,7 +1,8 @@
 # A portable NVR, grown beside the current one
 
-Status: DRAFT for the Operator, 2026-10-15. Nothing here is built. Origin: the Operator's direction in
-`tasks/ipcctv-recording/todo.md` [87].
+Status: UPDATED 2026-10-17. Stages 0, 1 and 2 are built, merged into `portable-nvr` and pushed (head `f90b987`); Stages 3, 4 and 5
+are not started. The single place to read where things stand is the **Status board** below, and the checklist is
+`todo.md` beside this file. Origin: the Operator's direction in `tasks/ipcctv-recording/todo.md` [87].
 
 ## WHERE THIS LIVES - the Operator's rule (2026-10-15)
 
@@ -14,6 +15,44 @@ and the original `ui/` on master stays untouched.
 
 **Order agreed with the Operator:** the soak, then Stage 1b (the mpv password fix, done in the ORIGINAL repository on
 master) are finished before Stage 0 of this project starts.
+
+## Status board (2026-10-17) - the single source of truth
+
+Legend: DONE = built, checked, merged into `portable-nvr` and pushed. ADHOC = added during the work, not in the first
+plan, approved by the Operator as it went. OPEN = not started or not proven.
+
+| Item | State | Evidence |
+|---|---|---|
+| Stage 0 spikes (WebRTC in Chrome, Edge; hardware decode; audio; MediaMTX exposure finding) | DONE | `spikes/stage0-report.md` |
+| Stage 1b mpv password off the command line (original repo, `master`) | DONE | pushed to `master` earlier |
+| Stage 1A dedicated login-protected live-view MediaMTX | DONE | merged `15e4bb3`; `livecfg`, `livesecret`, `livewhep`, `liveondemand` |
+| Stage 1B Live tab + same-origin WHEP proxy + scoped guard exception | DONE | merged `b8749e3`; Go tests, `uileak`, `livepage` |
+| Stage 2a LAN media address, tile diagnostics | DONE | merged `87871d0`; `livelan`; Firefox confirmed on the real system 2026-10-16 |
+| Stage 2b HTTPS listener, local CA with name constraints, token, limiter | DONE | merged `97fd3fe`; `livetls`; real phone confirmed by the Operator 2026-10-17 |
+| Stage 2b.1 HTTPS listener view-only by default | DONE | merged `1e05dd8` |
+| Stage 2c demo `-Lan` / `-Tls` for a phone test with fake cameras | ADHOC, DONE | merged `e15dbb4` |
+| Live grid fills the window, camera modal, fullscreen | ADHOC, DONE | merged `3fa1979`; `livepage` |
+| Live robustness: hidden-window grace, stall detection, recovery, diagnostics v3 | ADHOC, DONE | merged `629bb5e`; `liverobust` |
+| Fit / Fill toggle | ADHOC, DONE | merged `436b363` |
+| Alert 110 false-alarm floor (original repo, todo [92]) | ADHOC, DONE on `master` + merged into `portable-nvr` | pushed `b69d06d`, `f90b987`; live in the running NVR only after its next restart |
+| Stray-process guard S1 to S6 | PLANNED (specification for Stage 5, not built in PowerShell) | section below |
+| Stage 3 internet via a private overlay | OPEN, gated by a security review | - |
+| Stage 4 portable Go recorder, shadow mode | OPEN | - |
+| Stage 5 portable supervisor and control plane | OPEN | - |
+| Gap list for "fully OS independent" and "fully over the LAN" | WRITTEN, see the section "What is missing" below | `todo.md` |
+
+**Not yet proven in the stages marked DONE:** a clean run of the FULL harness since Stage 1A (checks were run individually);
+the Footage tab on a phone over the LAN; two viewers at once on the same camera; recovery after a real PC sleep (about 12 s
+in the closest simulation, not improved by the wake-up code); the CPU figure with six real cameras; whether High-profile H.264
+is what the real sub-streams use (they play in Chrome and Firefox; the profile was not recorded). The 24-hour tab soak in
+Stage 1's acceptance is PROPOSED FOR DROPPING under the Operator's no-stress-tests rule (his confirmation is pending); the open/close
+cycle check and his daily use would replace it.
+
+**State of the real system.** The recorder runs from the portable folder, started by hand
+(`cam.ps1 -Stop`, then `cam.recorder.ps1 -Nvr` there), with live view on and a LAN media address. The three logon
+tasks still point at the ORIGINAL repository, so a reboot starts the original system, without live view. The portable
+`camui` for the phone runs from a hand-started copy under `%LOCALAPPDATA%\IPCCTV\camui`. This is the gap between
+"works" and "installed"; see GAP-L1 below.
 
 ## The brief, in the Operator's words
 
@@ -100,7 +139,7 @@ Additive to `camui`; the existing Dashboard, Settings and Footage screens are un
 - Acceptance: `uileak` extended and green; six tiles render in the PC's browser within the CPU budget set in
   Spike B; rendered checks at desktop and phone widths; a 24-hour tab soak with no growth in memory; with the
   flag off, everything behaves as before; the full harness green.
-- **Status (2026-10-16).** 1.1 done and merged (Stage 1A). 1.2 to 1.4 built on branch `portable-nvr-1b` (not merged):
+- **Status (2026-10-16).** 1.1 done and merged (Stage 1A). 1.2 to 1.4 done and merged (Stage 1B, `b8749e3`):
   the Live tab, the same-origin WHEP proxy with its session caps, `GET /api/live`, one scoped guard exception, `Live.Cameras`
   in `status.json`; design in `live-1b-design.md`, user documentation in `docs/ui.md`. Proven in Chrome and Edge against the
   real supervisor and a synthetic camera: six sub tiles play at 1920x1080 (3 columns) and 390x844 (1 column), a click or
@@ -127,7 +166,7 @@ Commissioned on master of the original repository, ahead of this project, as the
   private overlay network.
 - Acceptance: a device without the token gets 401 on every endpoint and every stream; `uileak` re-run against
   the LAN bind; no credential in any response; the firewall rule scoped to the LAN profile.
-- **Status (2026-10-16), step 2a on branch `portable-nvr-2a` (not merged): the media path and the diagnostics only.**
+- **Status (2026-10-16), step 2a (Stage 2a, merged `87871d0`): the media path and the diagnostics only.**
   A tile that is not playing explains itself (signalling result, ICE states, candidate counts and kinds, "No media after
   15 s") with a Copy diagnostics line. New keys `LiveAdvertiseHosts` (private IPv4 literals, default empty) and a LAN
   `LiveUdpAddress` (`0.0.0.0` or one private address), both off by default: the default live config is byte-identical
@@ -137,7 +176,7 @@ Commissioned on master of the original repository, ahead of this project, as the
   hypothesis fits (MediaMTX offers only the loopback host candidate) and was CONFIRMED by the Operator on 2026-10-16: with
   `LiveUdpAddress` 0.0.0.0:8189 and `LiveAdvertiseHosts` set to the LAN address, Firefox plays on the real system.
   Still open for Stage 2: a physical-NIC and phone test on the real system.
-- **Status (2026-10-16), step 2b on branch `portable-nvr-2b` (not merged): camui over HTTPS on the LAN.** An optional second
+- **Status (2026-10-16), step 2b (Stage 2b, merged `97fd3fe`): camui over HTTPS on the LAN.** An optional second
   listener (`tlsListen`, a private IPv4:port, off by default) serves the whole app and the Live screen with a MANDATORY token
   (`tlsToken` / `CAMUI_TLS_TOKEN`, separate from the loopback `token`), a Secure/HttpOnly/SameSite=Strict cookie holding a
   derived value, a per-address failure limiter and https-only origins; the loopback listener is unchanged. A locally generated
@@ -148,25 +187,25 @@ Commissioned on master of the original repository, ahead of this project, as the
   created), play the tiles over HTTPS; without the flag they show the certificate warning. NOT done (2c): a real phone and a second
   PC (the Operator's steps are in docs/ui.md), a physical NIC, the firewall rules (documented, never applied), HSTS/CSP hardening,
   and the Operator's decision whether a LAN device may see camera addresses through /api/cameras.
-- **Status (2026-10-16), step 2b.1 on branch `portable-nvr-2b1` (not merged): the HTTPS listener is VIEW-ONLY by default** (`tlsReadOnly`,
+- **Status (2026-10-16), step 2b.1 (Stage 2b.1, merged `1e05dd8`): the HTTPS listener is VIEW-ONLY by default** (`tlsReadOnly`,
   default true). After the token check (401 beats 403) a deny-by-default allow-list gate lets through only the page, the read-only
   API and the Live screen's own WHEP/session calls; start/stop, settings, camera edits, record toggles and acknowledgements get 403
   before any handler. A test fails when a new route is not classified. The front end hides the controls and says so. `false` makes
   the token full control (documented). The loopback listener is unchanged.
-- **Status (2026-10-16), Live fit on branch `portable-nvr-livefit` (not merged): the Live tab fills the window and a click opens a modal.**
+- **Status (2026-10-16), Live fit (Live fit, merged `3fa1979`): the Live tab fills the window and a click opens a modal.**
   Front end only (`live.js`, `style.css`, `index.html`; no Go change). `bestGrid` picks the column count that maximises the 16:9
   tiles (1920x1080: 3x2 of 633x356, no scrolling; 2560x1440: 846x476; 800x1000: 2 columns; 390x844: 1 full-width column), there is a
   Fullscreen button, and a click opens a `<dialog>` with the tile's own stream at once and ONE main session swapped in when it has drawn
   a frame, with no change to the grid (design `live-fit-design.md`, docs `ui.md`). Proven by `livepage` in Chrome and Edge (measured
   rectangles, instant picture, swap to the 1280x720 main, grid untouched, close/Esc/backdrop/deep link/Back, pre-warm leaves no session,
   HD-unavailable path, hidden window, fullscreen calls) and `tests/live/bestgrid.test.js`.
-- **Status (2026-10-17), Live robustness A on branch `portable-nvr-liverobust` (not merged): a wall that stays on.** A hidden window or
+- **Status (2026-10-17), Live robustness A (Live robustness A, merged `629bb5e`): a wall that stays on.** A hidden window or
   another camui tab keeps its streams for a grace period (camui `liveHiddenGraceSeconds`, default 300, 0 = free at once, -1 = never;
   env `CAMUI_LIVE_HIDDEN_GRACE`; `hiddenGraceSeconds` in `GET /api/live`) and frees them after it; a stalled picture (no decoded frames for 8 s) is
   rebuilt; killed servers, restarted cameras and camui, a sleeping page and a hung server recover without a reload with capped retry
   traffic; tiles scrolled out of view are parked; `live-diag/3`. Design `live-robust-design.md`; proven by the new opt-in `liverobust`
   check in Chrome and Edge (docs `ui.md`).
-- **Status (2026-10-17), Live Fit / Fill on branch `portable-nvr-fitfill` (not merged): a toggle for the whole screen.** Front end only. Fit (default,
+- **Status (2026-10-17), Live Fit / Fill (Live Fit / Fill, merged `436b363`): a toggle for the whole screen.** Front end only. Fit (default,
   unchanged: 3x2 of 633x356 at 1920x1080, ~69 % of the height) or Fill (`bestGridFill`: the cells divide the whole area, `object-fit: cover`,
   1920x1080 3x2 of 633x495, ~99 % covered, ~28 % of each picture cropped); persisted in `localStorage` `camui.live.fit`; layout only, no
   new sessions; phone rule falls back to Fit's scrolling column below 180 px per tile; proven by `bestgrid.test.js` and the `livepage` Fit/Fill block (docs `ui.md`).
@@ -351,6 +390,65 @@ the explicit force forms.
 **Closed (2026-10-16).** The Operator decided against building S1 to S5 in PowerShell; a backport to the original system on `master`
 would be a separate commission with his approval.
 
+## What is missing for a fully OS independent system that runs fully over the LAN (2026-10-17)
+
+Method: every claim below was checked in the code or in a run on 2026-10-17, or is marked unverified.
+
+### A. Fully OS independent
+
+What is already portable (verified): `camui` is one Go binary and its Go tests pass on Linux (run in WSL today); the
+recorder's data files (`status.json`, `cameras.json`, `recorder.config.json`) are JSON; MediaMTX and ffmpeg run on all three
+OSes; the live tiles use only a browser; the pruner rules and the UTC-seam design are written down and tested, so they can be
+re-expressed.
+
+What is Windows-bound, with the size of the job (counts from a grep of the PowerShell, 13,014 lines in five scripts):
+
+| # | Windows-bound piece | Evidence | What replaces it |
+|---|---|---|---|
+| OS1 | The recorder and supervisor: `cam.recorder.ps1` (4,260 lines) and `cam.common.ps1` (6,152) on PowerShell 5.1 | 19 Win32 imports, 18 job-object uses, 4 CIM queries | Stage 4 Go recorder, Stage 5 Go supervisor |
+| OS2 | Host, wardens and Windows Terminal windows (the "close the window to stop" behaviour) | 18 Windows Terminal references | Stage 5: process group or job + a keeper, attached and service modes (D7) |
+| OS3 | Camera credentials in `camera_creds.xml`, a DPAPI file bound to one Windows user | 7 DPAPI uses | A portable secret store: OS keyring where there is one, else an owner-only encrypted file; decision needed (D12) |
+| OS4 | The credentialed URL on ffmpeg's command line on the DIRECT path (todo [90]) | open in the original todo | The portable recorder reads ONLY through the relay (no credential), and MediaMTX gets the camera secret by environment |
+| OS5 | Alerts: Windows toast and event log | 4 toast and 9 event-log references | Pluggable channels: webhook, push (ntfy-style), email, journald and desktop notifications |
+| OS6 | Autostart and install: three Scheduled Tasks, `-Install` / `-Uninstall` | 11 `schtasks` references | systemd, launchd and a Windows service or task behind one install command |
+| OS7 | The mpv dashboard and health strip | 93 mpv references | Retired by the web Live tab (the Operator's direction [87]); the web app needs the strip's information on its own screen |
+| OS8 | `camui` control path: start, stop, record toggle via `powershell.exe cam.ps1`; task state via `schtasks.exe`; default `E:\cameras`; NTFS ACLs via `icacls` (a non-Windows fallback file already exists) | `ui/control.go`, `ui/api.go`, `ui/fileperm_*.go` | A control backend interface: the Go supervisor answers it directly; PowerShell stays one implementation |
+| OS9 | `status.json` is the contract between recorder and web app, and it is NOT documented as a schema | no schema text in `docs/` | Write it down, version it, and test both producers against it before any second recorder exists (prerequisite of Stage 4) |
+| OS10 | The 13,000-line PowerShell test harness and PowerShell-driven browser rigs | `tests/` | Go tests per stage; the CDP browser rigs can move to Node (present in WSL) or stay Windows-only |
+| OS11 | No continuous integration; only this PC ever runs the checks | - | A Windows + Linux (+ macOS) matrix once the project has its own repository (D1) |
+| OS12 | Packaging: per-OS binaries, config locations, uninstall, one repository (name D2) | - | Release build per OS, repository split at the end (D1) |
+
+Honest note on the schedule: the clock change on 25 Oct 2026 is 8 days away and no Go recorder exists, so the shadow run
+(D5) cannot span it. The next change is 28 Mar 2027. The existing PowerShell recorder's DST behaviour is tested (`dst`, `dstloop`).
+
+### B. Fully over the LAN
+
+Done and proven on the real system: HTTPS with a local CA, a mandatory token, a failure limiter, view-only by default,
+Live over the LAN in Chrome and Firefox on this PC and in a phone browser, a stable grid and a modal, recovery without reload.
+
+| # | Gap | Evidence | What closes it |
+|---|---|---|---|
+| L1 | NOT INSTALLED. The portable build is started by hand: the recorder with `-Nvr` from the portable folder, `camui` from a copy with flags and a token in a window's environment. The logon tasks still start the ORIGINAL system, so a reboot drops live view and the LAN page | the Status board; the 2026-10-17 phone session | An install step run from the portable folder (it re-points the three tasks), `camui` autostart with the TLS config, the token in an owner-only file, and the firewall rule created by a helper that asks for elevation; `-Status` checks all of it |
+| L2 | The LAN address is configuration, not detected. `LiveAdvertiseHosts`, `tlsListen` and the certificate follow it; if the address changes, live view breaks silently | the 2026-10-16 Firefox and phone sessions | Detect a change, regenerate, and raise an alert; keep recommending a router reservation |
+| L3 | Trusting the CA is manual per device (file, profile, trust toggle); no QR code; Android and iOS 18 behaviour unverified | docs/ui.md steps; the phone test was one device | A "Connect a device" page with a QR code and a per-device walkthrough; test on Android and iOS |
+| L4 | One shared token for every device: no names, no revocation of one device, no list of who is connected, no audit trail | `ui/token.go` | Per-device tokens with names, revoke, last-seen and a connected-devices list |
+| L5 | Control from the LAN is deliberately off (view-only). Doing start, stop, settings from the phone needs stronger authentication than a shared view token | `tlsReadOnly` design | Decision D9: stay view-only, or add a separate control credential with re-authentication |
+| L6 | Footage over the LAN is allowed by the view-only gate but untested on a phone; remux load per clip, range requests and seeking untested | the 2026-10-16 gate tests only | Verify on a phone; add concurrency limits for `/api/clip`; test seeking |
+| L7 | Alerts reach only the PC (toast, event log). Nothing tells the phone | `docs/alerts.md` | A webhook or push channel (OS5) |
+| L8 | Two or more viewers at once on the same camera, and the camera's two-session limit with a phone app open, are not measured | not measured | One short functional check with two browsers |
+| L9 | A LAN device with the token can read camera addresses through `/api/cameras` (no credentials, no URLs) | decision D8, unanswered | Decide; the view-only mode could hide the address fields |
+| L10 | Only one stray-process guard exists on paper (S1 to S6); nothing tells the Operator if a LAN session or process leaks | the plan section above | Specification for Stage 5 |
+| L11 | Housekeeping: the temporary phone-test firewall rule (TCP 8443) and stale temp folders from agent runs remain | the 2026-10-17 session | The Operator removes the rule; a cleanup pass for `%TEMP%\cam-tests` and `%LOCALAPPDATA%\IPCCTV\demo` |
+| L12 | The Stage 3 internet step is separate and gated; "fully over the LAN" does not include it | Stage 3 | Security review first |
+
+### C. Suggested order
+
+1. L1 install and autostart (nothing else is worth much while a reboot undoes it), with L2 detection and the firewall helper.
+2. OS9 `status.json` contract and tests, then OS3/OS4 secret store design: these decide the shape of Stages 4 and 5.
+3. L4 per-device tokens, L3 QR and device walkthrough, L6/L8 verification on the phone.
+4. Stage 4 recorder in shadow mode (D5 revised), then Stage 5 supervisor with S1 to S6 and OS5 alert channels, OS6 installers, OS8 backend interface.
+5. OS11 CI and OS12 packaging when the project gets its own repository.
+
 ## Order and what each stage depends on
 
 Stage 0 -> Stage 1 -> (Stage 1b any time) -> Stage 2 -> Stage 4 -> Stage 5, with Stage 3 only after Stage 2 has
@@ -365,9 +463,15 @@ portability before remote access; the order above follows what he asked for.
 | D2 | Name of the new system | He chooses; none is needed before Stage 4. |
 | D3 | Tile policy | **CONFIRMED by Stage 0 and Spike C:** sub-stream (`stream2`) in the grid, main stream on focus; every camera has a usable sub-stream. |
 | D4 | Order of Stages 2-5 | As listed; portability before the LAN is possible. |
-| D5 | Shadow-run length for Stage 4 | At least one full retention cycle, and across the 25 Oct clock change if possible. |
+| D5 | Shadow-run length for Stage 4 | At least one full retention cycle. REVISED 2026-10-17: the 25 Oct 2026 clock change is 8 days away and no Go recorder exists, so the run cannot span it; the next change is 28 Mar 2027. |
 | D6 | Keep the PowerShell recorder as a permanent fallback | Yes: it costs nothing and follows "nothing is removed". |
 | D7 | Autostart in attached or service mode (Stage 5) | Support both; the Operator picks the default at install. Attached keeps today's behaviour (a visible window you close to stop); service is headless and UI-controlled. |
+| D8 | May a LAN device with the token see camera addresses (`/api/cameras`)? | Hide the address fields in view-only mode. Unanswered. |
+| D9 | Control (start, stop, settings) from the LAN | Stay view-only until a separate control credential exists (L5). Unanswered. |
+| D10 | When does the portable build become the installed system (L1)? | After the full harness runs clean once; the original stays installable. Unanswered. |
+| D11 | CI and the new repository's host and name | With D1/D2 at the end. Unanswered. |
+| D12 | Portable camera-secret store (OS3) | Keyring where present, else an owner-only encrypted file; relay-only reads (OS4). Unanswered. |
+
 
 ## Sources used for this plan
 
