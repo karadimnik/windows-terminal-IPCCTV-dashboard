@@ -5,7 +5,7 @@ technology choices, migration phases, decisions D2 to D18). The specification is
 and `spec/inventory-supervisor.md` (call it **IS**); a reference like `IR 3.5` or `IS 2.2 G4` points into them, and every
 constant below that is not marked UNVERIFIED was read from the PowerShell source by those inventories.
 
-Conventions: package paths are under a Go module whose name waits for decision D2 (`nvr` here). All new code is standard
+Conventions: package paths are under the Go module `holocron` (decision D2). Two hard rules govern everything (HLD section 0): **R1** one executable, `holocron`, for every action including install and uninstall; **R2** every action logged at a controllable level. All new code is standard
 library except where section 8 names a pinned dependency. Every task ends with tests that can fail (a negative control) and a short
 report; no stress, soak or endurance tests anywhere in this plan (the Operator's rule); "fault injection" means one clean
 scenario run, not repetition.
@@ -13,7 +13,7 @@ scenario run, not repetition.
 ## 1. Module layout
 
 ```
-cmd/nvr/                 main: subcommands host | supervisor | web | ctl | doctor | version
+cmd/holocron/            main: the ONLY executable; public commands in section 2.12, hidden role commands host | supervisor | web
 internal/clock/          Clock interface (UTC instants, monotonic intervals), DST helpers
 internal/archive/        names, scan, pruner (pure planner + executor), root guards, ownership marker
 internal/ffmpeg/         argument builder (golden-tested), child process, stderr drain and redaction
@@ -25,7 +25,8 @@ internal/alerts/         Event, dedupe/repeat rules, channels (log, webhook, pus
 internal/secrets/        Provider interface + backends (keyring, encrypted file, env)
 internal/osx/            per-OS: process lifetime, service install, dirs, disk free, root guards, perms, console events
 internal/ctlapi/         local control endpoint (server) and client
-internal/config/         nvr.config.json + cameras.json: types, defaults, validation, JSON Schema
+internal/config/         holocron.config.json + cameras.json: types, defaults, validation, JSON Schema, atomic edit helpers (used by `cam` and `config` commands and by the web app)
+internal/cli/            command tree, one Action per command (name, handler, log contract), shared by the CLI and the web handlers
 internal/logx/           slog handler + rotating writer that cannot fail the caller + redaction
 web/ (existing ui/)      camui moved or kept in place behind a Controller interface (section 2.11)
 testdata/golden/         ffmpeg vectors, status documents, prune matrices, DST tables
@@ -108,10 +109,81 @@ Windows uses `golang.org/x/sys/windows` for job objects (`CreateJobObject`, `Set
 `Run(budget)` starts the supervisor as a child process, waits, and classifies the stop from RECORDED state (the stop-request file, the persisted `StopKind`, exit code 20), never from the exit code alone (IS 2.3). Rules (IS 2.2 G4): restart in place after 5 s, at most 5 restarts in 30 minutes, alert 100 on an unexpected stop and 101 on restart, 102 and stay down when the budget is spent; never restart `requested`, `interrupted`, `window-closed` or exit 20; wait up to 20 s for the previous supervisor's lock before restarting. In attached mode `OnConsoleClose` stops the supervisor in order and records `window-closed` with alert 103 (one alert; an orderly stop raises none, G3); in service mode the OS manager's stop is `requested`.
 
 ### 2.11 `ctlapi` and the `camui` Controller
-A loopback HTTP endpoint inside the supervisor (random port written to `_state/ctl.addr`, secret in an owner-only `_state/ctl.secret`, constant-time compare; no other listener): `GET /v1/state`, `POST /v1/stop`, `POST /v1/reload`, `POST /v1/cameras/{name}/record`, `POST /v1/live/enable|disable`. One state-changing action at a time (409 otherwise; G14, with a test). `camui` gets `type Controller interface { Status() (State, error); Start(scope) ...; Stop(scope) ...; SetRecord(name, bool) ... }` with two implementations: `PowerShellController` (today's `runPowerShell`, `schtasks` query; kept for the PowerShell system) and `APIController` (new). The camui binary chooses by what it finds in `_state` (a live `ctl.addr` means the Go supervisor). Start is the OS service manager's job; `nvr ctl start` calls it.
+A loopback HTTP endpoint inside the supervisor (random port written to `_state/ctl.addr`, secret in an owner-only `_state/ctl.secret`, constant-time compare; no other listener): `GET /v1/state`, `POST /v1/stop`, `POST /v1/reload`, `POST /v1/cameras/{name}/record`, `POST /v1/live/enable|disable`. One state-changing action at a time (409 otherwise; G14, with a test). `camui` gets `type Controller interface { Status() (State, error); Start(scope) ...; Stop(scope) ...; SetRecord(name, bool) ... }` with two implementations: `PowerShellController` (today's `runPowerShell`, `schtasks` query; kept for the PowerShell system) and `APIController` (new). The camui binary chooses by what it finds in `_state` (a live `ctl.addr` means the Go supervisor). Start is the OS service manager's job; `holocron up` is what it runs.
 
-### 2.12 CLI (`nvr ctl`, mapping from `cam.ps1` and `cam.recorder.ps1`, IS section 3)
-`status` (same roles counted, same exit codes), `start [--recorder|--dashboard]`, `stop` (verified, exit 1 if anything in scope survives, never kills the supervisor), `enable|disable <camera>`, `install|uninstall [--dry-run]` (the `-WhatIf` equivalent; installs only the portable tasks/units, never touches the PowerShell system's), `doctor` (ffmpeg and MediaMTX found and versions, ports free, directories writable, clock sane, root verdict). Exit codes keep meaning: 0 ok, 1 failure (including "NOT RECORDING"), 20 another supervisor holds the archive, 21 configuration fault.
+### 2.12 The command tree (rule R1: one executable for everything)
+
+Every command is `holocron <noun> <verb>` or a top-level verb. Each is an **Action** registered in `internal/cli` (section 2.13), is
+callable from the command line, from the web app and through the control API with the same handler, and logs through the same
+contract. The mapping column shows what it replaces.
+
+| Command | Does | Replaces |
+|---|---|---|
+| `holocron up [--detach] [--only host\|web]` | Start everything in the right order (host, supervisor, relay, live relay, web). Attached by default: closing the terminal stops everything; `--detach` backgrounds it; the autostart entry runs this | `cam.ps1 -Start`, `-Nvr`, `camui.exe` |
+| `holocron down` | Stop everything in order and prove it by counting roles before and after; exit 1 if anything survives; never kills by name alone | `cam.ps1 -Stop` |
+| `holocron restart [--only ...]` | `down` then `up` for the chosen scope | - |
+| `holocron status [--json]` | Roles, pids, camera states, disk, live view, web, autostart state; same exit codes | `cam.ps1 -Status` |
+| `holocron cam list\|show\|add\|remove\|set\|enable\|disable\|test` | Edit `cameras.json` with validation and atomic write, hot reload by the supervisor, `test` probes a camera through the relay or directly | `cam.recorder.ps1 -Enable/-Disable`, hand edits, the Settings screen |
+| `holocron config get\|set\|unset\|validate\|show` | Read and change `holocron.config.json` through an allow-list with validation (retention, reserve, segment length, live view, log levels) | hand edits, `PUT /api/config` |
+| `holocron live enable\|disable\|status` | Switch live view and its LAN media address | config keys |
+| `holocron web [--listen ...] [--tls-listen ...]` | Run only the web role (for diagnostics); normally started by `up` | `camui.exe` |
+| `holocron open [camera]` | Open the default browser on the Live grid, or one camera | `mpv` grid launch |
+| `holocron user add\|remove\|passwd\|list\|unlock` | Manage login users (roles later) | `camui -set-password`, `-unlock` |
+| `holocron tls ca\|print\|rotate` | Local certificate authority tools | `camui -print-ca` |
+| `holocron secret set\|delete\|import\|list` | Camera credentials in the secret store (list shows names only, never values) | `camera_creds.xml` setup prompt |
+| `holocron install [--mode logon\|service\|systemd\|launchd] [--dry-run]` | Create the autostart entry for this OS and verify it; creates ONLY holocron's own entries and never touches the PowerShell system's tasks | `cam.ps1 -Install` |
+| `holocron uninstall [--dry-run]` | Remove exactly what `install` created | `cam.ps1 -Uninstall` |
+| `holocron autostart enable\|disable\|status` | Reversible on/off switch for the entry without removing it | - |
+| `holocron prune [--dry-run]` | Show or run the pruner's decision now, using the same planner | - |
+| `holocron archive stats` | Disk, retention, per-camera size and age | `Disk` section of `-Status` |
+| `holocron logs [-f] [--component c] [--level l] [--since t] [--action a]` | Read, filter and follow the logs, including the audit stream | opening log files by hand |
+| `holocron log level <component\|all> <level>` | Change a level at run time through the control API (persisted if `--save`) | - |
+| `holocron alert test [channel]` | Send a test alert through a channel | - |
+| `holocron doctor` | ffmpeg and MediaMTX found and versioned, ports free, directories writable, clock sane, archive root verdict, secret backend works, autostart state | `-SelfTest` |
+| `holocron version` | Build and spec versions | - |
+
+Exit codes keep their meaning: 0 ok, 1 failure (including "NOT RECORDING" and a stop that left survivors), 20 another supervisor holds
+the archive, 21 configuration fault. `--json` on read commands for scripting. There is no command that requires elevation except
+`install`/`uninstall` in `--mode service`, which says so before it asks.
+
+### 2.13 The logging contract (rule R2)
+
+Package `logx`, built on `log/slog`.
+
+**Levels.** `ERROR` an action failed or an invariant broke; `WARN` degraded, retried, refused or throttled; `INFO` every state-changing
+action and every lifecycle event; `DEBUG` decisions and their inputs; `TRACE` raw detail below DEBUG. Default INFO. Meaning by example:
+
+| Level | Examples |
+|---|---|
+| ERROR | child exits abnormally with no restart budget; prune blocked; relay refused the login; config write failed; any command that returns non-zero |
+| WARN | a restart with backoff; stall detected; direct input used because the relay is not ready; login failure or lockout; a guard refusal; a request throttled |
+| INFO | `up`, `down`, `install`; child started or stopped with pid and reason; camera added, removed, enabled, disabled; config changed (key, old and new value, secrets masked); user added, login ok, logout; segment deleted by the pruner (file, bytes, reason); alert sent; TLS certificate renewed |
+| DEBUG | backoff computation; relay-or-direct choice and the ready set; directory scan results; prune plan inputs and gate results; control-API and HTTP request lines; MediaMTX API calls |
+| TRACE | ffmpeg stderr lines; raw status documents; per-tick scheduler decisions |
+
+**Fields on every record:** `time` (RFC 3339 with offset), `level`, `component` (`cli`, `host`, `supervisor`, `ffmpeg:<camera>`, `relay`, `live`, `prune`, `web`, `auth`, `ctlapi`, `alerts`, `install`), `msg`, and for actions: `action`
+(`noun.verb`, for example `camera.add`), `actor` (`cli:<os user>`, `web:<username>`, `host`, `supervisor`, `system`), `target`, `result`
+(`ok`, `fail`, `refused`), `duration_ms`, `err`, `action_id` (one id per invocation, carried from the CLI through the control API into the
+supervisor so one action reads as one thread across processes), `pid`.
+
+**Control.** Configuration `logging.level` (default) and `logging.levels` (a map component to level); the environment variable
+`HOLOCRON_LOG=debug` or `HOLOCRON_LOG=supervisor=debug,web=info` overrides it; `holocron log level ...` changes it live through the
+control API; the CLI flags `-v` (DEBUG) and `-vv` (TRACE) set the level for that invocation and mirror its records to stderr.
+**Destinations:** `<root>/_logs/holocron.log` (all components, text by default, JSON by option), one file per camera for ffmpeg output as
+today, `<root>/_logs/audit.log` for security-relevant actions (login, user and certificate changes, camera and config changes, install,
+uninstall, down) kept longer, stderr in attached mode, and the OS event log or journald where the channel is enabled.
+**Rotation and safety:** the PowerShell rules carry over (IR 8): rotate at the size limit before append with one `.1` generation, a failed
+rotation or append never fails the caller and produces one notice per episode, repeated lines collapse on a digit-stripped shape.
+**Redaction** is a handler wrapper below every level: URLs with credentials, registered secrets, passwords, tokens, hashes and cookies
+never reach any sink, including at TRACE; a test enables TRACE and scans every sink with a positive control.
+
+**The action contract (what makes "every action" enforceable).** Each command, control-API handler and web handler is registered as an
+`Action{Name, Component, Mutating bool, Handler}` in `internal/cli`; the runner, not the handler, writes `action.begin` (DEBUG) and the result
+record (INFO for success of a mutating action, DEBUG for read-only success, WARN for refused, ERROR for failure) with the fields above, so a
+handler cannot forget. Tests: (1) a registry test fails if any exposed command or route is not an Action (the same pattern as the web app's
+route-classification test); (2) each Action is run against fakes and must leave exactly one begin and one result record with the required
+fields, and a failing run must leave an ERROR or WARN record; (3) a level test proves a component override and a run-time change take effect
+without a restart; (4) the TRACE leak scan above; (5) the audit stream receives every Mutating action.
 
 ## 3. Algorithms (pseudocode, normative where marked)
 
@@ -143,10 +215,10 @@ prunePlan(...):          see 2.2, gates in order; each refusal is a returned rea
 |---|---|---|---|
 | Archive root | `E:\cameras` | `/srv/cameras` (configurable) | `~/Movies/cameras` (configurable) |
 | State, logs | `<root>\_state`, `<root>\_logs` | same relative names | same |
-| Config | repo folder `cameras.json`, `recorder.config.json` | `$XDG_CONFIG_HOME/nvr` | `~/Library/Application Support/nvr` |
-| Auth, TLS, secrets | `%LOCALAPPDATA%\IPCCTV\...` | `$XDG_STATE_HOME/nvr` | `~/Library/Application Support/nvr` |
+| Config | repo folder `cameras.json`, `recorder.config.json` | `$XDG_CONFIG_HOME/holocron` | `~/Library/Application Support/holocron` |
+| Auth, TLS, secrets | `%LOCALAPPDATA%\IPCCTV\...` | `$XDG_STATE_HOME/holocron` | `~/Library/Application Support/holocron` |
 | Lock, registry, ctl | `_state\supervisor.lock`, `children.json`, `ctl.addr`, `ctl.secret` | same | same |
-`nvr.config.json` keeps every key, name and default of `Get-CamConfigDefault` that the Go core reads (IR section 4 lists keep and drop), so the existing `recorder.config.json` can be used unchanged during the shadow phases.
+`holocron.config.json` keeps every key, name and default of `Get-CamConfigDefault` that the Go core reads (IR section 4 lists keep and drop), so the existing `recorder.config.json` can be used unchanged during the shadow phases.
 
 ## 5. CLI-visible and web-visible compatibility rules
 `status.json` stays valid for the current `camui` and for `cam.ps1 -Status`; the live-off key set equals master's (`livecfg` rule); no response or log contains a credential or a camera URL (`uileak`); the web login, TLS and read-only layers are unchanged and keep working with either supervisor.
@@ -184,22 +256,23 @@ Order follows HLD section 7. Each task lists the model I would assign (Opus for 
 | W0a | `status.json` JSON Schema from IS section 1 and a conformance test that the PowerShell writer satisfies it (run in a sandbox) | Sonnet | 3 | - | Schema committed; PowerShell documents validate; F1 and V6 recorded as known differences |
 | W0b | Golden files: ffmpeg vectors (all variants), relay and live configs, safe-name corpus, DST table, produced from the PowerShell code | Sonnet | 3 | - | Goldens committed; a PowerShell check compares the product to them |
 | W1 | Spikes SP1 to SP8 as separate small commissions (SP2, SP3 Opus) | mixed | 8 | W0b for SP1 | One written finding each; decisions D7, D12, D14 updated |
-| W2 | `clock`, `config`, `logx`, `archive` names, scan and root guards | Sonnet | 8 | W0 | Table tests; safe-name equals PowerShell on the corpus |
+| W2a | `logx` with the action contract and its tests (2.13), `internal/cli` Action registry skeleton | Sonnet | 5 | W0 | Level, field, redaction, action-coverage and run-time-change tests green |
+| W2 | `clock`, `config`, `archive` names, scan and root guards | Sonnet | 8 | W0 | Table tests; safe-name equals PowerShell on the corpus |
 | W3 | Pruner planner, executor, markers, breaker, alerts 120 to 122 | Opus | 10 | W2, SP7 | All ten prune checks as Go tests; differential harness zero differences; no real deletion in any test |
 | W4 | `status` package, liveness verdict, schema validation, Go reader replaced into `camui` behind the Controller interface | Sonnet | 6 | W0a | Both producers validate; `camui` unchanged in behaviour |
 | W5 | `ffmpeg` package: golden args, child, redaction, empty-segment cleanup | Sonnet | 5 | W0b, SP1 | Goldens equal; fake-camera recording across two boundaries has the PowerShell names |
 | W6 | `relay` package: config generators, env scheme, API client, ready set | Sonnet | 5 | W0b | Byte-identical default configs; live-off key set equals master's |
 | W7 | `supervise`: reconcile, backoff, stall, input choice, down alert, ordered stop, heartbeat goroutine | Opus | 14 | W2 to W6 | Rig scenarios: camera drop and return, relay restart, stalled child, ordered stop verified, alert 110 limit table |
 | W8 | `osx` process lifetime, lock, registry, `host`, console close | Opus | 12 | SP2, SP3 | G1 to G15 each have a passing Go test (the six without a check today included); kill -9 leaves no child |
-| W9 | `ctlapi`, `nvr ctl`, `APIController` in `camui` | Sonnet | 6 | W7 | camui start, stop, record toggle work against the Go supervisor; 409 test |
+| W9 | `ctlapi`, the full command tree of 2.12 (every command an Action), `APIController`, web handlers calling the same Actions | Sonnet | 10 | W7, W2a | Every row of 2.12 works; the same Action is reachable from CLI and web; 409 test; registry test |
 | W10 | `alerts` and channels (log, webhook, push, desktop, event log or journald) | Sonnet | 6 | W7 | Each channel has a fake-server test; alert ids and dedupe rules table-tested |
 | W11 | `secrets` and the importer for `camera_creds.xml` | Sonnet | 5 | SP5, D12 | No credential on any command line or in any file; leak scan with positive control |
-| W12 | Installers: logon task or service on Windows, systemd user unit, launchd agent; `install --dry-run` | Sonnet | 6 | SP8, W8 | Install and uninstall leave the PowerShell tasks untouched (checked by name and definition hash) |
+| W12 | `holocron install`, `uninstall`, `autostart`: logon task or service on Windows, systemd user unit, launchd agent; `--dry-run` | Sonnet | 6 | SP8, W8 | Everything done by the one executable; install and uninstall leave the PowerShell tasks untouched (checked by name and definition hash) |
 | W13 | Shadow rig and comparison tool (segments, names, sizes, ffprobe durations, audio, gaps) | Sonnet | 5 | W5, W7 | Report on a two-camera shadow under a 40 GB cap |
 | W14 | CI matrix and the Linux pass in WSL | Sonnet | 5 | W2 to W9 | Suite green on Windows and Linux |
 | W15 | Cutover checklist, rollback, documentation, release build per OS | Sonnet | 4 | all | Operator-run rehearsal |
 
-Gates for the Operator: after W0 (contract committed), after W3 (pruner proven), after W7 plus W8 (the system records and stops correctly on this PC in the sandbox), after W13 (shadow report), before W15 (cutover). Estimated total about 110 agent hours, as in the HLD.
+Gates for the Operator: after W0 (contract committed), after W3 (pruner proven), after W7 plus W8 (the system records and stops correctly on this PC in the sandbox), after W13 (shadow report), before W15 (cutover). Estimated total about 120 agent hours (the two hard rules added about 9).
 
 ## 9. Open items from the inventories and where each is settled
 
@@ -216,12 +289,13 @@ Gates for the Operator: after W0 (contract committed), after W3 (pruner proven),
 | IS "no check" guarantees G5, G8, G9, G10, G12, G14 (and G7's survivor kill) | W8 and W9 |
 | Decision F1 and `window-closed` in attached mode | Operator, D19 below |
 
-New decision for the Operator: **D19** Should the Go system reproduce the documented intent where the PowerShell code differs (F1: `LastWindowClose` carried across a restart; V6: no immediate alert 110 for a late-enabled camera)? Recommendation: yes, with each difference listed in the release notes.
+Open decision for the Operator: **D19** Should the Go system reproduce the documented intent where the PowerShell code differs (F1: `LastWindowClose` carried across a restart; V6: no immediate alert 110 for a late-enabled camera)? Recommendation: yes, with each difference listed in the release notes.
 
 ## 10. Definition of done for the OS-independent track
 
+0. Rules R1 and R2 hold: every action in the web app and in this list is a `holocron` subcommand, installing and uninstalling autostart included, and no second executable or script is needed; the action-coverage tests pass.
 1. The Go system records the six cameras for a full retention cycle in shadow with names, boundaries, sizes and audio equal to the PowerShell system, and its pruner has acted only under the ported guards.
 2. G1 to G15 each pass a Go test; kill -9 of the supervisor leaves no child on Windows and Linux; macOS limits are documented.
-3. `status.json` is a published, validated, versioned contract used by `camui`, `nvr ctl` and any third-party reader.
+3. `status.json` is a published, validated, versioned contract used by `camui`, `holocron` and any third-party reader.
 4. Suite green in CI on Windows and Linux; install and uninstall verified to leave the PowerShell system untouched.
 5. The Operator rehearses cutover and rollback once.

@@ -8,6 +8,31 @@ Rules that bind this design (from the Operator): the original `windows-terminal-
 Windows installation stay untouched and working; everything is built beside it in the portable project; nothing is removed;
 no autostart of anything without being asked; feasibility tests only, no stress tests; the portable project never reaches `master`.
 
+## 0. Hard architecture rules (Operator, 2026-10-17)
+
+These bind every task in `os-independent-lld.md`. A change that breaks one is rejected in review.
+
+**R1. One executable, one entry point, one exit point.** The system is a single program, `holocron` (`holocron.exe` on
+Windows), and it is the only thing the Operator ever runs. Everything is a subcommand of it: starting and stopping the
+whole system, configuring it, adding and removing cameras, serving the web app and the stream grid, managing users and
+certificates, reading logs, and installing or uninstalling the autostart (a logon task, a Windows service, a systemd unit
+or a launchd agent). No PowerShell scripts, no second executable and no helper program for any action. In particular:
+- `holocron up` is the one way to start everything (host, supervisor, relay, live relay, web app) and `holocron down` is the
+  one way to stop everything and prove it. The OS autostart entry that `holocron install` creates runs `holocron up` and
+  nothing else.
+- The internal roles (host, supervisor, web server) are hidden subcommands that `holocron` starts as its own child processes.
+  They stay separate processes on purpose (a fault or an attack on the LAN-facing web page must not stop a recording), but
+  the Operator never starts or stops them individually and never sees a second executable.
+- Every action in the web app has the same command on the command line, and both call the same code path.
+- The existing `camui.exe` and the PowerShell scripts remain only as the fallback system (D6) until cutover; the new system
+  has nothing to do with them at run time.
+
+**R2. Logging for every action, at a level the Operator controls.** Every action the system takes is logged with a level
+(ERROR, WARN, INFO, DEBUG, TRACE), a component, an action name, who or what caused it, the target and the outcome. The level
+is set per component, from configuration, from an environment variable or at run time with `holocron log level`, without a
+restart. A test fails if any command, control-API handler or web handler can run without logging its start and its result
+(`LLD 2.13`). Enabling DEBUG or TRACE never exposes a secret: redaction sits in the logging handler, below every level.
+
 ## 1. What "OS independent" means here
 
 One Go codebase that records, supervises and serves the cameras on Windows, Linux and macOS, with the same observable
@@ -45,26 +70,26 @@ Non-goals: object detection or motion recording (todo [16]), cloud features, mul
 ## 3. Architecture
 
 ```
-                         +--------------------------- one binary, three roles ---------------------------+
-                         |                                                                                |
-  service manager  --->  |  nvr host      (tiny)  restarts the supervisor in place, budget 5 per 30 min,  |
-  (Task / systemd /      |                         classifies stops, raises alerts 100/101/102/103        |
-   launchd) or a         |     |                                                                          |
-  terminal (attached)    |     +-- nvr supervisor   reconciles cameras.json every 5 s, owns the children, |
-                         |            |             prunes, writes status.json, serves the control API    |
-                         |            +-- ffmpeg x N         one per recording camera (segment muxer)     |
-                         |            +-- mediamtx (relay)   serves the cameras once; recorders read it   |
-                         |            +-- mediamtx (live)    WebRTC for the browser, login-protected      |
-                         |                                                                                |
-                         |  nvr web  (camui, existing)   separate process: login page, Live, Footage,     |
-                         |            reads status.json, talks to the supervisor ONLY through the control |
-                         |            API, never starts or kills anything itself                          |
-                         |                                                                                |
-                         |  nvr ctl  (CLI)               short-lived: status, start, stop, enable, install |
-                         +--------------------------------------------------------------------------------+
+   The Operator runs only:  holocron <command>             (up, down, status, cam, config, install, ...)
+
+                +-------------------------------- one executable: holocron --------------------------------+
+                |                                                                                          |
+  autostart --> |  holocron up  (host role)   restarts the supervisor in place, budget 5 per 30 min,       |
+  (task/unit)   |     |                       classifies stops, raises alerts 100/101/102/103              |
+  or a terminal |     +-- supervisor role     reconciles cameras.json every 5 s, owns the children, prunes, |
+                |     |    |                  writes status.json, serves the control API                  |
+                |     |    +-- ffmpeg x N         one per recording camera (segment muxer)                |
+                |     |    +-- mediamtx (relay)   serves the cameras once; recorders read it              |
+                |     |    +-- mediamtx (live)    WebRTC for the browser, behind the login page           |
+                |     +-- web role            login page, Live grid, Footage, Settings; reads status.json,  |
+                |                             changes things only through the control API                |
+                |                                                                                          |
+                |  holocron <command>  (short-lived)   cam add|remove|set, config, user, tls, log level,   |
+                |                                      install|uninstall, logs, doctor, down, status ...   |
+                +------------------------------------------------------------------------------------------+
 
   state on disk:  <archive>/<camera>/*.mkv   <archive>/_state/status.json + control files   <archive>/_logs
-                  config: cameras.json, nvr.config.json   secrets: OS keyring or encrypted file   auth: users.json, sessions.json
+                  config: cameras.json, holocron.config.json   secrets: OS keyring or encrypted file   auth: users.json, sessions.json
 ```
 
 Why this shape:
@@ -74,8 +99,8 @@ Why this shape:
   and does not depend on each OS service manager's restart rules. The OS service manager only has to keep the host alive.
 - **The web app stays a separate process.** A bug or an attack on the LAN-facing page must not be able to stop a recording.
   It stays stateless: it reads `status.json`, and it changes things only through the supervisor's control API.
-- **One binary, three roles** (`nvr host|supervisor|web|ctl`): one artifact per OS to install and sign; the roles still run
-  as separate processes.
+- **One executable, hidden roles** (rule R1): `holocron` starts its own host, supervisor and web processes; they are internal
+  subcommands, not things the Operator runs. One artifact per OS to install and sign.
 - **Single writer for `status.json`.** The supervisor is the only writer. The three read-modify-write patchers of today (the
   window-close patch, the host's `unexpected` patch, the record toggle) become control-API calls or are written by the
   supervisor itself. This removes a class of races that PowerShell had to defend with retries and mutexes.
@@ -95,6 +120,8 @@ Why this shape:
 | `osx` | Everything that differs per OS, behind build tags (section 5) | job objects, wardens, Windows Terminal, `schtasks` |
 | `ctlapi` | Local control endpoint for stop, record toggle, reload, live state | `cam.ps1`/`cam.recorder.ps1` switches called by `camui` |
 | `web` | The existing `camui` plus login, TLS, Live, Footage | unchanged in spirit |
+| `cli` | The whole command surface of rule R1 (`up`, `down`, `status`, `cam`, `config`, `user`, `tls`, `install`, `logs`, ...), each command a thin call into the same code the web app uses | `cam.ps1`, `cam.recorder.ps1`, `camui` flags |
+| `logx` | Levelled, structured, per-component logging with run-time level changes, redaction in the handler and an action contract (rule R2) | `Write-CamLog` |
 
 ## 4. Technology choices
 
@@ -112,7 +139,7 @@ needs the Operator's approval (decision D14). `camui` has zero dependencies toda
 | Secrets | `secrets.Provider` with backends: OS keyring (`go-keyring` evaluated; `99designs/keyring` is reported abandoned), AES-256-GCM encrypted file with a key from an environment variable or an owner-only key file (headless Linux), plain environment (containers) | DPAPI file only (Windows-bound), plaintext file (rejected) |
 | Alerts | Channel interface; first channels: log, webhook, ntfy-style HTTP push, desktop notification (Windows toast through the existing mechanism, `notify-send`, `osascript`), Windows event log and journald where present | Embedding a notification framework (`shoutrrr`) is possible later; webhook plus ntfy covers a phone with no dependency |
 | Config | JSON with a JSON Schema, same keys and defaults as today (inventory A section 4 lists keep and drop) | TOML or YAML (no benefit; the web app edits JSON) |
-| Logging | `log/slog` plus an in-house rotating writer that cannot fail the caller (rotation at max size, one `.1` generation, once-per-episode notices, redaction of every line) | A logging library (the never-throw rules are specific) |
+| Logging | `log/slog` with levels ERROR, WARN, INFO, DEBUG and a TRACE level below DEBUG, per-component levels, run-time level change, structured fields (action, actor, target, result, duration, action id), an in-house rotating writer that cannot fail the caller (rotation at max size, one `.1` generation, once-per-episode notices), and redaction in the handler | A logging library (the never-throw and action-contract rules are specific) |
 | Time | UTC for all stored and compared instants, monotonic for intervals, `%z` offsets in file names and persisted timestamps; the DST table from the PowerShell tests is ported as a test | Local-time arithmetic (the source of the DST defects fixed on 2026-10-15) |
 | Filesystem | `os` plus per-OS free-space calls (`x/sys` or `syscall`); "the open segment" is defined by name and recency, not creation time (section 6) | NTFS creation time (Linux does not guarantee it) |
 | Passwords (web login) | PBKDF2-HMAC-SHA256, 600,000 iterations, standard library; self-describing hash for a later move to Argon2id | Argon2id now (the stronger algorithm, but the first dependency) |
@@ -186,20 +213,34 @@ the practical target is the change on 28 Mar 2027, with the DST table test and a
 | Behaviour drift during the rewrite | The inventories are the specification; every conformance item cites its source line; unknowns become spikes |
 | Operator workload | Phases end at gates with a short demo; agents run feasibility checks only |
 
-## 9. Decisions needed from the Operator
+## 9. Decisions
 
-| # | Decision | Recommendation |
+Decided by the Operator on 2026-10-17 (D7 to D18 "ok" as recommended; D2 and D5 explained below).
+
+| # | Decision | Outcome |
 |---|---|---|
-| D2 | Name of the new system and the binary (`nvr` is a working name) | Choose before Phase 2 |
-| D5 | Shadow window | Target 28 Mar 2027 for a clock-change observation; start Phase 2 as soon as Phase 1 is green |
-| D7 | Background mode on Windows | Default logon task, optional service; attached mode kept for "close the window to stop" |
+| D2 | Name | **Holocron** (executable `holocron`). A Jedi holocron is a device that stores recorded information and plays it back, which is what an NVR archive is. See the note below on the trademark |
+| D5 | Shadow window | **7 days of shadow recording on two cameras**, then the cutover decision. Explained below |
+| D7 | Background mode on Windows | Default logon task, optional service; attached mode kept for "close the window to stop". All installed and removed by `holocron install` and `holocron uninstall` |
 | D12 | Camera secret store | Interface with keyring and encrypted-file backends; recorders read only through the relay |
-| D13 | One binary with roles, or separate executables | One binary |
-| D14 | Third-party dependencies | Approve at most `golang.org/x/sys`, one service-install library and one keyring library, each pinned and reviewed; everything else stays standard library |
-| D15 | macOS | Best effort, tested in CI only if it is free; Windows and Linux are first-class |
-| D16 | Where the new repository lives and when | At the end, as already decided (D1) |
-| D17 | Should the Go system manage both MediaMTX instances | Yes |
-| D18 | Archive layout and file names | Unchanged, so the two systems can share footage |
+| D13 | One binary with roles | One executable (now rule R1) |
+| D14 | Third-party dependencies | At most `golang.org/x/sys`, one service-install library and one keyring library, each pinned and reviewed; everything else standard library |
+| D15 | macOS | Best effort; Windows and Linux are first-class |
+| D16 | New repository | At the end (D1) |
+| D17 | The Go system manages both MediaMTX instances | Yes |
+| D18 | Archive layout and file names | Unchanged, so both systems can share footage |
+| D19 | Reproduce documented intent where the PowerShell code differs (`LastWindowClose` carried across a restart; no immediate alert 110 for a late-enabled camera) | Recommended yes. Still to be confirmed |
+
+**What D5 is.** Before the Operator trusts the new recorder with the real footage, it runs next to the old one for a while:
+it reads the same relay (so the cameras see no extra connection), writes its own copy into a separate folder under a small
+size cap, and a comparison tool checks that its files have the same names, boundaries, sizes, durations and audio as the
+old system's, with no gaps. D5 is how long that comparison runs. Seven days covers a full week of different conditions
+(about three and a half of today's retention cycles, since the disk holds roughly two days) and exercises the new
+pruner under its cap. The next clock change, 28 Mar 2027, cannot be waited for; it is covered by the ported DST test table
+and then observed in production with the PowerShell system still installable as the fallback.
+
+**Name note.** Star Wars names are trademarks of Lucasfilm. "Holocron" is a common word in many open-source projects and is
+fine for a personal system or a public repository; if the project were ever sold as a product, it should be renamed.
 
 ## 10. How long, honestly
 

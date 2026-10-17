@@ -51,6 +51,8 @@ Operator's own action or decision.
 
 ## Open: fully OS independent (see plan.md, section A; designs: `os-independent-hld.md`, `os-independent-lld.md`; specification: `spec/`)
 
+**Hard rules (Operator, 2026-10-17):** R1 one executable, `holocron`, for every action including install and uninstall, no scripts and no second executable; R2 every action logged at a level controllable per component and at run time. Decisions D2 to D18 are settled (HLD section 9); D19 is open.
+
 - [ ] **P40** (OS9) Write `status.json` down as a versioned schema and test the PowerShell recorder against it. Prerequisite of Stage 4.
 - [ ] **P41** (OS3, OS4, D12) Portable camera-secret design; recorder reads only through the relay. (Op decision)
 - [ ] **P42** Stage 4: Go recorder in shadow mode beside the PowerShell one; prune rules, naming and `status.json` unchanged; Go tests on
@@ -60,7 +62,7 @@ Operator's own action or decision.
 - [ ] **P45** (OS6) Install and autostart per OS: systemd, launchd, Windows service or task.
 - [ ] **P46** (OS8) `camui` control backend interface so it no longer needs `powershell.exe` and `schtasks.exe`; default archive root from config.
 - [ ] **P47** (OS7) The web app carries the health strip's information; mpv becomes optional and Windows-only.
-- [ ] **P48** (OS11, OS12, D1, D2, D11) Own repository, name, CI matrix, release builds. At the end.
+- [ ] **P48** (OS11, OS12, D1, D11) Own repository (name: Holocron), CI matrix, release builds. At the end.
 
 ## Planned, not built: the stray-process guard (specification for P43)
 

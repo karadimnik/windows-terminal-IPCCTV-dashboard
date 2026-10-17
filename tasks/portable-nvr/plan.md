@@ -462,12 +462,12 @@ portability before remote access; the order above follows what he asked for.
 | # | Decision | Recommendation |
 |---|---|---|
 | D1 | Where the new code lives | **DECIDED by the Operator:** on the branch `portable-nvr`, started from master, never merged into master, moved to its own repository when finished. |
-| D2 | Name of the new system | He chooses; none is needed before Stage 4. |
+| D2 | Name of the new system | **DECIDED 2026-10-17: Holocron** (executable `holocron`). |
 | D3 | Tile policy | **CONFIRMED by Stage 0 and Spike C:** sub-stream (`stream2`) in the grid, main stream on focus; every camera has a usable sub-stream. |
 | D4 | Order of Stages 2-5 | As listed; portability before the LAN is possible. |
-| D5 | Shadow-run length for Stage 4 | At least one full retention cycle. REVISED 2026-10-17: the 25 Oct 2026 clock change is 8 days away and no Go recorder exists, so the run cannot span it; the next change is 28 Mar 2027. |
+| D5 | Shadow-run length for Stage 4 | **DECIDED 2026-10-17: 7 days** of shadow recording on two cameras, then the cutover decision; the 28 Mar 2027 clock change is covered by the ported DST test table and observed in production with the PowerShell system as fallback. |
 | D6 | Keep the PowerShell recorder as a permanent fallback | Yes: it costs nothing and follows "nothing is removed". |
-| D7 | Autostart in attached or service mode (Stage 5) | Support both; the Operator picks the default at install. Attached keeps today's behaviour (a visible window you close to stop); service is headless and UI-controlled. |
+| D7 | Autostart in attached or service mode (Stage 5). **ACCEPTED 2026-10-17** (logon task default, optional service; all done by `holocron install`) | Support both; the Operator picks the default at install. Attached keeps today's behaviour (a visible window you close to stop); service is headless and UI-controlled. |
 | D8 | May a LAN device with the token see camera addresses (`/api/cameras`)? | Hide the address fields in view-only mode. Unanswered. |
 | D9 | Control (start, stop, settings) from the LAN | Stay view-only until a separate control credential exists (L5). Unanswered. |
 | D10 | When does the portable build become the installed system (L1)? | After the full harness runs clean once; the original stays installable. Unanswered. |
