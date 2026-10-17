@@ -7548,6 +7548,166 @@ function Invoke-CamCheckLivePage {
                 if ($n -ne 6 -or $liveN -ne 6) { & $fail "${browser}: stream2 had $n and the live instance $liveN sessions with six viewers, wanted 6 and 6" }
                 $base0 = $s
 
+                # ---- Fit / Fill: the toggle only changes the layout ----
+                $geomJs = @'
+(() => {
+  const g = document.getElementById('lgrid').getBoundingClientRect();
+  const lm = document.getElementById('lmsub'), lmain = document.getElementById('lmmain');
+  const tiles = Array.from(document.querySelectorAll('#lgrid .ltile')).map((t) => {
+    const r = t.getBoundingClientRect(), v = t.querySelector('video');
+    const inside = (e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.left >= r.left - 0.5 && b.right <= r.right + 0.5 && b.top >= r.top - 0.5 && b.bottom <= r.bottom + 0.5; };
+    return { x: r.x, y: r.y + scrollY, w: r.width, h: r.height, vw: v.videoWidth, vh: v.videoHeight, objectFit: getComputedStyle(v).objectFit,
+      overlays: ['.lname', '.lchip', '.lmute'].every((s) => inside(t.querySelector(s))) };
+  });
+  return { gridTop: g.top + scrollY, gridClass: document.getElementById('lgrid').className, tiles,
+    fitPressed: document.getElementById('lfit').getAttribute('aria-pressed'), fillPressed: document.getElementById('lfill').getAttribute('aria-pressed'),
+    stored: localStorage.getItem('camui.live.fit'), modalFit: [getComputedStyle(lm).objectFit, getComputedStyle(lmain).objectFit], diag: window.__liveProbe().mode };
+})()
+'@
+                $measureFF = {
+                    param($S)
+                    $G = & $js $geomJs
+                    $t = @($G.tiles)
+                    $minX = ($t | ForEach-Object { $_.x } | Measure-Object -Minimum).Minimum; $maxX = ($t | ForEach-Object { $_.x + $_.w } | Measure-Object -Maximum).Maximum
+                    $minY = ($t | ForEach-Object { $_.y } | Measure-Object -Minimum).Minimum; $maxY = ($t | ForEach-Object { $_.y + $_.h } | Measure-Object -Maximum).Maximum
+                    $crops = @($t | Where-Object { $_.vw -gt 0 -and $_.vh -gt 0 } | ForEach-Object { $k = [math]::Max($_.w / $_.vw, $_.h / $_.vh); 1 - ($_.w * $_.h) / (($_.vw * $k) * ($_.vh * $k)) })
+                    [pscustomobject]@{
+                        G = $G; BoxW = $maxX - $minX; BoxH = $maxY - $minY; WShare = ($maxX - $minX) / $S.innerWidth; HShare = ($maxY - $minY) / ($S.innerHeight - $G.gridTop)
+                        Scrolls = ($S.scrollHeight -gt $S.innerHeight + 1); SideScroll = ($S.scrollWidth -gt $S.clientWidth)
+                        CropMin = $(if ($crops.Count) { ($crops | Measure-Object -Minimum).Minimum } else { 0 }); CropMax = $(if ($crops.Count) { ($crops | Measure-Object -Maximum).Maximum } else { 0 })
+                        AllCover = (@($t | Where-Object { $_.objectFit -ne 'cover' }).Count -eq 0); AllContain = (@($t | Where-Object { $_.objectFit -ne 'contain' }).Count -eq 0)
+                        Overlays = (@($t | Where-Object { -not $_.overlays }).Count -eq 0)
+                    }
+                }
+                $modeIs = {
+                    param([string]$Mode, [int]$W, [int]$H)
+                    $s2 = & $until { param($s) $s.mode -eq $Mode -and $s.fit -and $s.fit.mode -eq $Mode -and $s.fit.vw -eq $W -and $s.fit.vh -eq $H } 8
+                    Start-Sleep -Milliseconds 700      # a scrollbar that appears or goes narrows the grid and the page re-fits (debounced)
+                    if ($s2) { return (& $stats) }
+                    return $null
+                }
+                $ffCounts = { $f = & $fxState; [pscustomobject]@{ Posts = @($f.posts).Count; Deletes = $f.deletes; Live = (& $sessions); Readers = (& $readers) } }
+
+                # 0. default: Fit, nothing stored, rectangles are today's
+                & $viewport 1920 1080
+                $s = & $modeIs 'fit' 1920 1080
+                if (-not $s) { $s = & $stats; & $fail "$browser fit/fill: the page did not settle in Fit at 1920x1080" }
+                $m0 = & $measureFF $s
+                $rects0 = & $rectsOf $s
+                $d0 = @($s.tiles)[0].diag.line
+                & $note ("  FIT/FILL default (fresh profile): mode {0}, #lfit pressed {1}, localStorage '{2}'; Fit rectangles {3}; page scrolls {4}; diagnostics line has 'fit={0}': {5}" -f $s.mode, $m0.G.fitPressed, $m0.G.stored, $rects0, $m0.Scrolls, ($d0 -match ' fit=fit '))
+                if ($s.mode -ne 'fit' -or $m0.G.fitPressed -ne 'true' -or $m0.G.fillPressed -ne 'false' -or $m0.G.stored) { & $fail "${browser}: the default is not Fit with nothing stored" }
+                if (@(@($s.tiles) | Where-Object { $_.rect.w -ne 633 -or $_.rect.h -ne 356 }).Count -or $s.columns -ne 3 -or $m0.Scrolls -or -not $m0.AllContain) { & $fail "${browser}: Fit is not today's 3x2 of 633x356 with object-fit contain ($rects0)" }
+                if ($d0 -notmatch ' fit=fit ') { & $fail "${browser}: the tile diagnostics line lacks fit=fit" }
+                $c0 = & $ffCounts
+                $fr0 = & $frames $s
+
+                # 1. Fill at 1920x1080: the cells divide the whole area
+                & $clickAt (& $center '#lfill')
+                $sf = & $modeIs 'fill' 1920 1080
+                if (-not $sf) { $sf = & $stats; & $fail "${browser}: clicking Fill did not switch the layout" }
+                $mf = & $measureFF $sf
+                $hb = [int](& $js 'Math.round(document.querySelector(''.top'').getBoundingClientRect().bottom)')
+                $shotFill = & $shot "$browser-fill-1920x1080" $sf
+                $c1 = & $ffCounts
+                $fr1 = & $frames $sf
+                Start-Sleep -Milliseconds 1500
+                $fr2 = & $frames (& $stats)
+                $moved = (0..5 | Where-Object { $fr2[$_] -gt $fr1[$_] }).Count
+                $dF = @($sf.tiles)[0].diag.line
+                & $note ("  FILL 1920x1080: fit {0}x{1} cells {2}x{3}; rects {4}" -f $sf.fit.cols, $sf.fit.rows, $sf.fit.w, $sf.fit.h, (& $rectsOf $sf))
+                & $note ("    tile boxes span {0}x{1}: {2:p1} of the window width, {3:p1} of the grid area (window height {4} minus the grid top {5}); {6:p1} of the whole window below the header; page scrolls {7}; object-fit cover on all tiles {8}; name/chip/Unmute inside every tile {9}" -f `
+                    $mf.BoxW, $mf.BoxH, $mf.WShare, $mf.HShare, $sf.innerHeight, $mf.G.gridTop, ($mf.BoxH / ($sf.innerHeight - $hb)), $mf.Scrolls, $mf.AllCover, $mf.Overlays)
+                & $note ("    picture cropped {0:p1} to {1:p1} per tile (videoWidth x videoHeight vs the tile box, object-fit cover): {2}" -f $mf.CropMin, $mf.CropMax, ((@($mf.G.tiles) | ForEach-Object { '{0}x{1} in {2}x{3}' -f $_.vw, $_.vh, [int]$_.w, [int]$_.h }) -join ' | '))
+                & $note ("    toggle Fit -> Fill: POSTs {0} -> {1}, DELETEs {2} -> {3}, live-instance sessions {4} -> {5}, stream2 readers {6} -> {7}; tiles still decoding after the toggle: {8} of 6; pixels: {9}; stored '{10}'; diagnostics line has 'fit=fill': {11}" -f `
+                    $c0.Posts, $c1.Posts, $c0.Deletes, $c1.Deletes, $c0.Live, $c1.Live, $c0.Readers, $c1.Readers, $moved, ((@($shotFill.Pixels) | ForEach-Object { 'lit {0} %' -f [int](100 * $_.LitShare) }) -join ' '), $mf.G.stored, ($dF -match ' fit=fill '))
+                if ($sf.fit.cols -ne 3 -or $sf.columns -ne 3 -or $sf.fit.rows -ne 2) { & $fail "${browser}: Fill at 1920x1080 is not 3x2" }
+                if ($mf.WShare -lt 0.98 -or $mf.HShare -lt 0.98) { & $fail ("${browser}: Fill covers only {0:p1} of the width and {1:p1} of the grid height" -f $mf.WShare, $mf.HShare) }
+                if ($mf.Scrolls -or $mf.SideScroll) { & $fail "${browser}: the page scrolls in Fill" }
+                if (-not $mf.AllCover -or -not $mf.Overlays) { & $fail "${browser}: Fill tiles are not object-fit cover with the overlays inside" }
+                if ($c1.Posts -ne $c0.Posts -or $c1.Deletes -ne $c0.Deletes -or $c1.Live -ne 6 -or $c1.Readers -ne 6) { & $fail "${browser}: toggling to Fill changed the connections" }
+                if ($moved -ne 6 -or -not (& $playing $sf)) { & $fail "${browser}: not all six tiles keep playing in Fill ($moved moved)" }
+                if (@($shotFill.Pixels | Where-Object { $_.LitShare -lt 0.5 -or $_.Colours -lt 4 }).Count) { & $fail "${browser}: a Fill tile rendered black or flat" }
+                if ($mf.G.stored -ne 'fill' -or $dF -notmatch ' fit=fill ') { & $fail "${browser}: Fill is not stored or not in the diagnostics line" }
+
+                # 2. back to Fit: the very same rectangles, again no connection change
+                & $clickAt (& $center '#lfit')
+                $sb = & $modeIs 'fit' 1920 1080
+                if (-not $sb) { $sb = & $stats; & $fail "${browser}: clicking Fit did not switch back" }
+                $mb = & $measureFF $sb
+                $rectsB = & $rectsOf $sb
+                $c2 = & $ffCounts
+                & $note ("  FIT again after Fill: rects identical to the first Fit: {0}; object-fit contain {1}; POSTs {2}, DELETEs {3}, sessions {4}; stored '{5}'" -f ($rectsB -eq $rects0), $mb.AllContain, $c2.Posts, $c2.Deletes, $c2.Live, $mb.G.stored)
+                if ($rectsB -ne $rects0 -or -not $mb.AllContain) { & $fail "${browser}: Fit after Fill is not the first Fit ($rectsB vs $rects0)" }
+                if ($c2.Posts -ne $c0.Posts -or $c2.Deletes -ne $c0.Deletes -or $c2.Live -ne 6) { & $fail "${browser}: toggling back to Fit changed the connections" }
+                if ($mb.G.stored -ne 'fit') { & $fail "${browser}: Fit is not stored" }
+
+                # 3. Fill survives a reload (this browser's own localStorage)
+                & $clickAt (& $center '#lfill')
+                [void](& $modeIs 'fill' 1920 1080)
+                & $navigate "$base/#live"
+                $sr = & $until { param($s) $s.mode -eq 'fill' -and $s.fit -and $s.fit.mode -eq 'fill' -and (& $playing $s) } 40
+                if (-not $sr) { $sr = & $stats; & $fail "${browser}: after a reload the page is not in Fill with six playing tiles" }
+                else { Start-Sleep -Milliseconds 700; $sr = & $stats }
+                $mr = & $measureFF $sr
+                & $note ("  FILL after a reload: mode {0}, #lfill pressed {1}, 3x2 {2}, boxes {3:p1} x {4:p1}" -f $sr.mode, $mr.G.fillPressed, ($sr.fit.cols -eq 3 -and $sr.fit.rows -eq 2), $mr.WShare, $mr.HShare)
+                if ($sr.mode -ne 'fill' -or $mr.G.fillPressed -ne 'true' -or $mr.HShare -lt 0.98 -or $mr.WShare -lt 0.98) { & $fail "${browser}: Fill did not survive a reload" }
+                $sessionsReload = & $sessionsIs 6 40
+                if ($sessionsReload -ne 6) { & $fail "${browser}: $sessionsReload sessions after the reload, wanted 6" }
+                & $note ("  instrumentation after the reload: " + (& $js $instrument))
+
+                # 4. the modal is not affected: contain, the tile's picture at once
+                [void](& $reset)
+                & $clickAt (& $center (& $tileSel 'Cam 1') 0.4)
+                Start-Sleep -Milliseconds 600
+                $fxm = & $fxState
+                $two = @($fxm.probes | Where-Object { $_.label -eq '2raf' })[0]
+                $mm2 = & $measureFF (& $stats)
+                & $note ("  FILL modal: object-fit {0} (sub) / {1} (main); after 2 animation frames open {2}, sub picture attached {3}, new session at that moment {4}" -f $mm2.G.modalFit[0], $mm2.G.modalFit[1], $(if ($two) { $two.open } else { '?' }), $(if ($two) { $two.subHas } else { '?' }), $(if ($two) { $two.session } else { '?' }))
+                if ($mm2.G.modalFit[0] -ne 'contain' -or $mm2.G.modalFit[1] -ne 'contain') { & $fail "${browser}: the modal pictures are not object-fit contain in Fill" }
+                if (-not $two -or -not $two.open -or -not $two.subHas -or $two.session) { & $fail "${browser}: in Fill the modal did not open instantly on the tile's picture" }
+                & $esc
+                [void](& $closedIs)
+                [void](& $sessionsIs 6 12)
+
+                # 5. fullscreen in Fill: the grid takes the whole screen
+                $fs0 = (& $fxState).fs
+                & $clickAt (& $center '#lfs')
+                Start-Sleep -Milliseconds 1200
+                $sfs = & $stats
+                $fxs = & $fxState
+                $mfs = & $measureFF $sfs
+                & $note ("  FILL fullscreen: requestFullscreen calls {0}, fullscreenElement '{1}', window {2}x{3}; fit {4}x{5} cells {6}x{7}; tile boxes {8:p1} of the width and {9:p1} of the height (grid top {10}); page scrolls {11}; Fit/Fill buttons still shown {12}" -f `
+                    ($fxs.fs - $fs0), $sfs.fullscreen, $sfs.innerWidth, $sfs.innerHeight, $sfs.fit.cols, $sfs.fit.rows, $sfs.fit.w, $sfs.fit.h, $mfs.WShare, ($mfs.BoxH / $sfs.innerHeight), $mfs.G.gridTop, $mfs.Scrolls, (& $js '!!document.getElementById(''lfill'').offsetParent'))
+                if (($fxs.fs - $fs0) -ne 1 -or $sfs.fullscreen -ne 'lwrap') { & $fail "${browser}: fullscreen did not start in Fill" }
+                if ($mfs.WShare -lt 0.98 -or ($mfs.BoxH / $sfs.innerHeight) -lt 0.98 -or $mfs.Scrolls) { & $fail ("${browser}: in fullscreen Fill the tiles cover {0:p1} x {1:p1} of the screen" -f $mfs.WShare, ($mfs.BoxH / $sfs.innerHeight)) }
+                [void](& $js 'document.fullscreenElement ? document.exitFullscreen() : 0')
+                [void](& $modeIs 'fill' 1920 1080)
+
+                # 6. other sizes in Fill
+                foreach ($case in @(@(800, 1000, 'tablet-800x1000'), @(390, 844, 'phone-390x844'))) {
+                    & $viewport $case[0] $case[1]
+                    $sz = & $modeIs 'fill' $case[0] $case[1]
+                    if (-not $sz) { $sz = & $stats; & $fail "$browser Fill $($case[2]): the page never re-fitted" }
+                    $mz = & $measureFF $sz
+                    $gridW = $sz.grid.w
+                    & $note ("  FILL {0}: fit {1}x{2} cells {3}x{4} scroll {5}; rects {6}; boxes {7:p1} of the width, {8:p1} of the grid height; page scrolls {9}; object-fit {10}; crop {11:p1} to {12:p1}; grid class '{13}'" -f $case[2], $sz.fit.cols, $sz.fit.rows, $sz.fit.w, $sz.fit.h, $sz.fit.scroll, (& $rectsOf $sz), $mz.WShare, $mz.HShare, $mz.Scrolls, @($mz.G.tiles)[0].objectFit, $mz.CropMin, $mz.CropMax, $mz.G.gridClass)
+                    if ($case[0] -eq 800) {
+                        if ($sz.columns -ne 2 -or $sz.fit.rows -ne 3 -or $mz.Scrolls -or $mz.HShare -lt 0.98 -or $mz.WShare -lt 0.98 -or -not $mz.AllCover) { & $fail "$browser Fill 800x1000: $($sz.columns) columns, scrolls $($mz.Scrolls), covers $($mz.WShare)/$($mz.HShare)" }
+                    }
+                    else {
+                        # six stacked tiles would each be under 180 px tall: the 16:9 one-column scroll layout of Fit, nothing cropped
+                        if ($sz.columns -ne 1 -or -not $sz.fit.scroll -or -not $mz.Scrolls -or -not $mz.AllContain -or @(@($sz.tiles) | Where-Object { $_.rect.w -ne $gridW -or [math]::Abs($_.rect.h - $gridW * 9 / 16) -gt 1 }).Count) { & $fail "$browser Fill phone: not one 16:9 full-width scrolling column ($(& $rectsOf $sz))" }
+                    }
+                }
+                & $viewport 1920 1080
+
+                # leave the profile's choice at the default
+                & $clickAt (& $center '#lfit')
+                $sl = & $modeIs 'fit' 1920 1080
+                if (-not $sl -or (& $rectsOf $sl) -ne $rects0) { & $fail "${browser}: Fit after the Fill checks is not the first Fit" }
+                if ($env:CAMTEST_LIVEPAGE_ONLY -eq 'fitfill') { & $note "  CAMTEST_LIVEPAGE_ONLY=fitfill: stopping after the Fit/Fill block"; continue }
+
                 # bestGrid itself, in the page: the cases the node test also covers
                 $table = & $js '[[1908,976,6],[2548,1336,6],[788,900,6],[378,760,6],[832,330,6],[1900,900,1],[1600,300,6]].map(([w,h,n]) => { const g = window.__liveBestGrid(w,h,n,300,4); return `${w}x${h} n=${n} -> ${g.cols}x${g.rows} tile ${g.tile}${g.scroll ? " scroll" : ""}`; }).join("; ")'
                 & $note ("  bestGrid(width, height, n, 300, 4): " + $table)
@@ -7893,6 +8053,8 @@ function Invoke-CamCheckLivePage {
         & $note ("live view off: POST whep -> HTTP {0} {1}; GET /api/live enabled={2} cameras={3}; GET /api/status -> HTTP {4}" -f $off.Code, $off.Body.Trim(), $offList.enabled, @($offList.cameras).Count, $offStatus.Code)
         if ($off.Code -ne 503 -or $off.Body -notmatch 'live view is off' -or $offList.enabled -or $offStatus.Code -ne 200) { & $fail 'with live view off the proxy did not answer 503 or the rest of the API changed' }
 
+        # CAMTEST_LIVEPAGE_ONLY=fitfill (a short rehearsal): the Fit / Fill block only, no foreign-page browsers.
+        if ($env:CAMTEST_LIVEPAGE_ONLY -ne 'fitfill') {
         # ---- a foreign page, and requests with the headers a browser would send for one ----
         $before = & $sessionCount
         $evilTarget = "camui=http://127.0.0.1:18789/api/live/Cam%201{whep}?stream=sub"
@@ -7954,6 +8116,7 @@ function Invoke-CamCheckLivePage {
             & $note ("  DELETE of the positive control's session -> HTTP {0}" -f $del.Status)
             if ($del.Status -ne 204) { & $fail 'DELETE of a minted session was not 204' }
         } else { & $fail "the answer carried no minted Location ($location)" }
+        }
     }
     catch { & $fail ('check aborted: ' + $_.Exception.Message) }
     finally {

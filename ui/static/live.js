@@ -12,7 +12,8 @@
 //     opens a MODAL for that camera: it shows the tile's own MediaStream at
 //     once and, in a second video, the main stream as soon as that has decoded
 //     a frame. One main session exists at most, owned by the modal.
-//   - The grid fills the window (bestGrid) and can go fullscreen.
+//   - The grid fills the window (bestGrid; or, in Fill mode, bestGridFill: the cells divide the whole area and the picture is
+//     cropped to them) and can go fullscreen.
 //   - Audio is muted until the Operator unmutes that tile (or the modal).
 //   - Every connection is closed while the page is hidden or another tab is
 //     showing: a hidden tab keeps decoding at a reduced rate, which costs CPU
@@ -44,6 +45,37 @@ function bestGrid(width, height, n, minTileWidth = 300, gap = 0) {
   return { cols: best.cols, rows: best.rows, tile: Math.floor(best.tile), scroll: false };
 }
 // bestGrid>
+
+// <bestGridFill
+// Fill mode: the cells divide the whole width x height (CSS px, `gap` between cells) and the 16:9 picture is cropped to the cell
+// (object-fit: cover). For every column count whose cell is at least minTileWidth wide and minTileHeight tall, the crop fraction
+// is 1 - min(a, 16/9) / max(a, 16/9) for the cell aspect a; the smallest wins, a tie goes to fewer columns. When no column count
+// qualifies the answer is bestGrid's fallback (one column of 16:9 tiles, the page scrolls) and nothing is cropped.
+function bestGridFill(width, height, n, minTileWidth = 300, gap = 0, minTileHeight = 180) {
+  const wide = 16 / 9;
+  if (!(n > 0) || !(width > 0) || !(height > 0)) return { cols: 1, rows: Math.max(n, 0), w: Math.max(Math.floor(width) || 0, 0), h: 0, crop: 0, scroll: false };
+  let best = null;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const w = (width - gap * (cols - 1)) / cols;
+    const h = (height - gap * (rows - 1)) / rows;
+    if (w < minTileWidth || h < minTileHeight) continue;
+    const a = w / h;
+    const crop = 1 - Math.min(a, wide) / Math.max(a, wide);
+    if (!best || crop < best.crop - 1e-9) best = { cols, rows, w, h, crop };
+  }
+  if (!best) {
+    const w = Math.floor(Math.min(width, height * wide));
+    return { cols: 1, rows: n, w, h: Math.round(w / wide), crop: 0, scroll: true };
+  }
+  return { cols: best.cols, rows: best.rows, w: Math.floor(best.w), h: Math.floor(best.h), crop: best.crop, scroll: false };
+}
+// bestGridFill>
+
+const FIT_KEY = "camui.live.fit";
+function savedMode() {
+  try { return localStorage.getItem(FIT_KEY) === "fill" ? "fill" : "fit"; } catch (err) { return "fit"; }   // storage may be blocked
+}
 
 const Live = (() => {
   const GATHER_MS = 2000;                        // non-trickle: wait this long for candidates, at most
@@ -87,7 +119,8 @@ const Live = (() => {
     lastTick: Date.now(),
     ticking: false,
     tune: { grace: null, mode: "keep", stallMs: STALL_MS, offMs: OFFSCREEN_GRACE_MS },   // grace/mode are test hooks (window.__liveTune); mode is chosen in docs/ui.md
-    fit: null,           // the last bestGrid answer applied to the grid
+    fit: null,           // the last bestGrid / bestGridFill answer applied to the grid
+    mode: savedMode(),   // "fit" (whole picture, 16:9 tiles) or "fill" (cells divide the area, picture cropped); localStorage camui.live.fit
     fitTimer: null,
   };
 
@@ -173,7 +206,7 @@ const Live = (() => {
       "gather=" + diag.gather + (diag.gatherMs === null ? "" : "(" + diag.gatherMs + "ms)"), ...ms("post", diag.postMs),
       "ice=" + diag.ice, "conn=" + diag.conn, ...ms("connected", diag.connMs), ...ms("frame", diag.frameMs), ...ms("hd", diag.hdMs),
       "local=[" + summary(diag.local) + "]", "answer=[" + summary(diag.answer) + "]", diag.pair ? "pair=" + diag.pair : "pair=none",
-      "elapsed=" + seconds(diag) + "s", "hidden=" + hiddenSeconds() + "s", "grace=" + graceSeconds() + "s", "stall=" + policy.stalls,
+      "elapsed=" + seconds(diag) + "s", "hidden=" + hiddenSeconds() + "s", "grace=" + graceSeconds() + "s", "fit=" + view.mode, "stall=" + policy.stalls,
       "recoveries=" + policy.recoveries, "verdict=" + verdict].join(" ");
   }
 
@@ -1051,11 +1084,41 @@ const Live = (() => {
     const full = !!document.fullscreenElement;
     const box = g.getBoundingClientRect();
     const top = full ? box.top : box.top + window.scrollY;
-    const height = window.innerHeight - top - GRID_GAP - 2;
-    view.fit = Object.assign(bestGrid(g.clientWidth, height, view.tiles.size, MIN_TILE, GRID_GAP), { vw: window.innerWidth, vh: window.innerHeight });
+    const vp = { vw: window.innerWidth, vh: window.innerHeight };
+    if (view.mode === "fill") {
+      // The whole area below the toolbar down to the padding at the bottom of the page (6 px; 4 px in fullscreen).
+      const height = window.innerHeight - top - (full ? 4 : 6);
+      view.fit = Object.assign(bestGridFill(g.clientWidth, height, view.tiles.size, MIN_TILE, GRID_GAP), vp, { mode: "fill" });
+      if (view.fit.scroll) {
+        g.style.setProperty("--lcols", 1);
+        g.style.setProperty("--ltile", view.fit.w + "px");
+      } else {
+        g.style.setProperty("--lcols", view.fit.cols);
+        g.style.setProperty("--lrows", view.fit.rows);
+        g.style.setProperty("--lgh", height + "px");
+      }
+      g.classList.toggle("fill", !view.fit.scroll);
+      g.classList.toggle("scroll", view.fit.scroll);
+      return;
+    }
+    view.fit = Object.assign(bestGrid(g.clientWidth, window.innerHeight - top - GRID_GAP - 2, view.tiles.size, MIN_TILE, GRID_GAP), vp, { mode: "fit" });
     g.style.setProperty("--lcols", view.fit.cols);
     g.style.setProperty("--ltile", view.fit.tile + "px");
+    g.classList.remove("fill");
     g.classList.toggle("scroll", view.fit.scroll);
+  }
+
+  function setMode(mode) {
+    if (mode === view.mode) return;
+    view.mode = mode;
+    try { localStorage.setItem(FIT_KEY, mode); } catch (err) { /* storage blocked: the choice lasts until reload */ }
+    paintMode();
+    fit();
+    fitSoon();
+  }
+
+  function paintMode() {
+    for (const [id, mode] of [["lfit", "fit"], ["lfill", "fill"]]) $(id).setAttribute("aria-pressed", String(view.mode === mode));
   }
 
   function fitSoon() {
@@ -1124,6 +1187,7 @@ const Live = (() => {
   }
   initModal();
   paintFullscreen();
+  paintMode();
 
   // ---- clicks, and the pre-warm that comes before them ---------------------
 
@@ -1161,6 +1225,8 @@ const Live = (() => {
 
   document.addEventListener("click", (event) => {
     if (event.target.closest("#lfs")) return void toggleFullscreen($("lwrap"));
+    if (event.target.closest("#lfit")) return void setMode("fit");
+    if (event.target.closest("#lfill")) return void setMode("fill");
     const tile = tileOf(event.target);
     if (!tile) return;
     if (event.target.closest(".lcopy")) {
@@ -1265,13 +1331,14 @@ const Live = (() => {
     const g = grid() ? grid().getBoundingClientRect() : null;
     return { shown: view.shown, hidden: view.hidden, hiddenSince: view.hiddenSince, freed: view.freed, grace: graceSeconds(), mode: view.tune.mode, recoveries: view.recoveries,
       dialsLastMinute: view.dials.filter((t) => Date.now() - t < DIAL_WINDOW_MS).length, listError: view.error, holdMs: Math.max(0, view.holdUntil - Date.now()), visibility: document.visibilityState, enabled: view.info ? view.info.enabled : null,
-      alive: view.info ? view.info.alive : null, modal, columns, fit: view.fit, fullscreen: document.fullscreenElement ? document.fullscreenElement.id : null, fullscreenOk,
+      alive: view.info ? view.info.alive : null, modal, columns, fit: view.fit, mode: view.mode, fullscreen: document.fullscreenElement ? document.fullscreenElement.id : null, fullscreenOk,
       grid: g ? { x: Math.round(g.x), y: Math.round(g.y + window.scrollY), w: Math.round(g.width), h: Math.round(g.height) } : null,
       innerWidth: window.innerWidth, innerHeight: window.innerHeight, scrollY: window.scrollY, scrollHeight: document.documentElement.scrollHeight, scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth,
       hash: location.hash, activeElement: document.activeElement ? (document.activeElement.id || document.activeElement.dataset.camera || document.activeElement.tagName) : null,
       note: !$("lnote").classList.contains("hide") ? $("lnote").textContent : "", tiles };
   };
   window.__liveBestGrid = bestGrid;
+  window.__liveBestGridFill = bestGridFill;
   // Test hook: override the grace period (seconds, null = camui's), the hidden-painting variant, the stall time and the off-screen grace (ms).
   window.__liveTune = (options) => Object.assign(view.tune, options);
   // Synchronous and cheap: what the modal shows right now (the test samples it a frame or two after a click).
@@ -1279,7 +1346,7 @@ const Live = (() => {
     const m = view.modal;
     return { open: !!(m && m.opened), dialogOpen: ui.dialog.open, shown: m ? m.shown : null, hd: m ? m.hd : null, subHas: !!ui.vsub.srcObject,
       subVw: ui.vsub.videoWidth, subPaused: ui.vsub.paused, session: !!(m && m.conn.session), http: m && m.conn.diag ? m.conn.diag.http : null, hash: location.hash,
-      fitVw: view.fit ? view.fit.vw : null, fitVh: view.fit ? view.fit.vh : null, hiddenSince: view.hiddenSince, hiddenFor: hiddenSeconds(), freed: view.freed, grace: graceSeconds(), vis: document.visibilityState };
+      mode: view.mode, fitVw: view.fit ? view.fit.vw : null, fitVh: view.fit ? view.fit.vh : null, hiddenSince: view.hiddenSince, hiddenFor: hiddenSeconds(), freed: view.freed, grace: graceSeconds(), vis: document.visibilityState };
   };
 
   return { onTab };

@@ -282,12 +282,21 @@ body.live-tab .top{margin-bottom:6px;gap:12px}
 .ltools .lhint{font-size:12px;margin-left:auto}
 .lwrap:fullscreen .ltools{position:absolute;top:8px;right:8px;z-index:3;min-height:0;opacity:.45}
 .lwrap:fullscreen .ltools:hover,.lwrap:fullscreen .ltools:focus-within{opacity:1}
-.lwrap:fullscreen .ltools>:not(#lfs){display:none}
+.lwrap:fullscreen .ltools>:not(#lfs):not(.lmode){display:none}
+.lmode{display:inline-flex}
+.lmode .btn{border-radius:0}
+.lmode .btn:first-child{border-radius:8px 0 0 8px}
+.lmode .btn:last-child{border-radius:0 8px 8px 0;margin-left:-1px}
+.lmode .btn[aria-pressed="true"]{background:var(--accent);border-color:transparent;color:#fff}
 .lnote{padding:26px var(--pad);text-align:center;border:1px solid var(--line-soft);border-radius:var(--r);background:var(--surface-1)}
 .lnote .lnt{font-size:15px;font-weight:600}
 .lnote .lns{color:var(--ink-3);margin:6px auto 0;max-width:60ch;font-size:13px}
 .lgrid{display:grid;grid-template-columns:repeat(var(--lcols,3),var(--ltile,minmax(0,1fr)));gap:4px;justify-content:center;align-content:start}
 .lgrid:empty{display:none}
+/* Fill: the cells divide the whole grid area (live.js sets --lcols, --lrows and the height --lgh) and the picture is cropped to the cell. */
+.lgrid.fill{grid-template-columns:repeat(var(--lcols,3),minmax(0,1fr));grid-template-rows:repeat(var(--lrows,2),minmax(0,1fr));height:var(--lgh,auto)}
+.lgrid.fill .ltile{aspect-ratio:auto}
+.lgrid.fill .ltile video{object-fit:cover}
 .ltile{position:relative;aspect-ratio:16/9;background:#000;border:0;border-radius:6px;
   overflow:hidden;cursor:zoom-in;outline-offset:-2px}
 .ltile:focus-visible{outline:2px solid var(--accent)}
@@ -311,7 +320,8 @@ body.live-tab .top{margin-bottom:6px;gap:12px}
 @media(max-width:640px){
   .ltile .lmute{min-height:36px;padding:6px 12px}
   .ltools .lhint{display:none}
-  #lfs{margin-left:auto;min-height:36px}
+  .lmode{margin-left:auto}
+  .lmode .btn,#lfs{min-height:36px}
 }
 
 /* ---- the camera modal: a dialog with the sub picture underneath and the main picture staged on top ---- */
