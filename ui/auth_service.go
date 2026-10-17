@@ -74,10 +74,46 @@ func sourceIP(r *http.Request) string {
 	return host
 }
 
-func (a *authService) audit(r *http.Request, username, event, result string) {
-	if err := a.authLog.record(sourceIP(r), username, event, result); err != nil {
-		a.log.Error("cannot write auth.log", "error", err)
+// Every auth action leaves two records with the same facts: a line in auth.log
+// (for the Operator, never rotated away by console noise) and a structured log
+// record for the console: component, action, actor, target, result, duration.
+// Levels: INFO for what succeeded, WARN for a failed, throttled or locked sign-in,
+// ERROR for a store failure, DEBUG for limiter decisions. Never a password, a hash
+// or a token.
+const authComponent = "auth"
+
+var authActions = map[string]string{
+	"login": "auth.login", "logout": "auth.logout", "unlock": "user.unlock",
+	"set-password": "user.set_password", "setup": "user.create",
+}
+
+func resultLevel(result string) slog.Level {
+	switch result {
+	case "fail", "throttled", "locked":
+		return slog.LevelWarn
 	}
+	return slog.LevelInfo
+}
+
+// emit logs one auth action to the console log.
+func emit(log *slog.Logger, level slog.Level, action, actor, target, result string, started time.Time, extra ...any) {
+	attrs := append([]any{"component", authComponent, "action", action, "actor", cleanLoggedName(actor), "target", cleanLoggedName(target), "result", result, "duration", time.Since(started).Round(time.Millisecond)}, extra...)
+	log.Log(context.Background(), level, "auth", attrs...)
+}
+
+// audit records a request-driven action: auth.log and the console. The actor of a
+// sign-in attempt is "anonymous" (nobody is signed in yet); of a sign-out, the user.
+func (a *authService) audit(r *http.Request, started time.Time, actor, target, event, result string) {
+	ip := sourceIP(r)
+	if err := a.authLog.record(ip, target, event, result); err != nil {
+		emit(a.log, slog.LevelError, "auth.audit_write", actor, target, "fail", started, "error", err.Error())
+	}
+	emit(a.log, resultLevel(result), authActions[event], actor, target, result, started, "from", ip)
+}
+
+// storeFailed reports a store failure at ERROR.
+func (a *authService) storeFailed(action, target string, started time.Time, err error) {
+	emit(a.log, slog.LevelError, action, "system", target, "fail", started, "error", err.Error())
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +290,7 @@ func tooManyAttempts(w http.ResponseWriter, wait time.Duration) {
 }
 
 func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	var req loginRequest
 	body := http.MaxBytesReader(w, r.Body, maxLoginBody)
 	if err := json.NewDecoder(body).Decode(&req); err != nil {
@@ -267,17 +304,19 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	name := req.Username
 
-	if ok, wait := a.limiter.allow(sourceIP(r)); !ok {
-		a.audit(r, name, "login", "throttled")
+	ok, wait := a.limiter.allow(sourceIP(r))
+	emit(a.log, slog.LevelDebug, "auth.limiter", "anonymous", name, map[bool]string{true: "allowed", false: "throttled"}[ok], started, "from", sourceIP(r), "waitMs", wait.Milliseconds())
+	if !ok {
+		a.audit(r, started, "anonymous", name, "login", "throttled")
 		tooManyAttempts(w, wait)
 		return
 	}
 	if a.consumeUnlock(name) {
 		a.lock.reset(name)
-		a.audit(r, name, "unlock", "applied")
+		a.audit(r, started, "local", name, "unlock", "applied")
 	}
 	if wait, locked := a.lock.locked(name); locked {
-		a.audit(r, name, "login", "locked")
+		a.audit(r, started, "anonymous", name, "login", "locked")
 		tooManyAttempts(w, wait)
 		return
 	}
@@ -286,14 +325,14 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 	case a.hashSlots <- struct{}{}:
 		defer func() { <-a.hashSlots }()
 	default:
-		a.audit(r, name, "login", "throttled")
+		a.audit(r, started, "anonymous", name, "login", "throttled")
 		tooManyAttempts(w, time.Second)
 		return
 	}
 
 	user, found, err := a.users.Get(name)
 	if err != nil {
-		a.log.Error("users.json cannot be read", "error", err)
+		a.storeFailed("auth.login", name, started, err)
 		writeAPIError(w, http.StatusInternalServerError, "sign-in is unavailable")
 		return
 	}
@@ -303,26 +342,29 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 		hash = user.Hash
 	}
 	if !verifyPassword(hash, req.Password) || !found {
-		a.lock.fail(name)
-		a.audit(r, name, "login", "fail")
+		st := a.lock.fail(name)
+		a.audit(r, started, "anonymous", name, "login", "fail")
+		if delay := lockoutDelay(st.Count); delay > 0 {
+			emit(a.log, slog.LevelWarn, "auth.lockout", "anonymous", name, "locked", started, "failures", st.Count, "lockSeconds", int(delay.Seconds()))
+		}
 		writeAPIError(w, http.StatusUnauthorized, loginErrorMessage)
 		return
 	}
 
 	a.lock.reset(name)
 	if a.hasher.needsRehash(user.Hash) {
-		a.upgradeHash(user, req.Password)
+		a.upgradeHash(user, req.Password, started)
 	}
 	if old, err := r.Cookie(sessionCookie); err == nil {
 		_ = a.sessions.Delete(old.Value) // a new login never inherits an earlier session
 	}
 	token, err := a.sessions.Create(user.ID)
 	if err != nil {
-		a.log.Error("cannot create a session", "error", err)
+		a.storeFailed("auth.login", user.Username, started, err)
 		writeAPIError(w, http.StatusInternalServerError, "sign-in is unavailable")
 		return
 	}
-	a.audit(r, user.Username, "login", "ok")
+	a.audit(r, started, "anonymous", user.Username, "login", "ok")
 	a.setSessionCookie(w, token, int(sessionLifetime.Seconds()))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": user.Username, "role": user.Role, "next": safeNext(req.Next)})
 }
@@ -332,23 +374,24 @@ func (a *authService) dummyHash() string {
 	return a.dummy
 }
 
-func (a *authService) upgradeHash(user User, password string) {
+func (a *authService) upgradeHash(user User, password string, started time.Time) {
 	hash, err := a.hasher.Hash(password)
 	if err == nil {
 		user.Hash = hash
 		err = a.users.Put(user)
 	}
 	if err != nil {
-		a.log.Warn("could not upgrade a password hash", "error", err)
+		a.storeFailed("user.rehash", user.Username, started, err)
 	}
 }
 
 func (a *authService) handleLogout(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	user, _ := userFrom(r)
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		_ = a.sessions.Delete(c.Value)
 	}
-	a.audit(r, user.Username, "logout", "ok")
+	a.audit(r, started, user.Username, user.Username, "logout", "ok")
 	a.setSessionCookie(w, "", -1)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -416,6 +459,7 @@ func (l *loopbackAuth) ifNoUsers(h http.HandlerFunc) http.HandlerFunc {
 }
 
 func (l *loopbackAuth) handleSetup(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if !l.open() {
@@ -433,11 +477,12 @@ func (l *loopbackAuth) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := l.users.Put(user); err != nil {
-		l.log.Error("cannot create the first user", "error", err)
+		emit(l.log, slog.LevelError, "user.create", "local", user.Username, "fail", started, "error", err.Error())
 		writeAPIError(w, http.StatusInternalServerError, "could not save the user")
 		return
 	}
 	_ = l.audit.record(sourceIP(r), user.Username, "setup", "ok")
+	emit(l.log, slog.LevelInfo, "user.create", "local", user.Username, "ok", started, "from", sourceIP(r))
 	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "username": user.Username})
 }
 

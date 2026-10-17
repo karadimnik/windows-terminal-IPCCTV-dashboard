@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,8 +48,91 @@ func readPasswordLine(in io.Reader) (string, error) {
 	return strings.TrimPrefix(line, "\ufeff"), nil
 }
 
-// runSetPassword implements -set-password: create the user (admin) or change the
-// password, end all of that user's sessions, say nothing about the password.
+// inputError marks a refusal caused by what the caller supplied (a bad name, a weak
+// password) as opposed to a store failure, so a caller can pick its own exit code or
+// HTTP status.
+type inputError struct{ msg string }
+
+func (e inputError) Error() string { return e.msg }
+
+// The actions below are plain functions on the auth service: explicit parameters, an
+// error back, no flag parsing, no prompting, no os.Exit. The command-line flags and,
+// later, a web page or another subcommand are thin wrappers over them.
+
+// SetPassword creates the user (role admin) or changes the password of an existing
+// one, and ends every session of that user. created is true for a new user.
+func (a *authService) SetPassword(actor, username, password string) (created bool, err error) {
+	started := time.Now()
+	fail := func(level slog.Level, err error) (bool, error) {
+		emit(a.log, level, "user.set_password", actor, username, "fail", started, "error", err.Error())
+		return false, err
+	}
+	if !validUsername(username) {
+		return fail(slog.LevelWarn, inputError{"the username must be 1 to 64 characters from A-Z a-z 0-9 . _ -"})
+	}
+	if err := checkPasswordPolicy(username, password); err != nil {
+		return fail(slog.LevelWarn, inputError{err.Error()})
+	}
+	hash, err := a.hasher.Hash(password)
+	if err != nil {
+		return fail(slog.LevelError, fmt.Errorf("cannot hash the password: %w", err))
+	}
+	user, existing, err := a.users.Get(username)
+	if err != nil {
+		return fail(slog.LevelError, fmt.Errorf("cannot read the user file: %w", err))
+	}
+	if existing {
+		user.Hash = hash
+	} else {
+		user = User{ID: newID(), Username: username, Hash: hash, Role: roleAdmin, CreatedAt: a.now().UTC()}
+	}
+	if err := a.users.Put(user); err != nil {
+		return fail(slog.LevelError, fmt.Errorf("cannot save the user: %w", err))
+	}
+	if err := a.sessions.DeleteUser(user.ID); err != nil {
+		return fail(slog.LevelError, fmt.Errorf("the password was saved but its sessions could not be ended: %w", err))
+	}
+	_ = a.authLog.record("local", user.Username, "set-password", "ok")
+	emit(a.log, slog.LevelInfo, "user.set_password", actor, user.Username, "ok", started, "created", !existing)
+	return !existing, nil
+}
+
+// Unlock asks a running camui to forget the failed-login count of a username (see
+// unlockMarker). A camui that is not running has nothing to clear.
+func (a *authService) Unlock(actor, username string) error {
+	started := time.Now()
+	if len(username) > 64 {
+		return inputError{"the username is longer than 64 characters"}
+	}
+	marker := unlockMarker(a.dir, username)
+	err := os.MkdirAll(filepath.Dir(marker), 0o700)
+	if err == nil {
+		err = restrictToOwner(a.dir, true)
+	}
+	if err == nil {
+		err = writePrivateFile(marker, []byte(a.now().UTC().Format(time.RFC3339)))
+	}
+	if err != nil {
+		emit(a.log, slog.LevelError, "user.unlock", actor, username, "fail", started, "error", err.Error())
+		return fmt.Errorf("cannot write the unlock request: %w", err)
+	}
+	_ = a.authLog.record("local", username, "unlock", "requested")
+	emit(a.log, slog.LevelInfo, "user.unlock", actor, username, "requested", started)
+	return nil
+}
+
+// ListUsers returns every user (hashes included: callers must not print them).
+func (a *authService) ListUsers() ([]User, error) { return a.users.List() }
+
+// cliAuth is the auth service as the command line uses it: the real store and
+// sessions in the auth folder, console records at WARN and above on errOut.
+func cliAuth(cfg Config, hasher passwordHasher, errOut io.Writer) *authService {
+	log := slog.New(slog.NewTextHandler(errOut, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	return newAuthService(cfg.AuthDir, newFileUserStore(cfg.AuthDir, time.Now), log, time.Now, hasher)
+}
+
+// runSetPassword implements -set-password: a thin wrapper that reads the password
+// from standard input and prints the outcome. It never prints the password.
 func runSetPassword(cfg Config, username string, stdin io.Reader, out, errOut io.Writer) int {
 	return setPassword(cfg, defaultPasswordHasher, username, stdin, out, errOut)
 }
@@ -71,64 +156,35 @@ func setPassword(cfg Config, hasher passwordHasher, username string, stdin io.Re
 		fmt.Fprintln(errOut, "no password was given on standard input; nothing changed")
 		return 2
 	}
-	if err := checkPasswordPolicy(username, password); err != nil {
-		fmt.Fprintln(errOut, err.Error()+"; nothing changed")
-		return 2
-	}
-	now := time.Now()
-	store := newFileUserStore(cfg.AuthDir, time.Now)
-	hash, err := hasher.Hash(password)
+	created, err := cliAuth(cfg, hasher, errOut).SetPassword("local", username, password)
 	if err != nil {
-		fmt.Fprintln(errOut, "cannot hash the password:", err)
+		var bad inputError
+		if errors.As(err, &bad) {
+			fmt.Fprintln(errOut, bad.Error()+"; nothing changed")
+			return 2
+		}
+		fmt.Fprintln(errOut, err)
 		return 1
 	}
-	user, existing, err := store.Get(username)
-	if err != nil {
-		fmt.Fprintln(errOut, "cannot read the user file:", err)
-		return 1
+	verb := "updated the password of"
+	if created {
+		verb = "created"
 	}
-	verb := "created"
-	if existing {
-		verb = "updated the password of"
-		user.Hash = hash
-	} else {
-		user = User{ID: newID(), Username: username, Hash: hash, Role: roleAdmin, CreatedAt: now.UTC()}
-	}
-	if err := store.Put(user); err != nil {
-		fmt.Fprintln(errOut, "cannot save the user:", err)
-		return 1
-	}
-	sessions := newSessionStore(cfg.AuthDir, time.Now)
-	if err := sessions.DeleteUser(user.ID); err != nil {
-		fmt.Fprintln(errOut, "the password was saved but its sessions could not be ended:", err)
-		return 1
-	}
-	_ = newAuthLog(cfg.AuthDir, time.Now).record("local", user.Username, "set-password", "ok")
+	user, _, _ := newFileUserStore(cfg.AuthDir, time.Now).Get(username)
 	fmt.Fprintf(out, "%s user %s (role %s); every session of that user was ended\n", verb, user.Username, user.Role)
 	return 0
 }
 
-// runUnlock implements -unlock: it asks a running camui to forget the failed-login
-// count of a username. A camui that is not running has nothing to clear.
+// runUnlock implements -unlock as a thin wrapper over authService.Unlock.
 func runUnlock(cfg Config, username string, out, errOut io.Writer) int {
-	if len(username) > 64 {
-		fmt.Fprintln(errOut, "the username is longer than 64 characters")
-		return 2
-	}
-	marker := unlockMarker(cfg.AuthDir, username)
-	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
-		fmt.Fprintln(errOut, "cannot prepare the auth folder:", err)
-		return 1
-	}
-	if err := restrictToOwner(cfg.AuthDir, true); err != nil {
+	if err := cliAuth(cfg, defaultPasswordHasher, errOut).Unlock("local", username); err != nil {
 		fmt.Fprintln(errOut, err)
+		var bad inputError
+		if errors.As(err, &bad) {
+			return 2
+		}
 		return 1
 	}
-	if err := writePrivateFile(marker, []byte(time.Now().UTC().Format(time.RFC3339))); err != nil {
-		fmt.Fprintln(errOut, "cannot write the unlock request:", err)
-		return 1
-	}
-	_ = newAuthLog(cfg.AuthDir, time.Now).record("local", username, "unlock", "requested")
 	fmt.Fprintf(out, "unlock requested for %q: a running camui forgets its failed sign-ins at the next attempt for that name. Restarting camui clears all of them too.\n", username)
 	return 0
 }

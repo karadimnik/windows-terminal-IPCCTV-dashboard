@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -151,5 +152,85 @@ func TestLockoutIsInMemoryOnly(t *testing.T) {
 		if raw, err := os.ReadFile(filepath.Join(rig.cfg.AuthDir, name)); err == nil && strings.Contains(string(raw), "lockedUntil") {
 			t.Errorf("%s holds lockout state", name)
 		}
+	}
+}
+
+func TestAuthActionsAreLoggedWithConsistentFields(t *testing.T) {
+	rig := newTLSRig(t, nil)
+	rig.logs.Reset()
+	cookie := rig.login(t)
+	rig.loginFrom("192.168.30.1:1", testUser, "wrong wrong wrong 0")
+	for i := 0; i < 5; i++ { // the 5th failure starts a lock; later ones from this address are throttled
+		rig.loginFrom("192.168.30.2:1", "ghost", "wrong wrong wrong 1")
+	}
+	rig.loginFrom("192.168.30.2:1", "ghost", "wrong wrong wrong 1")
+	rig.do(tlsReq{method: "POST", path: "/api/auth/logout", headers: jsonHdr, cookie: cookie, body: "{}"})
+	if _, err := rig.auth.SetPassword("tester", "bob", "a long enough password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.auth.Unlock("tester", "ghost"); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(rig.logs.String()), "\n")
+	type want struct{ level, action, result string }
+	seen := map[want]bool{}
+	for _, line := range lines {
+		if !strings.Contains(line, "component=auth") {
+			continue
+		}
+		for _, field := range []string{"action=", "actor=", "target=", "result=", "duration="} {
+			if !strings.Contains(line, field) {
+				t.Errorf("record lacks %s: %s", field, line)
+			}
+		}
+		get := func(key string) string {
+			i := strings.Index(line, " "+key+"=")
+			if i < 0 {
+				return ""
+			}
+			rest := line[i+len(key)+2:]
+			if j := strings.IndexByte(rest, ' '); j >= 0 {
+				rest = rest[:j]
+			}
+			return rest
+		}
+		seen[want{get("level"), get("action"), strings.Trim(get("result"), `"`)}] = true
+	}
+	for _, w := range []want{
+		{"INFO", "auth.login", "ok"}, {"WARN", "auth.login", "fail"}, {"WARN", "auth.login", "throttled"}, {"WARN", "auth.lockout", "locked"},
+		{"INFO", "auth.logout", "ok"}, {"INFO", "user.set_password", "ok"}, {"INFO", "user.unlock", "requested"},
+		{"DEBUG", "auth.limiter", "allowed"}, {"DEBUG", "auth.limiter", "throttled"},
+	} {
+		if !seen[w] {
+			t.Errorf("no %s record action=%s result=%s in:\n%s", w.level, w.action, w.result, rig.logs.String())
+		}
+	}
+	for _, secret := range []string{testPassword, "wrong wrong wrong", "a long enough password", cookie, "pbkdf2"} {
+		if strings.Contains(rig.logs.String(), secret) {
+			t.Errorf("the log (DEBUG level) contains %q", secret)
+		}
+	}
+}
+
+func TestAuthServiceActionsTakeExplicitParametersAndReturnErrors(t *testing.T) {
+	rig := newTLSRig(t, nil)
+	created, err := rig.auth.SetPassword("tester", "carol", "a long enough password")
+	if err != nil || !created {
+		t.Fatalf("create: %v %v", created, err)
+	}
+	created, err = rig.auth.SetPassword("tester", "CAROL", "another long password")
+	if err != nil || created {
+		t.Fatalf("update: %v %v", created, err)
+	}
+	var bad inputError
+	if _, err := rig.auth.SetPassword("tester", "carol", "short"); !errors.As(err, &bad) {
+		t.Errorf("a weak password is an input error, got %v", err)
+	}
+	if _, err := rig.auth.SetPassword("tester", "no good", "a long enough password"); !errors.As(err, &bad) {
+		t.Errorf("a bad name is an input error, got %v", err)
+	}
+	users, err := rig.auth.ListUsers()
+	if err != nil || len(users) != 2 {
+		t.Errorf("list: %d %v", len(users), err)
 	}
 }

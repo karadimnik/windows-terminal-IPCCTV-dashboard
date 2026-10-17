@@ -154,13 +154,14 @@ func (l *lockout) locked(username string) (time.Duration, bool) {
 }
 
 // fail records one failed attempt and starts the delay its count calls for.
-func (l *lockout) fail(username string) {
+func (l *lockout) fail(username string) FailureState {
 	st, _ := l.store.Failure(username)
 	now := l.now()
 	st.Count++
 	st.LastFail = now
 	st.LockedUntil = now.Add(lockoutDelay(st.Count))
 	l.store.SetFailure(username, st)
+	return st
 }
 
 func (l *lockout) reset(username string) { l.store.ClearFailure(username) }

@@ -47,7 +47,7 @@ func newTLSRig(t *testing.T, mutate func(*Config)) *tlsRig {
 		mutate(&cfg)
 	}
 	logs := &bytes.Buffer{}
-	log := slog.New(slog.NewTextHandler(logs, nil))
+	log := slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	mgr := newCertManager(cfg.TLSDir, log)
 	ip, _, err := parseTLSListen(cfg.TLSListen)
 	if err != nil {
