@@ -55,6 +55,7 @@ const Live = (() => {
   const REFRESH_AWAY_MS = 30000;                 // ... and this often while the page is hidden
   const DEFAULT_GRACE = 300;                     // seconds a hidden page keeps its streams (camui: liveHiddenGraceSeconds)
   const STALL_MS = 8000;                         // a connected picture whose decoded frames stand still this long is rebuilt
+  const WAKE_CHECK_MS = 3000;                    // after a suspension a connected picture must move again within this
   const STALL_TICK_MS = 2000;                    // how often frames are looked at
   const DIAL_CAP = 20;                           // reconnect attempts per DIAL_WINDOW_MS for all tiles together
   const DIAL_WINDOW_MS = 60000;
@@ -883,7 +884,7 @@ const Live = (() => {
     clearInterval(view.watch);
     view.watch = null;
     hiddenPainting(false);
-    resetStall();
+    wakeCheck();
     if (view.shown) refresh(); else sync();       // opens whatever the grace period had freed
   }
 
@@ -895,7 +896,8 @@ const Live = (() => {
 
   // The page was asleep, frozen or throttled hard: forget what "no change for N seconds" meant and look again.
   function wake() {
-    resetStall();
+    if (away()) return;
+    wakeCheck();
     checkGrace();
     if (view.shown && !view.hidden) refresh();
   }
@@ -909,6 +911,30 @@ const Live = (() => {
     view.lastTick = now;
     for (const tile of view.tiles.values()) { tile.lastFrames = -1; tile.lastAdvance = now; }
     if (view.modal) { view.modal.lastFrames = -1; view.modal.lastAdvance = now; }
+  }
+
+  // The page or the PC was suspended (a frozen page, a sleeping PC, a long hidden spell) and is looked at again. Whatever
+  // the server dropped meanwhile must not wait for the connection's own timeouts (ICE needs about 10 s, the connect
+  // watchdog 15 s): a connection that is not "connected" is rebuilt now, staggered and jittered; one that is connected must
+  // show a new frame within WAKE_CHECK_MS or it is rebuilt by the stall check.
+  function wakeCheck() {
+    const now = Date.now();
+    view.lastTick = now;
+    let slot = 0;
+    for (const tile of [...view.tiles.values()]) {
+      if (!tile.pc || tile.state !== "live") { tile.lastFrames = -1; tile.lastAdvance = now; continue; }
+      const state = tile.pc.connectionState;
+      if (state === "failed" || state === "closed" || state === "disconnected") {
+        tile.stalls++;
+        tile.stalled = true;
+        failTile(tile, "reconnecting", "Connection lost while suspended", slot++ * STAGGER_MS + 200 + Math.random() * 300);
+      } else {
+        tile.lastFrames = -1;
+        tile.lastAdvance = now - Math.max(0, view.tune.stallMs - WAKE_CHECK_MS);
+      }
+    }
+    const m = view.modal;
+    if (m) { m.lastFrames = -1; m.lastAdvance = now - Math.max(0, view.tune.stallMs - WAKE_CHECK_MS); }
   }
 
   // getStats() of a connection whose far end has stopped answering can take forever: never wait for it longer than 3 s,
@@ -933,11 +959,12 @@ const Live = (() => {
       const now = Date.now();
       const gap = now - view.lastTick;
       view.lastTick = now;
-      if (away() || view.freed || gap > STALL_TICK_MS * 3) {
+      if (away() || view.freed) {
         for (const tile of view.tiles.values()) { tile.lastFrames = -1; tile.lastAdvance = now; }
         if (view.modal) { view.modal.lastFrames = -1; view.modal.lastAdvance = now; }
         return;
       }
+      if (gap > STALL_TICK_MS * 3) return wakeCheck();      // the ticks stopped for a long time: the page or the PC was suspended
       await Promise.all([...view.tiles.values()].map(async (tile) => {
         if (!tile.pc || tile.state !== "live") return;
         const gen = tile.gen;
