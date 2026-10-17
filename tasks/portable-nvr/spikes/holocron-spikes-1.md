@@ -131,7 +131,7 @@ Not tested: reconnect behaviour of the concat wrapper over a long run (a long-li
 
 | Phase | ext4 (lin8) | NTFS (win8) |
 |---|---|---|
-| ffmpeg running | pick = file held open at 24 of 26 polls; the 2 misses are the instant a 5 s segment closed before the next file existed (pick = the just-closed newest file) | pick = file held open at every one of 21 polls |
+| ffmpeg running | pick = file held open at 17 of 19 polls while ffmpeg ran; the 2 misses are the instant a 5 s segment closed before the next file existed (pick = the just-closed newest file) | pick = file held open at 21 of 22 polls while ffmpeg ran (the miss is the poll at the instant of the kill) |
 | first poll after the restart (gap 10 s, A killed 17:29:02, B started 17:29:12) | pick moved to the new file within 0.7 s of its creation | pick moved to the new file within 1.1 s |
 | after hard kill | pick stays on the last file, `heldOpen=false`, age grows 2.2 s ... 63.3 s | same, age 4.8 ... 64.2 s |
 | ageing out | `pick=""` from the poll at age >= 65 s (17:30:36 for a kill at 17:29:32) | `pick=""` at age >= 65 s (17:33:07 for a kill at 17:32:03) |
