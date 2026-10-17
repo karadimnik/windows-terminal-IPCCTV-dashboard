@@ -16,7 +16,7 @@ param([switch]$Verify)
 $ErrorActionPreference = 'Stop'
 . (Join-Path -Path $PSScriptRoot -ChildPath 'holocron-lib.ps1')
 . (Join-Path -Path $PSScriptRoot -ChildPath 'status-docs.ps1')
-foreach ($group in @('golden-ffmpeg.ps1', 'golden-relay.ps1')) { . (Join-Path -Path $PSScriptRoot -ChildPath $group) }
+foreach ($group in @('golden-ffmpeg.ps1', 'golden-relay.ps1', 'golden-names.ps1')) { . (Join-Path -Path $PSScriptRoot -ChildPath $group) }
 
 Assert-HolocronEnvironment
 
@@ -45,6 +45,9 @@ try {
 
     # ---- group: relay and live MediaMTX configs
     New-HolocronRelayGoldens -OutDir $target
+
+    # ---- group: safe names and segment names
+    New-HolocronNameGoldens -OutDir $target
 
     # ---- compare, in -Verify mode
     if ($Verify) {
