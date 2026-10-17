@@ -84,9 +84,39 @@ stdout: 0 bytes in all 16 lavfi runs on win8, lin42, lin8 (stderr 0 bytes on Lin
 5. **V13 answered, and it is a trap for the Linux claim: `-timeout <microseconds>` exists only in ffmpeg 5.0 or later.** In 4.x the same flag means "listen timeout in seconds" and turns the RTSP demuxer into a server (immediate failure); the socket timeout there is `-stimeout`. An Ubuntu 20.04 `apt` ffmpeg (4.2.7) therefore cannot run the product's vector.
 
 **What it changes.**
-- LLD 2.3 `ffmpeg`: the golden test of the vector stays byte for byte; add a startup capability check (run `ffmpeg -version`, parse the major version; if below 5 use `-stimeout`, or refuse with a clear message). Recommendation: refuse below 5.0 and say so in `doctor`/self-test, because lin42 is also missing other things and the Operator wants one behaviour.
+- LLD 2.3 `ffmpeg`: the golden test of the vector stays byte for byte; add a startup capability check (run `ffmpeg -version`, parse the major version; if below 5 use `-stimeout`, or refuse with a clear message). Recommendation: refuse below 5.0 and say so in `doctor`/self-test, so that behaviour is one on every machine.
 - The Go supervisor must set `TZ` for the ffmpeg child deliberately: on Windows remove `TZ` from the child's environment (an inherited IANA `TZ` yields wrong offsets), on Linux leave it inherited so ffmpeg and Go's `time.Local` agree. Add this to LLD 2.3 as a rule.
 - The strict-pattern rule and the pruner parse the offset from the name, so nothing else changes. The pruner/status/UI must not assume that cut times are multiples of `SegmentSeconds` in UTC; the default 900 s is safe in all zones except those with a non-quarter-hour offset (none in use).
 - IR 1.4 `-segment_atclocktime` row: replace "[UNKNOWN] local or UTC" by "local-midnight multiples (measured)". U2, U7, V8, V13 can be closed. HLD risk table: add "ffmpeg < 5.0".
 
 **Confidence.** High for names, alignment (8 cases x 3 builds, consistent), stdout and `-timeout` semantics. Medium for the Linux RTSP happy path: WSL cannot reach a Windows listener (Windows firewall drops the connection from WSL, so Linux ffmpeg never talked to MediaMTX), so Linux `-timeout` was tested against a silent TCP server and an unreachable host only, not a live stream. Untested: midnight, DST step, real camera.
+
+## SP1b - credentials off the command line
+
+**Question.** Can the direct-input camera credential reach ffmpeg's RTSP demuxer without appearing in the process command line (todo [90])?
+
+**Method.** `ffmpeg -h demuxer=rtsp` on win8 and lin42: the RTSP demuxer has no `user`/`password`/`auth` option in either (options: `rtsp_transport`, `rtsp_flags`, `timeout`, `user_agent`, TLS options...). Then the candidates were run:
+- Windows: a throwaway MediaMTX (copy of `C:\mediamtx\mediamtx.exe`, own config, `127.0.0.1:18554`, internal auth, only user `fakeuser`/`fakepass`, a lavfi publisher with those credentials), `tests/holocron/sp1b-windows.ps1`; command line read with `Get-CimInstance Win32_Process` 1.5 s after start, stderr captured.
+- Linux (lin8): WSL cannot reach any Windows listener (firewall), so a stub RTSP server (`spikes/sp1b`, Go: answers OPTIONS, challenges the first DESCRIBE with Basic auth, logs whether the retry carried the right credential, never the password) on `127.0.0.1:18555`; command line read from `/proc/<pid>/cmdline`; `tests/holocron/sp1b-linux.sh`.
+
+**Raw results.**
+
+| Method | Windows (win8 + MediaMTX) | Linux (lin8 + stub) |
+|---|---|---|
+| M0 `-i rtsp://fakeuser:fakepass@host/t` (baseline) | records 4.096 s; **password in Win32_Process command line** | authenticates; **password in `/proc/<pid>/cmdline`** |
+| M1 `-/i file` (value loaded from file) | `Unrecognized option '/i'` | same |
+| M2 `-f concat -i list.txt` with `file 'rtsp://u:p@host/t'`, `-rtsp_transport tcp` outside | 401 not hit, but SETUP over UDP fails (461) and `Option rtsp_transport not found`: the concat demuxer does not hand input options to the inner RTSP open | authenticates (stub), no password in cmdline |
+| **M2b `-f concat -safe 0 -protocol_whitelist file,rtsp,tcp,rtp,udp -i list.ffconcat`** with list `ffconcat version 1.0` / `file 'rtsp://u:p@host/t'` / `option rtsp_transport tcp` / `option timeout 10000000` | **records 4.096 s of h264+pcm_alaw; password absent from the command line (only the list path)**; also with the product vector: `-fflags +genpts+discardcorrupt ... -c copy -f segment -segment_time 7 ...` gives `Cam_20261017_172626+0300`, `..30`, `..37`, `..44` (durations 7.8, 7.03, 7.07, 0.4 s), stdout and stderr 0 bytes | authenticates (stub: `user_ok=true pass_ok=true`), password absent from cmdline; `option timeout` reaches the socket (`tcp ...?timeout=3000000` in the log) |
+| M3 environment (`RTSP_USER`/`RTSP_PASSWORD`/`USER`/`PASSWORD`) | 401, no auth | 401, no auth |
+| M4 `~/.netrc` | not run (no netrc support in the Windows build either) | 401, no auth |
+| M5 `-i pipe:0` carrying the URL on stdin | n/a | `Invalid data found when processing input` (stdin is media bytes, not a URL) |
+| no credential at all | 401 | 401 |
+
+Side findings: (a) ffmpeg prints the full credentialed URL in its own error text when it fails to open the input (`Impossible to open 'rtsp://fakeuser:fakepass@...'`, and `Error opening input file rtsp://user:pass@...` in M0), so the existing redactor (`scheme://***:***@`) must stay on the stderr path. (b) On Windows the list file stays open (share-locked) for the life of the ffmpeg process: `Remove-Item` while it runs fails ("being used by another process"); delete it after the process has exited. On Linux unlinking an open file is always allowed.
+
+**Conclusion.** A working method exists: **an ffconcat list file (M2b)**. The credentialed URL and the two input options go into a file written by the supervisor immediately before each start, `-f concat -safe 0 -protocol_whitelist file,rtsp,tcp,rtp,udp -i <list>` replaces `-rtsp_transport tcp -timeout N -i <url>` on the command line (the transport and timeout move into the list as `option` lines; the other input flags, `-fflags +genpts+discardcorrupt`, stay on the command line and still apply). The file is a plaintext secret on disk: it needs the same protection as any credential file (owner-only: mode 0600 on Linux/macOS, an owner-only ACL on Windows), must live under `_state` or a per-process runtime directory, and be deleted when the child exits (Windows: not before, the child holds it open). It removes the password from the process list on both OSes; it does not remove it from the supervisor's memory or from ffmpeg's error text. No other route (environment, netrc, stdin, `-/i`, demuxer options) works.
+Not tested: reconnect behaviour of the concat wrapper over a long run (a long-lived live source through concat), a camera that uses Digest (MediaMTX/the stub offered Basic; ffmpeg handles Digest in the same code path but this was not exercised), a password containing `'` or `\` (the ffconcat quoting rules apply: `'` needs `'\''` escaping), and a camera password with `@`/`:` (the product already does not URL-escape these; unchanged).
+
+**What it changes.** HLD/LLD: the direct path may stay available behind the existing switch but with the list-file method as the only credentialed mode; the "direct path disabled by default" fallback is no longer the only answer. The `ffmpeg` package needs a second argument-builder variant (concat wrapper) with its own golden test, and a `secrets`-backed writer for the list file. Recommendation: keep relay-only as the default (plan OS4) and implement the list-file variant only if a direct input stays in scope; it is a small addition, not a design change. Todo [90] can be closed as "mitigated by M2b", with the residual ffmpeg-error-text redaction.
+
+**Confidence.** High that M2b authenticates and hides the password on Windows against a real MediaMTX (full recording) and on Linux against the stub (credential delivery only; no media). High that the other routes do not exist in these builds (win8, lin8; option lists and runs). Medium on long-run stability (untested).
