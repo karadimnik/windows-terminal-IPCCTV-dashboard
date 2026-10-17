@@ -7542,6 +7542,8 @@ function Invoke-CamCheckLivePage {
                 if (@(@($s.tiles) | Where-Object { $_.stream -ne 'sub' }).Count) { & $fail "${browser}: a tile was not on the sub stream" }
                 $n = & $readersIs 6
                 $liveN = & $sessions
+                $endWait = [DateTime]::UtcNow.AddSeconds(40)
+                while ($liveN -ne 6 -and [DateTime]::UtcNow -lt $endWait) { Start-Sleep -Milliseconds 500; $liveN = & $sessions }    # the previous browser's sessions time out on their own
                 & $note ("  sessions with six sub tiles: camera stream2 readers {0}, live instance WebRTC sessions {1}" -f $n, $liveN)
                 if ($n -ne 6 -or $liveN -ne 6) { & $fail "${browser}: stream2 had $n and the live instance $liveN sessions with six viewers, wanted 6 and 6" }
                 $base0 = $s
