@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -200,5 +201,30 @@ func TestIPLimiterIsBoundedAndExpiresIdle(t *testing.T) {
 	if l.size() > 1 {
 		// Everything else was idle long enough to be indistinguishable from a new address.
 		t.Errorf("idle entries were not expired: %d", l.size())
+	}
+}
+
+// The production caps, with 5,000 distinct names and addresses each.
+func TestProductionCapsHoldUnder5000Distinct(t *testing.T) {
+	clock := newFakeClock()
+	store := newFileUserStore(t.TempDir(), clock.now)
+	lock := newLockout(store, clock.now)
+	limiter := newIPLimiter(loginRatePerMinute, loginBurst, maxIPEntries, clock.now)
+	huge := strings.Repeat("x", 4000)
+	for i := 0; i < 5000; i++ {
+		clock.advance(time.Millisecond)
+		lock.fail(fmt.Sprintf("name%d-%s", i, huge))
+		limiter.allow(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
+	}
+	if n := store.size(); n > maxFailureEntries {
+		t.Errorf("failure table holds %d entries, cap %d", n, maxFailureEntries)
+	}
+	if n := limiter.size(); n > maxIPEntries {
+		t.Errorf("address table holds %d entries, cap %d", n, maxIPEntries)
+	}
+	for key := range store.entries {
+		if len(key) > maxNameKey {
+			t.Fatalf("a %d byte key got into the table", len(key))
+		}
 	}
 }

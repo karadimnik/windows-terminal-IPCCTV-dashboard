@@ -42,8 +42,17 @@ var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 func validUsername(name string) bool { return usernamePattern.MatchString(name) }
 
+// maxNameKey is one more than the longest valid username: anything longer cannot be a
+// user, so it is cut before it becomes a table key (an attacker chooses these strings).
+const maxNameKey = 65
+
 // normalizeUsername is the key under which a name is compared and throttled.
-func normalizeUsername(name string) string { return strings.ToLower(name) }
+func normalizeUsername(name string) string {
+	if len(name) > maxNameKey {
+		name = name[:maxNameKey]
+	}
+	return strings.ToLower(name)
+}
 
 // UserStore keeps accounts and the per-username failure state the lockout needs.
 type UserStore interface {

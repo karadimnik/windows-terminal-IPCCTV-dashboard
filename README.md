@@ -85,7 +85,7 @@ Everything that is not on this page is under `docs/`, one file per subject:
 * **Installing from scratch** - [docs/install.md](docs/install.md). The prerequisites, the execution policy, every step in order, the `cameras.json` schema and the credentials.
 * **Troubleshooting** - [docs/troubleshooting.md](docs/troubleshooting.md). Every symptom with its likely cause and fix, and what happens when something stops unexpectedly.
 * **The alerts** - [docs/alerts.md](docs/alerts.md). The three channels, every event id and how to read them back.
-* **The control UI** - [docs/ui.md](docs/ui.md). Its four screens, how it runs and logs, exposing it beyond this machine, and the `camui.exe` flags.
+* **The control UI** - [docs/ui.md](docs/ui.md). Its four screens, how it runs and logs, exposing it beyond this machine, the sign-in for the HTTPS LAN address (users, `-set-password`), and the `camui.exe` flags.
 * **How it works** - [docs/how-it-works.md](docs/how-it-works.md). Credentials, the grid, recording, retention, the relay, the health strip and autostart.
 * **Command reference** - [docs/reference.md](docs/reference.md). Every command of every script, the granular install switches and the test harness.
 * **Known limitations** - [docs/limitations.md](docs/limitations.md). Thirteen of them, measured rather than theoretical.

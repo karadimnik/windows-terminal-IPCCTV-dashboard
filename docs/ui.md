@@ -141,8 +141,8 @@ An optional second listener serves the whole web app, the Live screen included, 
 1. From a PowerShell window on the PC (the password goes through standard input, so it is never on a command line or in the process list):
 
    ```powershell
-   $p = Read-Host 'Password' -AsSecureString
-   [System.Net.NetworkCredential]::new('', $p).Password | .\camui.exe -set-password anna
+   $c = Get-Credential anna    # a dialog (or a prompt) that does not show the password; the name is only a starting value
+   $c.GetNetworkCredential().Password | .\camui.exe -set-password anna
    ```
 
    Windows PowerShell 5.1 pipes ASCII to a program, so use ASCII characters in the password, or PowerShell 7. Run the same command again to change the password; that also signs the user out everywhere. A user name is 1 to 64 characters from `A-Z a-z 0-9 . _ -` and is not case sensitive. The password is 12 to 128 characters and must not be the user name; there are no other rules (a phrase of a few words is fine).

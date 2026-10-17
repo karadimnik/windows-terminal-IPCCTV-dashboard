@@ -1,7 +1,8 @@
 # A portable NVR, grown beside the current one
 
-Status: UPDATED 2026-10-17. Stages 0, 1 and 2 are built, merged into `portable-nvr` and pushed (head `f90b987`); Stages 3, 4 and 5
-are not started. The single place to read where things stand is the **Status board** below, and the checklist is
+Status: UPDATED 2026-10-17. Stages 0, 1 and 2 are built, merged into `portable-nvr` and pushed (head `f90b987`); the LAN listener's
+token has been replaced by a login page with brute-force protection on the branch `portable-nvr-login` (built and proven, NOT merged
+and not pushed); Stages 3, 4 and 5 are not started. The single place to read where things stand is the **Status board** below, and the checklist is
 `todo.md` beside this file. Origin: the Operator's direction in `tasks/ipcctv-recording/todo.md` [87].
 
 ## WHERE THIS LIVES - the Operator's rule (2026-10-15)
@@ -30,6 +31,7 @@ plan, approved by the Operator as it went. OPEN = not started or not proven.
 | Stage 2a LAN media address, tile diagnostics | DONE | merged `87871d0`; `livelan`; Firefox confirmed on the real system 2026-10-16 |
 | Stage 2b HTTPS listener, local CA with name constraints, token, limiter | DONE | merged `97fd3fe`; `livetls`; real phone confirmed by the Operator 2026-10-17 |
 | Stage 2b.1 HTTPS listener view-only by default | DONE | merged `1e05dd8` |
+| Stage 2b.2 LAN login instead of the token: users, sessions, brute-force protection | BUILT, not merged | branch `portable-nvr-login`; Go tests, `livetls`/`uiguard`/`uileak` in Chrome and Edge; the Operator's real LAN install still runs the token build until he switches (docs/ui.md, "Signing in on the LAN") |
 | Stage 2c demo `-Lan` / `-Tls` for a phone test with fake cameras | ADHOC, DONE | merged `e15dbb4` |
 | Live grid fills the window, camera modal, fullscreen | ADHOC, DONE | merged `3fa1979`; `livepage` |
 | Live robustness: hidden-window grace, stall detection, recovery, diagnostics v3 | ADHOC, DONE | merged `629bb5e`; `liverobust` |
@@ -423,7 +425,7 @@ Honest note on the schedule: the clock change on 25 Oct 2026 is 8 days away and 
 
 ### B. Fully over the LAN
 
-Done and proven on the real system: HTTPS with a local CA, a mandatory token, a failure limiter, view-only by default,
+Done and proven on the real system: HTTPS with a local CA, a mandatory token (replaced by a login on `portable-nvr-login`, see Stage 2b.2), a failure limiter, view-only by default,
 Live over the LAN in Chrome and Firefox on this PC and in a phone browser, a stable grid and a modal, recovery without reload.
 
 | # | Gap | Evidence | What closes it |
@@ -431,7 +433,7 @@ Live over the LAN in Chrome and Firefox on this PC and in a phone browser, a sta
 | L1 | NOT INSTALLED. The portable build is started by hand: the recorder with `-Nvr` from the portable folder, `camui` from a copy with flags and a token in a window's environment. The logon tasks still start the ORIGINAL system, so a reboot drops live view and the LAN page | the Status board; the 2026-10-17 phone session | An install step run from the portable folder (it re-points the three tasks), `camui` autostart with the TLS config, the token in an owner-only file, and the firewall rule created by a helper that asks for elevation; `-Status` checks all of it |
 | L2 | The LAN address is configuration, not detected. `LiveAdvertiseHosts`, `tlsListen` and the certificate follow it; if the address changes, live view breaks silently | the 2026-10-16 Firefox and phone sessions | Detect a change, regenerate, and raise an alert; keep recommending a router reservation |
 | L3 | Trusting the CA is manual per device (file, profile, trust toggle); no QR code; Android and iOS 18 behaviour unverified | docs/ui.md steps; the phone test was one device | A "Connect a device" page with a QR code and a per-device walkthrough; test on Android and iOS |
-| L4 | One shared token for every device: no names, no revocation of one device, no list of who is connected, no audit trail | `ui/token.go` | Per-device tokens with names, revoke, last-seen and a connected-devices list |
+| L4 | REPLACED by the login (branch `portable-nvr-login`): one shared token is gone; users sign in with a name and password, sessions are per browser, `auth.log` is the audit trail. Still open: user management (add/remove users, roles enforced, password change in the UI) and a per-device session list with revoke | `ui/auth_*.go` | User management on the login (todo P33) |
 | L5 | Control from the LAN is deliberately off (view-only). Doing start, stop, settings from the phone needs stronger authentication than a shared view token | `tlsReadOnly` design | Decision D9: stay view-only, or add a separate control credential with re-authentication |
 | L6 | Footage over the LAN is allowed by the view-only gate but untested on a phone; remux load per clip, range requests and seeking untested | the 2026-10-16 gate tests only | Verify on a phone; add concurrency limits for `/api/clip`; test seeking |
 | L7 | Alerts reach only the PC (toast, event log). Nothing tells the phone | `docs/alerts.md` | A webhook or push channel (OS5) |
