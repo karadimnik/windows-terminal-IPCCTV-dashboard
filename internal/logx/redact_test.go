@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const (
@@ -128,5 +129,43 @@ func TestRedactorUnit(t *testing.T) {
 	}
 	if got := r.attr(slog.Int("tokens_total", 3)); got.Value.String() != "***" {
 		t.Error("sensitive key must be masked whatever the value kind")
+	}
+}
+
+func TestErrAttributeIsTruncatedAfterRedaction(t *testing.T) {
+	r := NewRedactor()
+	r.Register("topsecret")
+	sink := NewMemorySink()
+	l, _ := New(Options{Sink: sink, Redactor: r, Getenv: func(string) string { return "" }})
+	log := l.For("x")
+
+	// a secret straddling the cut must be masked before cutting, never half-exposed
+	long := strings.Repeat("a", 1020) + "topsecret" + strings.Repeat("b", 500)
+	log.Error("boom", Err(errors.New(long)))
+	// multi-byte rune on the boundary: byte 1024 falls inside a 3-byte rune
+	multi := strings.Repeat("a", 1023) + "\u20ac\u20ac"
+	log.Error("boom", "err", multi)
+	short := strings.Repeat("c", 1024)
+	log.Error("boom", "err", short)
+	log.Error("boom", "note", strings.Repeat("n", 3000)) // negative control: only err is bounded
+
+	lines := sink.Lines()
+	if strings.Contains(lines[0], "topsecret") || strings.Contains(lines[0], "secret") {
+		t.Errorf("secret leaked: %.200s", lines[0])
+	}
+	if !strings.Contains(lines[0], "...(truncated ") || !strings.Contains(lines[0], " bytes)") {
+		t.Errorf("no truncation marker: %.100s", lines[0])
+	}
+	if !strings.Contains(lines[0], "(truncated 499 bytes)") {
+		t.Errorf("unexpected truncated count: %s", lines[0][len(lines[0])-60:])
+	}
+	if !utf8.ValidString(lines[1]) || strings.Contains(lines[1], "\ufffd") || !strings.Contains(lines[1], "(truncated 6 bytes)") {
+		t.Errorf("rune-unsafe or wrong count: %s", lines[1][len(lines[1])-40:])
+	}
+	if strings.Contains(lines[2], "truncated") {
+		t.Errorf("1024-byte err must not be truncated")
+	}
+	if strings.Contains(lines[3], "truncated") {
+		t.Errorf("non-err attribute must not be truncated")
 	}
 }

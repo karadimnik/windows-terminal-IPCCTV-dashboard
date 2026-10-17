@@ -29,8 +29,10 @@ type core struct {
 	ops       []op
 }
 
+// Enabled is permissive when an audit sink exists: whether a record is audit=true is known only once
+// its attributes are read, and an audit record bypasses the level filter. Handle filters the main sink.
 func (h core) Enabled(_ context.Context, l slog.Level) bool {
-	return l >= h.s.ctl.Level(h.component)
+	return h.s.audit != nil || l >= h.s.ctl.Level(h.component)
 }
 
 func (h core) WithAttrs(attrs []slog.Attr) slog.Handler {
@@ -75,6 +77,11 @@ func (h core) Handle(_ context.Context, rec slog.Record) (err error) {
 	}
 	rec.Attrs(func(a slog.Attr) bool { addAttr(a); return true })
 
+	mainOn := rec.Level >= h.s.ctl.Level(h.component)
+	if !mainOn && !(audit && h.s.audit != nil) {
+		return nil
+	}
+
 	t := rec.Time
 	if h.s.now != nil {
 		t = h.s.now()
@@ -82,7 +89,9 @@ func (h core) Handle(_ context.Context, rec slog.Record) (err error) {
 		t = time.Now()
 	}
 	line := []byte(formatLine(h.s.json, t.In(h.s.loc), rec.Level, h.component, rec.Message, root))
-	_, _ = h.s.sink.Write(line)
+	if mainOn {
+		_, _ = h.s.sink.Write(line)
+	}
 	if audit && h.s.audit != nil {
 		_, _ = h.s.audit.Write(line)
 	}
