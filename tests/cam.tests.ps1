@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'liverobust', 'livegone', 'livelan', 'livetls')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'liverobust', 'livegone', 'livelan', 'livetls', 'downalert', 'downalertrun')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -54,7 +54,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Get-CamTestRepo
 $run = New-CamTestRun
 
-$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'relayapi', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'livecfg', 'livesecret')
+$cameraFree = @('parse', 'cameralist', 'inputs', 'viewer', 'viewerpw', 'relayapi', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'livecfg', 'livesecret', 'downalert', 'downalertrun')
 if (-not $Checks) { $Checks = $cameraFree }
 if (-not $EvidenceDir) { $EvidenceDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\evidence' }
 
@@ -5444,6 +5444,186 @@ function Invoke-CamCheckStallWatch {
         -Message 'the stall watchdog kills a suspended child about StallFactor x SegmentSeconds after its last segment write, and never a healthy one'
 }
 
+function Invoke-CamCheckDownAlert {
+    <#
+        [92] alert 110, decided on synthetic scans through the product's own
+        Measure-CamCameraDown and Get-CamDownAlertSeconds.
+
+        A healthy camera is a full segment past its last progress marker when
+        the boundary comes, plus the keyframe wait and a status tick, before the
+        next status tick's directory scan sees the new file. With CameraDownAlertMinutes equal to
+        SegmentSeconds - the default - that window raised a false alert, so the
+        threshold has a floor: one segment + the status interval + 30 s. The
+        archive scan interval plays no part (one row guards that). The expected
+        values below are literals, not the formula.
+    #>
+    param($Run)
+
+    . (Get-CamTestRecorderFunctions -Name 'Get-CamDownAlertSeconds', 'Measure-CamCameraDown')
+    $evidence = @()
+    $ok = $true
+    $t0 = [DateTime]::new(2026, 10, 17, 8, 30, 1, [DateTimeKind]::Utc)
+
+    function Get-CamTestDownVerdict {
+        param($Config, $Scan, [DateTime]$Started, [DateTime]$Now)
+        $limit = Get-CamDownAlertSeconds -Config $Config
+        $down = Measure-CamCameraDown -Scan $Scan -SupervisorStartedAt $Started -Now $Now
+        # The supervisor's own test: it alerts when seconds are NOT <= the limit.
+        return [pscustomobject]@{ Seconds = $down.Seconds; Limit = $limit; Alert = (-not ($down.Seconds -le $limit)) }
+    }
+
+    $defaults = Get-CamConfigDefault
+    $fresh = @{ NewestClosedWrite = $t0.AddSeconds(-1); CurrentCreated = $t0 }
+    $older = @{ NewestClosedWrite = $t0.AddHours(-2); CurrentCreated = $t0.AddHours(-2) }
+    $rows = @(
+        @{ Label = 'defaults, stale scan at the boundary'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 901; Want = $false },
+        @{ Label = 'defaults, stale scan at the keyframe wait'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 930; Want = $false },
+        @{ Label = 'defaults, exactly the effective limit'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 935; Want = $false },
+        @{ Label = 'defaults, one second past the limit'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 936; Want = $true },
+        @{ Label = 'defaults, camera dark for 20 minutes'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 1200; Want = $true },
+        @{ Label = 'no progress ever, supervisor start is the floor'; Config = $defaults; Scan = $null; Started = $t0; After = 901; Want = $false },
+        @{ Label = 'no progress ever, past the limit'; Config = $defaults; Scan = $null; Started = $t0; After = 936; Want = $true },
+        @{ Label = 'empty directory scan, past the limit'; Config = $defaults; Scan = @{ NewestClosedWrite = $null; CurrentCreated = $null }; Started = $t0; After = 936; Want = $true },
+        @{ Label = 'progress older than the supervisor start'; Config = $defaults; Scan = $older; Started = $t0; After = 901; Want = $false },
+        @{ Label = 'progress older than the supervisor start, past limit'; Config = $defaults; Scan = $older; Started = $t0; After = 936; Want = $true })
+    foreach ($row in $rows) {
+        $verdict = Get-CamTestDownVerdict -Config $row.Config -Scan $row.Scan -Started $row.Started -Now $t0.AddSeconds($row.After)
+        $good = ($verdict.Alert -eq $row.Want)
+        if (-not $good) { $ok = $false }
+        $evidence += ("{0,-4} {1,-56} +{2,4} s: age {3,7} s, limit {4,6} s -> alert {5} (want {6})" -f `
+            $(if ($good) { 'ok' } else { 'FAIL' }), $row.Label, $row.After, (Format-CamNumber -Value $verdict.Seconds -Format '0.0'), (Format-CamNumber -Value $verdict.Limit -Format '0'), $verdict.Alert, $row.Want)
+    }
+
+    # Negative control: the pre-fix rule, CameraDownAlertMinutes x 60, alerts at
+    # +901 on the same scan, so the rows above can tell the two apart.
+    $oldLimit = [double]$defaults.CameraDownAlertMinutes * 60
+    $oldAlert = (-not ((Measure-CamCameraDown -Scan $fresh -SupervisorStartedAt $t0.AddHours(-3) -Now $t0.AddSeconds(901)).Seconds -le $oldLimit))
+    $newAlert = (Get-CamTestDownVerdict -Config $defaults -Scan $fresh -Started $t0.AddHours(-3) -Now $t0.AddSeconds(901)).Alert
+    $evidence += ("control: the pre-fix limit is {0} s and alerts at +901 s: {1}; the product alerts at +901 s: {2}" -f $oldLimit, $oldAlert, $newAlert)
+    if (-not $oldAlert -or $newAlert) { $ok = $false; $evidence += 'FAIL: the pre-fix rule must alert at +901 s and the product must not' }
+
+    # The documented effective limit: literals, in seconds.
+    $table = @(
+        @{ Seg = 900; Min = 5; Scan = 60; Status = 5; Want = 935 }, @{ Seg = 900; Min = 15; Scan = 60; Status = 5; Want = 935 }, @{ Seg = 900; Min = 60; Scan = 60; Status = 5; Want = 3600 },
+        @{ Seg = 1800; Min = 5; Scan = 60; Status = 5; Want = 1835 }, @{ Seg = 1800; Min = 15; Scan = 60; Status = 5; Want = 1835 }, @{ Seg = 1800; Min = 60; Scan = 60; Status = 5; Want = 3600 },
+        @{ Seg = 60; Min = 5; Scan = 60; Status = 5; Want = 300 }, @{ Seg = 60; Min = 15; Scan = 60; Status = 5; Want = 900 }, @{ Seg = 60; Min = 60; Scan = 60; Status = 5; Want = 3600 },
+        @{ Seg = 900; Min = 15; Scan = 300; Status = 5; Want = 935 }, @{ Seg = 900; Min = 15; Scan = 5; Status = 5; Want = 935 }, @{ Seg = 900; Min = 15; Scan = 60; Status = 30; Want = 960 })
+    foreach ($case in $table) {
+        $config = Get-CamConfigDefault
+        $config.SegmentSeconds = $case.Seg; $config.CameraDownAlertMinutes = $case.Min; $config.ArchiveScanSeconds = $case.Scan; $config.StatusIntervalSeconds = $case.Status
+        $got = Get-CamDownAlertSeconds -Config $config
+        $before = Get-CamTestDownVerdict -Config $config -Scan $fresh -Started $t0.AddHours(-3) -Now $t0.AddSeconds($case.Want)
+        $after = Get-CamTestDownVerdict -Config $config -Scan $fresh -Started $t0.AddHours(-3) -Now $t0.AddSeconds($case.Want + 1)
+        $good = ($got -eq $case.Want -and -not $before.Alert -and $after.Alert)
+        if (-not $good) { $ok = $false }
+        $evidence += ("{0,-4} segment {1,4} s, configured {2,2} min, scan {3,3} s, status {4,2} s -> effective {5,5} s (want {6}); quiet at +{6}, alerts at +{7}" -f `
+            $(if ($good) { 'ok' } else { 'FAIL' }), $case.Seg, $case.Min, $case.Scan, $case.Status, (Format-CamNumber -Value $got -Format '0'), $case.Want, ($case.Want + 1))
+    }
+
+    Add-CamTestResult -Run $Run -Check 'downalert' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) -Evidence $evidence `
+        -Message ("alert 110 waits for max(CameraDownAlertMinutes, segment + status + 30 s) without progress: {0} rows, {1} configurations, a stale scan at a segment boundary never alerts" -f $rows.Count, $table.Count)
+}
+
+
+function Invoke-CamCheckDownAlertRun {
+    <#
+        [92] alert 110 against the real supervisor and a synthetic camera.
+
+        SegmentSeconds 20, so the effective limit is 20 + 1 + 30 = 51 s, with CameraDownAlertMinutes set to the 20 s segment so that the
+        pre-fix rule alerts whenever a status tick lands in the wait for the
+        next segment. Segments cut at the first keyframe after a 20 s clock
+        boundary (-segment_atclocktime), and the camera sends one every 11 s,
+        so each cut falls 2 s later than the one before and a segment lasts
+        22 s: the seconds past the boundary that a real camera's GOP and the
+        status tick add to a 900 s segment.
+
+        - healthy: three segment rolls, no alert 110 at all;
+        - dark: the publisher is killed. Exactly one alert 110, no sooner than
+          the effective limit after the camera's last file progress and not
+          much later.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $ok = $true
+    $port = 18559
+    $name = 'synth1'
+    $segment = 20
+    $limit = 51
+    $sandbox = New-CamTestSynthSandbox -Name 'downalertrun' -CameraName $name -Port $port `
+        -Config @{ SegmentSeconds = $segment; StatusIntervalSeconds = 1; ArchiveScanSeconds = 3; ReconcileSeconds = 2; BackoffStartSeconds = 1; CameraDownAlertMinutes = ($segment / 60.0) }
+    $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
+
+    $reference = {
+        $files = @(Get-ChildItem -LiteralPath $camDir -File -Force -ErrorAction SilentlyContinue)
+        if ($files.Count -eq 0) { return $null }
+        $current = $files | Sort-Object -Property CreationTimeUtc -Descending | Select-Object -First 1
+        $latest = $current.CreationTimeUtc
+        foreach ($file in $files) { if ($file.FullName -ne $current.FullName -and $file.LastWriteTimeUtc -gt $latest) { $latest = $file.LastWriteTimeUtc } }
+        return $latest
+    }
+    $segmentCount = { @(Get-CamTestSegmentFiles -Dir $camDir -SafeName $name -Config $sandbox.Config).Count }
+    $alertLines = { if (Test-Path -LiteralPath $sandbox.AlertLog) { @(Get-Content -LiteralPath $sandbox.AlertLog | Where-Object { $_ -like '110 *' }) } else { @() } }
+
+    $camera = $null
+    $process = $null
+    try {
+        $camera = Start-CamTestSyntheticCamera -Dir $sandbox.Dir -Port $port -PathName $name -GopSeconds 11
+        $process = Start-CamTestSupervisor -Sandbox $sandbox
+        $child = Wait-CamTestChildPid -Sandbox $sandbox -SupervisorProcess $process -CameraName $name -TimeoutSeconds 20
+        $evidence += ("synthetic camera pid {0}, publisher pid {1}; supervisor pid {2}; child pid {3}; segment {4} s, GOP 11 s, effective limit {5} s" -f `
+            $camera.MediaMtx.Id, (@($camera.Publishers | ForEach-Object { $_.Id }) -join ','), $process.Id, $child, $segment, $limit)
+        $startLine = @(Get-Content -LiteralPath $sandbox.SupervisorLog | Where-Object { $_ -like '*alert 110*' }) | Select-Object -First 1
+        if ($startLine) { $evidence += ('  log: ' + $startLine) }
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ((& $segmentCount) -lt 1 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+        $first = & $segmentCount
+        $deadline = [DateTime]::UtcNow.AddSeconds(3 * ($segment + 11) + 30)
+        while (((& $segmentCount) - $first) -lt 3 -and [DateTime]::UtcNow -lt $deadline -and -not $process.HasExited) { Start-Sleep -Milliseconds 200 }
+        $rolls = (& $segmentCount) - $first
+        $healthyAlerts = @(& $alertLines)
+        $evidence += ("healthy: {0} segment roll(s); alert 110 count {1}" -f $rolls, $healthyAlerts.Count)
+        foreach ($line in $healthyAlerts) { $evidence += ('  alert: ' + $line) }
+        if ($rolls -lt 3 -or $healthyAlerts.Count -ne 0) { $ok = $false; $evidence += 'FAIL: a healthy camera raised alert 110, or did not roll three segments' }
+
+        if ($healthyAlerts.Count -eq 0) {
+            foreach ($publisher in $camera.Publishers) { try { $publisher.Kill() } catch { } }
+            $killedAt = [DateTime]::UtcNow
+            $deadline = $killedAt.AddSeconds($limit + 30)
+            while (@(& $alertLines).Count -eq 0 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 200 }
+            $alertedAt = [DateTime]::UtcNow
+            $progress = & $reference
+            $sinceProgress = ($alertedAt - $progress).TotalSeconds
+            Start-Sleep -Seconds 12
+            $darkAlerts = @(& $alertLines)
+            $evidence += ("dark: publisher killed; last file progress {0} s before the kill; alert seen {1} s after the last progress (limit {2} s); alert 110 count {3}" -f `
+                (Format-CamNumber -Value ($killedAt - $progress).TotalSeconds -Format '0.0'), (Format-CamNumber -Value $sinceProgress -Format '0.0'), $limit, $darkAlerts.Count)
+            foreach ($line in $darkAlerts) { $evidence += ('  alert: ' + $line) }
+            if ($darkAlerts.Count -ne 1) { $ok = $false; $evidence += 'FAIL: a dark camera must raise alert 110 exactly once' }
+            # Never before the limit; late by at most a status tick, a supervisor tick, a scan and this poll.
+            elseif ($sinceProgress -lt $limit -or $sinceProgress -gt ($limit + 8)) { $ok = $false; $evidence += 'FAIL: the alert was not about one effective limit after the last progress' }
+        }
+    }
+    catch { $ok = $false; $evidence += ('FAIL: threw: ' + $_.Exception.Message) }
+    finally {
+        if ($process) {
+            $stop = Stop-CamTestSupervisor -Sandbox $sandbox -Process $process
+            if (-not $stop.Ok) { $ok = $false; $evidence += ('FAIL: the sandbox supervisor did not stop cleanly: ' + (@($stop.Killed) -join ', ')) }
+        }
+        if ($camera -and -not (Stop-CamTestSyntheticCamera -Camera $camera)) { $ok = $false; $evidence += 'FAIL: a synthetic camera process did not exit' }
+    }
+
+    $leak = Test-CamTestSandboxLeak -Sandbox $sandbox
+    $evidence += $leak.Text
+    if (-not $leak.Ok) { $ok = $false }
+
+    Complete-CamPruneCheck -Run $Run -Check 'downalertrun' -Ok $ok -Evidence $evidence `
+        -Sandboxes @([pscustomobject]@{ Dir = $sandbox.Dir; Log = (Join-Path $env:TEMP 'cam-tests\downalertrun.none') }) `
+        -Message 'a healthy camera whose alert minutes equal its segment raises no alert 110 over three segments, and a dark one raises exactly one, at the effective limit'
+}
+
+
 function Invoke-CamCheckLogHeld {
     <#
         B3: Write-CamLog never throws when the APPEND fails, and the real
@@ -9669,6 +9849,8 @@ foreach ($check in $Checks) {
         'livelan'   { Invoke-CamCheckLiveLan   -Run $run }
         'livetls'   { Invoke-CamCheckLiveTls   -Run $run }
         'soak'      { Invoke-CamCheckSoak      -Run $run -DryRun:$SoakDryRun }
+        'downalert' { Invoke-CamCheckDownAlert -Run $run }
+        'downalertrun' { Invoke-CamCheckDownAlertRun -Run $run }
     }
 }
 

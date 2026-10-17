@@ -922,6 +922,10 @@ function Start-CamTestSyntheticCamera {
         # the recorder's ffmpeg warns, so a soak can fill a 2 MB camera log.
         [ValidateRange(2, 100)][int]$NonMonotonicEvery = 5,
         [ValidateRange(5, 120)][int]$FrameRate = 15,
+        # Seconds between keyframes. A -c copy segment cuts at the first
+        # keyframe after its boundary, so a longer GOP is what makes a segment
+        # last longer than SegmentSeconds, as it does on a real camera.
+        [ValidateRange(1, 30)][int]$GopSeconds = 1,
         # With both, reading needs this user and password (a wrong or absent
         # one is refused); publishing stays open on loopback so the
         # publishers need none. Fake credentials only.
@@ -983,7 +987,7 @@ function Start-CamTestSyntheticCamera {
                 '-re', '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=8000',
                 '-map', '0:v', '-map', '1:a',
                 '-c:v', 'libx264') + $encode + @('-pix_fmt', 'yuv420p',
-                '-g', "$FrameRate", '-keyint_min', "$FrameRate", '-sc_threshold', '0',
+                '-g', [string]([int]$FrameRate * $GopSeconds), '-keyint_min', [string]([int]$FrameRate * $GopSeconds), '-sc_threshold', '0',
                 '-c:a', 'pcm_alaw', '-ar', '8000', '-ac', '1')
             if ($NonMonotonic) { $publish += '-bsf:v', ('setts=ts=if(eq(mod(N\,{0})\,{1})\,PREV_OUTPTS\,PTS)' -f $NonMonotonicEvery, ($NonMonotonicEvery - 1)) }
             $publish += @('-f', 'rtsp', '-rtsp_transport', 'tcp', "rtsp://127.0.0.1:$Port/$name")
