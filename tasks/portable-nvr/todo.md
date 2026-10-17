@@ -40,16 +40,18 @@ Operator's own action or decision.
 
 ## Open: fully over the LAN (see plan.md, section B)
 
-- [ ] **P30** (L1) Install and autostart the portable build: re-point the three tasks from the portable folder, `camui` with the TLS config,
+- [ ] **P30** (L1) Install and autostart the portable build WITHOUT touching the original (own task names, own launcher folder, created disabled, a reversible switch between the two systems; Operator rule 2026-10-17), `camui` with the TLS config,
   token in an owner-only file, a firewall helper that asks for elevation, `-Status` checks all of it. Needs D10. (Op decision)
 - [ ] **P31** (L2) Detect a LAN address change, regenerate the certificate and the advertised host, alert.
 - [ ] **P32** (L3) "Connect a device" page with a QR code and per-device steps.
-- [ ] **P33** (L4) Per-device tokens: names, revoke, last seen, connected-devices list, audit trail.
+- [~] **P33** (L4) REPLACED by a login page with brute-force protection (commissioned 2026-10-17, branch `portable-nvr-login`); user management, roles, device list and audit trail are built on it later.
 - [ ] **P34** (L5, D9) Control from the LAN with a separate credential and re-authentication, or stay view-only. (Op decision)
 - [ ] **P35** (L7) Alerts to the phone (webhook or push), shared with OS5.
 - [ ] **P36** (L9, D8) Hide camera addresses from LAN devices. (Op decision)
 
-## Open: fully OS independent (see plan.md, section A)
+## Open: fully OS independent (see plan.md, section A; designs: `os-independent-hld.md`, `os-independent-lld.md`; specification: `spec/`)
+
+**Hard rules (Operator, 2026-10-17):** R1 one executable, `holocron`, for every action including install and uninstall, no scripts and no second executable; R2 every action logged at a level controllable per component and at run time. Decisions D2 to D18 are settled (HLD section 9); D19 is open.
 
 - [ ] **P40** (OS9) Write `status.json` down as a versioned schema and test the PowerShell recorder against it. Prerequisite of Stage 4.
 - [ ] **P41** (OS3, OS4, D12) Portable camera-secret design; recorder reads only through the relay. (Op decision)
@@ -60,7 +62,7 @@ Operator's own action or decision.
 - [ ] **P45** (OS6) Install and autostart per OS: systemd, launchd, Windows service or task.
 - [ ] **P46** (OS8) `camui` control backend interface so it no longer needs `powershell.exe` and `schtasks.exe`; default archive root from config.
 - [ ] **P47** (OS7) The web app carries the health strip's information; mpv becomes optional and Windows-only.
-- [ ] **P48** (OS11, OS12, D1, D2, D11) Own repository, name, CI matrix, release builds. At the end.
+- [ ] **P48** (OS11, OS12, D1, D11) Own repository (name: Holocron), CI matrix, release builds. At the end.
 
 ## Planned, not built: the stray-process guard (specification for P43)
 

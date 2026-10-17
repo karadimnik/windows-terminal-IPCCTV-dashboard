@@ -35,6 +35,8 @@ plan, approved by the Operator as it went. OPEN = not started or not proven.
 | Live robustness: hidden-window grace, stall detection, recovery, diagnostics v3 | ADHOC, DONE | merged `629bb5e`; `liverobust` |
 | Fit / Fill toggle | ADHOC, DONE | merged `436b363` |
 | Alert 110 false-alarm floor (original repo, todo [92]) | ADHOC, DONE on `master` + merged into `portable-nvr` | pushed `b69d06d`, `f90b987`; live in the running NVR only after its next restart |
+| Login page replaces the LAN token (Operator, 2026-10-17) | COMMISSIONED, in progress on `portable-nvr-login` | replaces L4's shared token; PBKDF2 passwords, per-IP and per-username throttling, loopback setup page |
+| OS-independent track: behaviour inventories, high-level design, low-level plan | DONE as documents (not built) | `spec/inventory-recorder.md`, `spec/inventory-supervisor.md`, `os-independent-hld.md`, `os-independent-lld.md` |
 | Stray-process guard S1 to S6 | PLANNED (specification for Stage 5, not built in PowerShell) | section below |
 | Stage 3 internet via a private overlay | OPEN, gated by a security review | - |
 | Stage 4 portable Go recorder, shadow mode | OPEN | - |
@@ -428,10 +430,10 @@ Live over the LAN in Chrome and Firefox on this PC and in a phone browser, a sta
 
 | # | Gap | Evidence | What closes it |
 |---|---|---|---|
-| L1 | NOT INSTALLED. The portable build is started by hand: the recorder with `-Nvr` from the portable folder, `camui` from a copy with flags and a token in a window's environment. The logon tasks still start the ORIGINAL system, so a reboot drops live view and the LAN page | the Status board; the 2026-10-17 phone session | An install step run from the portable folder (it re-points the three tasks), `camui` autostart with the TLS config, the token in an owner-only file, and the firewall rule created by a helper that asks for elevation; `-Status` checks all of it |
+| L1 | NOT INSTALLED. The portable build is started by hand: the recorder with `-Nvr` from the portable folder, `camui` from a copy with flags and a token in a window's environment. The logon tasks still start the ORIGINAL system, so a reboot drops live view and the LAN page | the Status board; the 2026-10-17 phone session | A SEPARATE portable install (Operator rule, 2026-10-17: the original repository, its three logon tasks and its launcher files stay untouched and working): own task names and launcher folder, created DISABLED, with an explicit reversible switch between the two systems; `camui` autostart with the TLS config, the token in an owner-only file, and the firewall rule created by a helper that asks for elevation; `-Status` checks all of it |
 | L2 | The LAN address is configuration, not detected. `LiveAdvertiseHosts`, `tlsListen` and the certificate follow it; if the address changes, live view breaks silently | the 2026-10-16 Firefox and phone sessions | Detect a change, regenerate, and raise an alert; keep recommending a router reservation |
 | L3 | Trusting the CA is manual per device (file, profile, trust toggle); no QR code; Android and iOS 18 behaviour unverified | docs/ui.md steps; the phone test was one device | A "Connect a device" page with a QR code and a per-device walkthrough; test on Android and iOS |
-| L4 | One shared token for every device: no names, no revocation of one device, no list of who is connected, no audit trail | `ui/token.go` | Per-device tokens with names, revoke, last-seen and a connected-devices list |
+| L4 | One shared token for every device. REPLACED by the login page (Operator, 2026-10-17): username and password, brute-force protection; user management is built on it later | `ui/token.go` | Commissioned: `portable-nvr-login`; later per-user roles, names, revoke, connected-devices list |
 | L5 | Control from the LAN is deliberately off (view-only). Doing start, stop, settings from the phone needs stronger authentication than a shared view token | `tlsReadOnly` design | Decision D9: stay view-only, or add a separate control credential with re-authentication |
 | L6 | Footage over the LAN is allowed by the view-only gate but untested on a phone; remux load per clip, range requests and seeking untested | the 2026-10-16 gate tests only | Verify on a phone; add concurrency limits for `/api/clip`; test seeking |
 | L7 | Alerts reach only the PC (toast, event log). Nothing tells the phone | `docs/alerts.md` | A webhook or push channel (OS5) |
@@ -460,12 +462,12 @@ portability before remote access; the order above follows what he asked for.
 | # | Decision | Recommendation |
 |---|---|---|
 | D1 | Where the new code lives | **DECIDED by the Operator:** on the branch `portable-nvr`, started from master, never merged into master, moved to its own repository when finished. |
-| D2 | Name of the new system | He chooses; none is needed before Stage 4. |
+| D2 | Name of the new system | **DECIDED 2026-10-17: Holocron** (executable `holocron`). |
 | D3 | Tile policy | **CONFIRMED by Stage 0 and Spike C:** sub-stream (`stream2`) in the grid, main stream on focus; every camera has a usable sub-stream. |
 | D4 | Order of Stages 2-5 | As listed; portability before the LAN is possible. |
-| D5 | Shadow-run length for Stage 4 | At least one full retention cycle. REVISED 2026-10-17: the 25 Oct 2026 clock change is 8 days away and no Go recorder exists, so the run cannot span it; the next change is 28 Mar 2027. |
+| D5 | Shadow-run length for Stage 4 | **DECIDED 2026-10-17: 7 days** of shadow recording on two cameras, then the cutover decision; the 28 Mar 2027 clock change is covered by the ported DST test table and observed in production with the PowerShell system as fallback. |
 | D6 | Keep the PowerShell recorder as a permanent fallback | Yes: it costs nothing and follows "nothing is removed". |
-| D7 | Autostart in attached or service mode (Stage 5) | Support both; the Operator picks the default at install. Attached keeps today's behaviour (a visible window you close to stop); service is headless and UI-controlled. |
+| D7 | Autostart in attached or service mode (Stage 5). **ACCEPTED 2026-10-17** (logon task default, optional service; all done by `holocron install`) | Support both; the Operator picks the default at install. Attached keeps today's behaviour (a visible window you close to stop); service is headless and UI-controlled. |
 | D8 | May a LAN device with the token see camera addresses (`/api/cameras`)? | Hide the address fields in view-only mode. Unanswered. |
 | D9 | Control (start, stop, settings) from the LAN | Stay view-only until a separate control credential exists (L5). Unanswered. |
 | D10 | When does the portable build become the installed system (L1)? | After the full harness runs clean once; the original stays installable. Unanswered. |
