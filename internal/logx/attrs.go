@@ -14,12 +14,12 @@ const (
 
 // Standard attribute helpers for action records.
 
-func Action(name string) slog.Attr     { return slog.String("action", name) }
-func Actor(actor string) slog.Attr     { return slog.String("actor", actor) }
-func Target(target string) slog.Attr   { return slog.String("target", target) }
-func Result(result string) slog.Attr   { return slog.String("result", result) }
-func ActionID(id string) slog.Attr     { return slog.String("action_id", id) }
-func PID(pid int) slog.Attr            { return slog.Int("pid", pid) }
+func Action(name string) slog.Attr         { return slog.String("action", name) }
+func Actor(actor string) slog.Attr         { return slog.String("actor", actor) }
+func Target(target string) slog.Attr       { return slog.String("target", target) }
+func Result(result string) slog.Attr       { return slog.String("result", result) }
+func ActionID(id string) slog.Attr         { return slog.String("action_id", id) }
+func PID(pid int) slog.Attr                { return slog.Int("pid", pid) }
 func DurationMS(d time.Duration) slog.Attr { return slog.Int64("duration_ms", d.Milliseconds()) }
 
 // Audit marks a record for the audit stream.

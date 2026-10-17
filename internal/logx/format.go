@@ -73,6 +73,19 @@ func textString(s string) string {
 	return s
 }
 
+// msgString keeps spaces in the message readable and quotes it only when it holds control characters.
+func msgString(s string) string {
+	if !utf8.ValidString(s) {
+		return strconv.Quote(s)
+	}
+	for _, r := range s {
+		if r != ' ' && (r < ' ' || !unicode.IsPrint(r)) {
+			return strconv.Quote(s)
+		}
+	}
+	return s
+}
+
 func textValue(v slog.Value) string {
 	switch v.Kind() {
 	case slog.KindString:
@@ -189,7 +202,7 @@ func formatLine(asJSON bool, t time.Time, level slog.Level, component, msg strin
 		sb.WriteString(" [" + component + "]")
 	}
 	sb.WriteByte(' ')
-	sb.WriteString(textString(msg))
+	sb.WriteString(msgString(msg))
 	attrs.writeText(&sb, "")
 	sb.WriteByte('\n')
 	return sb.String()

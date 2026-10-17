@@ -114,7 +114,9 @@ type redactHandler struct {
 	inner slog.Handler
 }
 
-func (h redactHandler) Enabled(ctx context.Context, l slog.Level) bool { return h.inner.Enabled(ctx, l) }
+func (h redactHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	return h.inner.Enabled(ctx, l)
+}
 
 func (h redactHandler) Handle(ctx context.Context, rec slog.Record) error {
 	out := slog.NewRecord(rec.Time, rec.Level, h.r.String(rec.Message), rec.PC)
