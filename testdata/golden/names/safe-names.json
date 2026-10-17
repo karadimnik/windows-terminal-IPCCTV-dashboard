@@ -1,0 +1,711 @@
+{
+    "fixture":  "SYNTHETIC CORPUS: invented camera names. The expected values are what Get-CamSafeName and Get-CamRelayPathName return today.",
+    "description":  "name -\u003e safeName (the camera folder and file prefix) or the error kind; relayPath is the MediaMTX path name derived from it. caseInsensitiveFolderCollisions and relayPathCollisions list ids whose results collide (the product refuses the second camera by throwing in Get-CamRelayPathMap for relay collisions).",
+    "reservedNames":  [
+                          "CON",
+                          "PRN",
+                          "AUX",
+                          "NUL",
+                          "COM1",
+                          "COM2",
+                          "COM3",
+                          "COM4",
+                          "COM5",
+                          "COM6",
+                          "COM7",
+                          "COM8",
+                          "COM9",
+                          "LPT1",
+                          "LPT2",
+                          "LPT3",
+                          "LPT4",
+                          "LPT5",
+                          "LPT6",
+                          "LPT7",
+                          "LPT8",
+                          "LPT9"
+                      ],
+    "cases":  [
+                  {
+                      "id":  "ascii-simple",
+                      "name":  "Lobby Entrance",
+                      "show":  "Lobby Entrance",
+                      "ok":  true,
+                      "safeName":  "Lobby_Entrance",
+                      "safeNameLength":  14,
+                      "relayPath":  "lobbyentrance",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "ascii-underscore-dash",
+                      "name":  "Yard_Shed-2",
+                      "show":  "Yard_Shed-2",
+                      "ok":  true,
+                      "safeName":  "Yard_Shed-2",
+                      "safeNameLength":  11,
+                      "relayPath":  "yardshed2",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "spaces-trim-and-collapse",
+                      "name":  "  Back   Porch  ",
+                      "show":  "  Back   Porch  ",
+                      "ok":  true,
+                      "safeName":  "Back_Porch",
+                      "safeNameLength":  10,
+                      "relayPath":  "backporch",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "tab-and-newline",
+                      "name":  "A\tB\nC",
+                      "show":  "A\u003cU+0009\u003eB\u003cU+000A\u003eC",
+                      "ok":  true,
+                      "safeName":  "A_B_C",
+                      "safeNameLength":  5,
+                      "relayPath":  "abc",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "unicode-nbsp",
+                      "name":  "A\u00a0B",
+                      "show":  "A\u003cU+00A0\u003eB",
+                      "ok":  true,
+                      "safeName":  "A_B",
+                      "safeNameLength":  3,
+                      "relayPath":  "ab",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "unicode-em-space",
+                      "name":  "A\u2003B",
+                      "show":  "A\u003cU+2003\u003eB",
+                      "ok":  true,
+                      "safeName":  "A_B",
+                      "safeNameLength":  3,
+                      "relayPath":  "ab",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "unicode-ideographic-space",
+                      "name":  "A\u3000B",
+                      "show":  "A\u003cU+3000\u003eB",
+                      "ok":  true,
+                      "safeName":  "A_B",
+                      "safeNameLength":  3,
+                      "relayPath":  "ab",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "unicode-line-separator",
+                      "name":  "A\u2028B",
+                      "show":  "A\u003cU+2028\u003eB",
+                      "ok":  true,
+                      "safeName":  "A_B",
+                      "safeNameLength":  3,
+                      "relayPath":  "ab",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "unicode-next-line",
+                      "name":  "A\u0085B",
+                      "show":  "A\u003cU+0085\u003eB",
+                      "ok":  true,
+                      "safeName":  "A_B",
+                      "safeNameLength":  3,
+                      "relayPath":  "ab",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "unicode-zero-width-space",
+                      "name":  "A\u200bB",
+                      "show":  "A\u003cU+200B\u003eB",
+                      "ok":  true,
+                      "safeName":  "A\u200bB",
+                      "safeNameLength":  3,
+                      "relayPath":  "ab",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "unicode-leading-trailing-nbsp",
+                      "name":  "\u00a0Gate\u00a0",
+                      "show":  "\u003cU+00A0\u003eGate\u003cU+00A0\u003e",
+                      "ok":  true,
+                      "safeName":  "Gate",
+                      "safeNameLength":  4,
+                      "relayPath":  "gate",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "trailing-dot",
+                      "name":  "Garage.",
+                      "show":  "Garage.",
+                      "ok":  true,
+                      "safeName":  "Garage",
+                      "safeNameLength":  6,
+                      "relayPath":  "garage",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "trailing-dots-and-spaces",
+                      "name":  "Garage . .  ",
+                      "show":  "Garage . .  ",
+                      "ok":  true,
+                      "safeName":  "Garage_._",
+                      "safeNameLength":  9,
+                      "relayPath":  "garage",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "inner-dot",
+                      "name":  "Garage.North",
+                      "show":  "Garage.North",
+                      "ok":  true,
+                      "safeName":  "Garage.North",
+                      "safeNameLength":  12,
+                      "relayPath":  "garagenorth",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "leading-dot",
+                      "name":  ".hidden",
+                      "show":  ".hidden",
+                      "ok":  true,
+                      "safeName":  ".hidden",
+                      "safeNameLength":  7,
+                      "relayPath":  "hidden",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "percent",
+                      "name":  "100% Cam",
+                      "show":  "100% Cam",
+                      "ok":  true,
+                      "safeName":  "100%_Cam",
+                      "safeNameLength":  8,
+                      "relayPath":  "100cam",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "strftime-injection",
+                      "name":  "%Y%m%d",
+                      "show":  "%Y%m%d",
+                      "ok":  true,
+                      "safeName":  "%Y%m%d",
+                      "safeNameLength":  6,
+                      "relayPath":  "ymd",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "percent-z",
+                      "name":  "Cam%z",
+                      "show":  "Cam%z",
+                      "ok":  true,
+                      "safeName":  "Cam%z",
+                      "safeNameLength":  5,
+                      "relayPath":  "camz",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "leading-underscore",
+                      "name":  "_hidden",
+                      "show":  "_hidden",
+                      "ok":  true,
+                      "safeName":  "_hidden",
+                      "safeNameLength":  7,
+                      "relayPath":  "hidden",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "double-leading-underscore",
+                      "name":  "__x",
+                      "show":  "__x",
+                      "ok":  true,
+                      "safeName":  "__x",
+                      "safeNameLength":  3,
+                      "relayPath":  "x",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "underscore-only",
+                      "name":  "___",
+                      "show":  "___",
+                      "ok":  true,
+                      "safeName":  "___",
+                      "safeNameLength":  3,
+                      "relayPathOk":  false,
+                      "relayPath":  null,
+                      "relayPathError":  "no-letter-or-digit"
+                  },
+                  {
+                      "id":  "reserved-con",
+                      "name":  "CON",
+                      "show":  "CON",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "reserved-device-name",
+                      "error":  "Camera name \u0027CON\u0027 resolves to the reserved Windows device name \u0027CON\u0027. Rename the camera in cameras.json."
+                  },
+                  {
+                      "id":  "reserved-con-lower",
+                      "name":  "con",
+                      "show":  "con",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "reserved-device-name",
+                      "error":  "Camera name \u0027con\u0027 resolves to the reserved Windows device name \u0027con\u0027. Rename the camera in cameras.json."
+                  },
+                  {
+                      "id":  "reserved-con-extension",
+                      "name":  "Con.txt",
+                      "show":  "Con.txt",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "reserved-device-name",
+                      "error":  "Camera name \u0027Con.txt\u0027 resolves to the reserved Windows device name \u0027Con\u0027. Rename the camera in cameras.json."
+                  },
+                  {
+                      "id":  "reserved-com1",
+                      "name":  "COM1",
+                      "show":  "COM1",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "reserved-device-name",
+                      "error":  "Camera name \u0027COM1\u0027 resolves to the reserved Windows device name \u0027COM1\u0027. Rename the camera in cameras.json."
+                  },
+                  {
+                      "id":  "reserved-lpt9",
+                      "name":  "lpt9",
+                      "show":  "lpt9",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "reserved-device-name",
+                      "error":  "Camera name \u0027lpt9\u0027 resolves to the reserved Windows device name \u0027lpt9\u0027. Rename the camera in cameras.json."
+                  },
+                  {
+                      "id":  "reserved-aux-trailing-dot",
+                      "name":  "aux.",
+                      "show":  "aux.",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "reserved-device-name",
+                      "error":  "Camera name \u0027aux.\u0027 resolves to the reserved Windows device name \u0027aux\u0027. Rename the camera in cameras.json."
+                  },
+                  {
+                      "id":  "reserved-nul-spaced",
+                      "name":  " nul ",
+                      "show":  " nul ",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "reserved-device-name",
+                      "error":  "Camera name \u0027 nul \u0027 resolves to the reserved Windows device name \u0027nul\u0027. Rename the camera in cameras.json."
+                  },
+                  {
+                      "id":  "reserved-nul-space-dot-ext",
+                      "name":  "NUL . x",
+                      "show":  "NUL . x",
+                      "ok":  true,
+                      "safeName":  "NUL_._x",
+                      "safeNameLength":  7,
+                      "relayPath":  "nulx",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "not-reserved-console",
+                      "name":  "CONSOLE",
+                      "show":  "CONSOLE",
+                      "ok":  true,
+                      "safeName":  "CONSOLE",
+                      "safeNameLength":  7,
+                      "relayPath":  "console",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "not-reserved-com0",
+                      "name":  "COM0",
+                      "show":  "COM0",
+                      "ok":  true,
+                      "safeName":  "COM0",
+                      "safeNameLength":  4,
+                      "relayPath":  "com0",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "not-reserved-com10",
+                      "name":  "COM10",
+                      "show":  "COM10",
+                      "ok":  true,
+                      "safeName":  "COM10",
+                      "safeNameLength":  5,
+                      "relayPath":  "com10",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "not-reserved-con-inner",
+                      "name":  "My CON",
+                      "show":  "My CON",
+                      "ok":  true,
+                      "safeName":  "My_CON",
+                      "safeNameLength":  6,
+                      "relayPath":  "mycon",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "illegal-characters",
+                      "name":  "a\u003cb\u003ec:d\"e/f\\g|h?i*j",
+                      "show":  "a\u003cb\u003ec:d\"e/f\\g|h?i*j",
+                      "ok":  true,
+                      "safeName":  "abcdefghij",
+                      "safeNameLength":  10,
+                      "relayPath":  "abcdefghij",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "only-illegal-characters",
+                      "name":  "\u003c\u003e:\"/\\|?*",
+                      "show":  "\u003c\u003e:\"/\\|?*",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "no-legal-characters",
+                      "error":  "Camera name \u0027\u003c\u003e:\"/\\|?*\u0027 contains no characters that are legal in a Windows filename."
+                  },
+                  {
+                      "id":  "control-characters",
+                      "name":  "a\u0001b\u007fc",
+                      "show":  "a\u003cU+0001\u003eb\u003cU+007F\u003ec",
+                      "ok":  true,
+                      "safeName":  "abc",
+                      "safeNameLength":  3,
+                      "relayPath":  "abc",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "only-control-characters",
+                      "name":  "\u0001\u0002",
+                      "show":  "\u003cU+0001\u003e\u003cU+0002\u003e",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "no-legal-characters",
+                      "error":  "Camera name \u0027\u0001\u0002\u0027 contains no characters that are legal in a Windows filename."
+                  },
+                  {
+                      "id":  "empty",
+                      "name":  "",
+                      "show":  "",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "no-legal-characters",
+                      "error":  "Camera name \u0027\u0027 contains no characters that are legal in a Windows filename."
+                  },
+                  {
+                      "id":  "only-spaces",
+                      "name":  "   ",
+                      "show":  "   ",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "no-legal-characters",
+                      "error":  "Camera name \u0027   \u0027 contains no characters that are legal in a Windows filename."
+                  },
+                  {
+                      "id":  "only-dots",
+                      "name":  "...",
+                      "show":  "...",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "no-legal-characters",
+                      "error":  "Camera name \u0027...\u0027 contains no characters that are legal in a Windows filename."
+                  },
+                  {
+                      "id":  "single-dot",
+                      "name":  ".",
+                      "show":  ".",
+                      "ok":  false,
+                      "safeName":  null,
+                      "errorKind":  "no-legal-characters",
+                      "error":  "Camera name \u0027.\u0027 contains no characters that are legal in a Windows filename."
+                  },
+                  {
+                      "id":  "long-300",
+                      "name":  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                      "show":  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                      "ok":  true,
+                      "safeName":  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                      "safeNameLength":  300,
+                      "relayPath":  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "long-255",
+                      "name":  "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+                      "show":  "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+                      "ok":  true,
+                      "safeName":  "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+                      "safeNameLength":  255,
+                      "relayPath":  "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "long-with-spaces",
+                      "name":  "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+                      "show":  "word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word word",
+                      "ok":  true,
+                      "safeName":  "word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word_word",
+                      "safeNameLength":  399,
+                      "relayPath":  "wordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordwordword",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "case-collision-a",
+                      "name":  "Front Door",
+                      "show":  "Front Door",
+                      "ok":  true,
+                      "safeName":  "Front_Door",
+                      "safeNameLength":  10,
+                      "relayPath":  "frontdoor",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "case-collision-b",
+                      "name":  "front door",
+                      "show":  "front door",
+                      "ok":  true,
+                      "safeName":  "front_door",
+                      "safeNameLength":  10,
+                      "relayPath":  "frontdoor",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "case-collision-c",
+                      "name":  "FRONT DOOR",
+                      "show":  "FRONT DOOR",
+                      "ok":  true,
+                      "safeName":  "FRONT_DOOR",
+                      "safeNameLength":  10,
+                      "relayPath":  "frontdoor",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "relay-collision-dash",
+                      "name":  "Front-Door",
+                      "show":  "Front-Door",
+                      "ok":  true,
+                      "safeName":  "Front-Door",
+                      "safeNameLength":  10,
+                      "relayPath":  "frontdoor",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "relay-collision-joined",
+                      "name":  "FrontDoor",
+                      "show":  "FrontDoor",
+                      "ok":  true,
+                      "safeName":  "FrontDoor",
+                      "safeNameLength":  9,
+                      "relayPath":  "frontdoor",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "digits-only",
+                      "name":  "2026",
+                      "show":  "2026",
+                      "ok":  true,
+                      "safeName":  "2026",
+                      "safeNameLength":  4,
+                      "relayPath":  "2026",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "greek",
+                      "name":  "\u0395\u03af\u03c3\u03bf\u03b4\u03bf\u03c2",
+                      "show":  "\u003cU+0395\u003e\u003cU+03AF\u003e\u003cU+03C3\u003e\u003cU+03BF\u003e\u003cU+03B4\u003e\u003cU+03BF\u003e\u003cU+03C2\u003e",
+                      "ok":  true,
+                      "safeName":  "\u0395\u03af\u03c3\u03bf\u03b4\u03bf\u03c2",
+                      "safeNameLength":  7,
+                      "relayPathOk":  false,
+                      "relayPath":  null,
+                      "relayPathError":  "no-letter-or-digit"
+                  },
+                  {
+                      "id":  "greek-and-ascii",
+                      "name":  "Gate \u0391\u03b2",
+                      "show":  "Gate \u003cU+0391\u003e\u003cU+03B2\u003e",
+                      "ok":  true,
+                      "safeName":  "Gate_\u0391\u03b2",
+                      "safeNameLength":  7,
+                      "relayPath":  "gate",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "cyrillic",
+                      "name":  "\u041a\u0430\u043c\u0435\u0440\u0430",
+                      "show":  "\u003cU+041A\u003e\u003cU+0430\u003e\u003cU+043C\u003e\u003cU+0435\u003e\u003cU+0440\u003e\u003cU+0430\u003e",
+                      "ok":  true,
+                      "safeName":  "\u041a\u0430\u043c\u0435\u0440\u0430",
+                      "safeNameLength":  6,
+                      "relayPathOk":  false,
+                      "relayPath":  null,
+                      "relayPathError":  "no-letter-or-digit"
+                  },
+                  {
+                      "id":  "cjk",
+                      "name":  "\u524d\u9580",
+                      "show":  "\u003cU+524D\u003e\u003cU+9580\u003e",
+                      "ok":  true,
+                      "safeName":  "\u524d\u9580",
+                      "safeNameLength":  2,
+                      "relayPathOk":  false,
+                      "relayPath":  null,
+                      "relayPathError":  "no-letter-or-digit"
+                  },
+                  {
+                      "id":  "hebrew",
+                      "name":  "\u05e9\u05e2\u05e8",
+                      "show":  "\u003cU+05E9\u003e\u003cU+05E2\u003e\u003cU+05E8\u003e",
+                      "ok":  true,
+                      "safeName":  "\u05e9\u05e2\u05e8",
+                      "safeNameLength":  3,
+                      "relayPathOk":  false,
+                      "relayPath":  null,
+                      "relayPathError":  "no-letter-or-digit"
+                  },
+                  {
+                      "id":  "emoji",
+                      "name":  "Cam \ud83d\udcf7",
+                      "show":  "Cam \u003cU+D83D\u003e\u003cU+DCF7\u003e",
+                      "ok":  true,
+                      "safeName":  "Cam_\ud83d\udcf7",
+                      "safeNameLength":  6,
+                      "relayPath":  "cam",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "combining-acute",
+                      "name":  "Cafe\u0301",
+                      "show":  "Cafe\u003cU+0301\u003e",
+                      "ok":  true,
+                      "safeName":  "Cafe\u0301",
+                      "safeNameLength":  5,
+                      "relayPath":  "cafe",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "precomposed-e-acute",
+                      "name":  "Caf\u00e9",
+                      "show":  "Caf\u003cU+00E9\u003e",
+                      "ok":  true,
+                      "safeName":  "Caf\u00e9",
+                      "safeNameLength":  4,
+                      "relayPath":  "caf",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "fullwidth-letters",
+                      "name":  "\uff21\uff42\uff43",
+                      "show":  "\u003cU+FF21\u003e\u003cU+FF42\u003e\u003cU+FF43\u003e",
+                      "ok":  true,
+                      "safeName":  "\uff21\uff42\uff43",
+                      "safeNameLength":  3,
+                      "relayPathOk":  false,
+                      "relayPath":  null,
+                      "relayPathError":  "no-letter-or-digit"
+                  },
+                  {
+                      "id":  "turkish-dotted-capital-i",
+                      "name":  "Gar\u0130ge",
+                      "show":  "Gar\u003cU+0130\u003ege",
+                      "ok":  true,
+                      "safeName":  "Gar\u0130ge",
+                      "safeNameLength":  6,
+                      "relayPath":  "garge",
+                      "relayPathOk":  true
+                  },
+                  {
+                      "id":  "kelvin-sign",
+                      "name":  "K\u212alvin",
+                      "show":  "K\u003cU+212A\u003elvin",
+                      "ok":  true,
+                      "safeName":  "K\u212alvin",
+                      "safeNameLength":  6,
+                      "relayPath":  "klvin",
+                      "relayPathOk":  true
+                  }
+              ],
+    "caseInsensitiveFolderCollisions":  [
+                                            {
+                                                "folder":  "a_b",
+                                                "ids":  [
+                                                            "unicode-nbsp",
+                                                            "unicode-em-space",
+                                                            "unicode-ideographic-space",
+                                                            "unicode-line-separator",
+                                                            "unicode-next-line"
+                                                        ]
+                                            },
+                                            {
+                                                "folder":  "cafe\u0301",
+                                                "ids":  [
+                                                            "combining-acute",
+                                                            "precomposed-e-acute"
+                                                        ]
+                                            },
+                                            {
+                                                "folder":  "front_door",
+                                                "ids":  [
+                                                            "case-collision-a",
+                                                            "case-collision-b",
+                                                            "case-collision-c"
+                                                        ]
+                                            }
+                                        ],
+    "relayPathCollisions":  [
+                                {
+                                    "relayPath":  "ab",
+                                    "ids":  [
+                                                "unicode-nbsp",
+                                                "unicode-em-space",
+                                                "unicode-ideographic-space",
+                                                "unicode-line-separator",
+                                                "unicode-next-line",
+                                                "unicode-zero-width-space"
+                                            ]
+                                },
+                                {
+                                    "relayPath":  "abc",
+                                    "ids":  [
+                                                "tab-and-newline",
+                                                "control-characters"
+                                            ]
+                                },
+                                {
+                                    "relayPath":  "frontdoor",
+                                    "ids":  [
+                                                "case-collision-a",
+                                                "case-collision-b",
+                                                "case-collision-c",
+                                                "relay-collision-dash",
+                                                "relay-collision-joined"
+                                            ]
+                                },
+                                {
+                                    "relayPath":  "garage",
+                                    "ids":  [
+                                                "trailing-dot",
+                                                "trailing-dots-and-spaces"
+                                            ]
+                                },
+                                {
+                                    "relayPath":  "gate",
+                                    "ids":  [
+                                                "unicode-leading-trailing-nbsp",
+                                                "greek-and-ascii"
+                                            ]
+                                },
+                                {
+                                    "relayPath":  "hidden",
+                                    "ids":  [
+                                                "leading-dot",
+                                                "leading-underscore"
+                                            ]
+                                }
+                            ]
+}

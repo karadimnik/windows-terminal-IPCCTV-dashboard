@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:holocron:status.json:1",
+  "title": "Holocron / IPCCTV status.json, Schema 1",
+  "description": "Derived from Write-CamStatusFile (cam.recorder.ps1) and the two patch functions Set-CamStatusUnexpectedStop and Set-CamStatusWindowClosed (cam.common.ps1); where tasks/portable-nvr/spec/inventory-supervisor.md section 1.8 disagreed, the code won (see KNOWN-DIFFERENCES.md). Objects are open (additional properties allowed) for forward compatibility, but every known field is typed. A running document must be the full document; a stopped one may be the minimal document a patch creates when no file existed.",
+  "type": "object",
+  "required": ["Schema", "State", "StopKind", "SupervisorPid", "UpdatedAt"],
+  "properties": {
+    "Schema": { "const": 1 },
+    "State": { "enum": ["running", "stopped"] },
+    "StopKind": { "enum": ["", "requested", "interrupted", "unexpected", "window-closed"] },
+    "LastUnexpectedStop": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/lastUnexpectedStop" }] },
+    "LastWindowClose": { "$ref": "#/$defs/lastWindowClose" },
+    "SupervisorPid": { "type": "integer", "minimum": 0 },
+    "StartedAt": { "$ref": "#/$defs/timestamp" },
+    "UpdatedAt": { "$ref": "#/$defs/timestamp" },
+    "UptimeSeconds": { "type": "number", "minimum": 0 },
+    "RootPath": { "type": "string" },
+    "Container": { "type": "string" },
+    "SegmentSeconds": { "type": "integer", "minimum": 1 },
+    "Disk": { "$ref": "#/$defs/disk" },
+    "Prune": { "$ref": "#/$defs/prune" },
+    "Restreamer": { "$ref": "#/$defs/restreamer" },
+    "Live": { "$ref": "#/$defs/live" },
+    "Events": { "type": "array", "items": { "$ref": "#/$defs/event" } },
+    "Cameras": { "type": "array", "items": { "$ref": "#/$defs/camera" } }
+  },
+  "if": { "properties": { "State": { "const": "running" } }, "required": ["State"] },
+  "then": {
+    "required": ["LastUnexpectedStop", "StartedAt", "UptimeSeconds", "RootPath", "Container", "SegmentSeconds",
+                 "Disk", "Prune", "Restreamer", "Events", "Cameras"],
+    "properties": { "StopKind": { "const": "" } }
+  },
+  "$defs": {
+    "timestamp": {
+      "description": "Round-trip ('o') format in local time with the offset in force: 7 fractional digits and a numeric offset (never Z), or null for never.",
+      "type": ["string", "null"],
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{7}[+-]\\d{2}:\\d{2}$",
+      "format": "date-time"
+    },
+    "lastUnexpectedStop": {
+      "type": "object",
+      "required": ["At", "Reason", "SupervisorPid", "DetectedBy"],
+      "properties": {
+        "At": { "$ref": "#/$defs/timestamp" },
+        "Reason": { "type": "string" },
+        "SupervisorPid": { "type": "integer", "minimum": 0 },
+        "DetectedBy": { "enum": ["supervisor", "nvr host"] }
+      }
+    },
+    "lastWindowClose": {
+      "type": "object",
+      "required": ["At", "Reason", "WindowTitle", "DetectedBy"],
+      "properties": {
+        "At": { "$ref": "#/$defs/timestamp" },
+        "Reason": { "type": "string" },
+        "WindowTitle": { "type": "string" },
+        "DetectedBy": { "const": "nvr warden" }
+      }
+    },
+    "disk": {
+      "type": "object",
+      "required": ["FreeGB", "ReserveGB", "PruneHysteresisGB", "ArchiveGB", "ArchiveBytes", "ArchiveFiles",
+                   "OldestSegment", "NewestSegment", "MeasuredGBPerDay", "ProjectedDaysRemaining", "ScannedAt"],
+      "properties": {
+        "FreeGB": { "type": "number" },
+        "ReserveGB": { "type": "number" },
+        "PruneHysteresisGB": { "type": "number" },
+        "ArchiveGB": { "type": ["number", "null"] },
+        "ArchiveBytes": { "type": ["integer", "null"] },
+        "ArchiveFiles": { "type": ["integer", "null"] },
+        "OldestSegment": { "$ref": "#/$defs/timestamp" },
+        "NewestSegment": { "$ref": "#/$defs/timestamp" },
+        "MeasuredGBPerDay": { "type": ["number", "null"] },
+        "ProjectedDaysRemaining": { "type": ["number", "null"] },
+        "ScannedAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "prune": {
+      "type": "object",
+      "required": ["LastRunAt", "DeletedTotal", "FreedGBTotal", "Blocked", "LastMessage"],
+      "properties": {
+        "LastRunAt": { "$ref": "#/$defs/timestamp" },
+        "DeletedTotal": { "type": "integer", "minimum": 0 },
+        "FreedGBTotal": { "type": "number", "minimum": 0 },
+        "Blocked": { "type": "boolean" },
+        "LastMessage": { "type": "string" }
+      }
+    },
+    "restreamer": {
+      "description": "The recording relay. Always present, even when the relay is disabled.",
+      "type": "object",
+      "required": ["Enabled", "RelayBase", "Pid", "LastPid", "Alive", "StartedAt", "RestartsTotal", "Paths", "LastError", "LastErrorAt"],
+      "properties": {
+        "Enabled": { "type": "boolean" },
+        "RelayBase": { "type": "string" },
+        "Pid": { "type": ["integer", "null"] },
+        "LastPid": { "type": ["integer", "null"] },
+        "Alive": { "type": "boolean" },
+        "StartedAt": { "$ref": "#/$defs/timestamp" },
+        "RestartsTotal": { "type": "integer", "minimum": 0 },
+        "Paths": { "type": "array", "items": { "type": "string" } },
+        "LastError": { "type": "string" },
+        "LastErrorAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "live": {
+      "description": "The live-view MediaMTX. The KEY is absent unless live view is enabled; when present Enabled is true.",
+      "type": "object",
+      "required": ["Enabled", "Pid", "LastPid", "Alive", "StartedAt", "RestartsTotal", "Paths", "Cameras", "LastError", "LastErrorAt"],
+      "properties": {
+        "Enabled": { "const": true },
+        "Pid": { "type": ["integer", "null"] },
+        "LastPid": { "type": ["integer", "null"] },
+        "Alive": { "type": "boolean" },
+        "StartedAt": { "$ref": "#/$defs/timestamp" },
+        "RestartsTotal": { "type": "integer", "minimum": 0 },
+        "Paths": { "type": "array", "items": { "type": "string" } },
+        "Cameras": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["Name", "Sub", "Main", "SubPath", "MainPath"],
+            "properties": {
+              "Name": { "type": "string" },
+              "Sub": { "type": "boolean" },
+              "Main": { "type": "boolean" },
+              "SubPath": { "type": "string" },
+              "MainPath": { "type": "string" }
+            }
+          }
+        },
+        "LastError": { "type": "string" },
+        "LastErrorAt": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["At", "Text"],
+      "properties": {
+        "At": {
+          "description": "Log-line stamp 'yyyy-MM-dd HH:mm:ss +03:00' (NOT the 'o' format), or null when the log line did not match.",
+          "type": ["string", "null"],
+          "pattern": "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} [+-]\\d{2}:\\d{2}$"
+        },
+        "Text": { "type": "string" }
+      }
+    },
+    "camera": {
+      "type": "object",
+      "required": ["Name", "SafeName", "Record", "Pid", "LastPid", "Alive", "CurrentSegment", "CurrentSegmentBytes",
+                   "SecondsSinceLastClosedSegment", "InputMode", "RestartsLastHour", "RestartsTotal", "StartedAt",
+                   "NextStartAt", "LastError", "LastErrorAt", "ArchiveFiles", "ArchiveBytes", "DownSince", "ConfigError"],
+      "properties": {
+        "Name": { "type": "string" },
+        "SafeName": { "type": "string", "description": "Empty string (not null) when the name is unusable." },
+        "Record": { "type": "boolean" },
+        "Pid": { "type": ["integer", "null"] },
+        "LastPid": { "type": ["integer", "null"] },
+        "Alive": { "type": "boolean" },
+        "CurrentSegment": { "type": ["string", "null"] },
+        "CurrentSegmentBytes": { "type": ["integer", "null"] },
+        "SecondsSinceLastClosedSegment": { "type": ["number", "null"] },
+        "InputMode": { "enum": ["", "relay", "direct"] },
+        "RestartsLastHour": { "type": "integer", "minimum": 0 },
+        "RestartsTotal": { "type": "integer", "minimum": 0 },
+        "StartedAt": { "$ref": "#/$defs/timestamp" },
+        "NextStartAt": { "$ref": "#/$defs/timestamp" },
+        "LastError": { "type": "string" },
+        "LastErrorAt": { "$ref": "#/$defs/timestamp" },
+        "ArchiveFiles": { "type": ["integer", "null"] },
+        "ArchiveBytes": { "type": ["integer", "null"] },
+        "DownSince": { "$ref": "#/$defs/timestamp" },
+        "ConfigError": { "type": "string" }
+      }
+    }
+  }
+}

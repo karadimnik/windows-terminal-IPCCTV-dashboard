@@ -1,0 +1,55 @@
+{
+    "fixture":  "SYNTHETIC FIXTURE: fake camera (documentation address 192.0.2.11), fake credential fakeuser / fakepass. Not a leak.",
+    "description":  "Get-CamQuotedArgument rows, and Get-CamCommandLine over every non-empty row (the product cannot pass an empty argument through Get-CamCommandLine)",
+    "rows":  [
+                 {
+                     "argument":  "plain",
+                     "quoted":  "plain"
+                 },
+                 {
+                     "argument":  "",
+                     "quoted":  "\"\""
+                 },
+                 {
+                     "argument":  "two words",
+                     "quoted":  "\"two words\""
+                 },
+                 {
+                     "argument":  "tab\there",
+                     "quoted":  "\"tab\there\""
+                 },
+                 {
+                     "argument":  "say \"hi\"",
+                     "quoted":  "\"say \\\"hi\\\"\""
+                 },
+                 {
+                     "argument":  "C:\\dir\\",
+                     "quoted":  "C:\\dir\\"
+                 },
+                 {
+                     "argument":  "C:\\dir with space\\",
+                     "quoted":  "\"C:\\dir with space\\\\\""
+                 },
+                 {
+                     "argument":  "C:\\dir with space\\x\\",
+                     "quoted":  "\"C:\\dir with space\\x\\\\\""
+                 },
+                 {
+                     "argument":  "a\\\"b",
+                     "quoted":  "\"a\\\\\\\"b\""
+                 },
+                 {
+                     "argument":  "\\\\server\\share x",
+                     "quoted":  "\"\\\\server\\share x\""
+                 },
+                 {
+                     "argument":  "100%",
+                     "quoted":  "100%"
+                 },
+                 {
+                     "argument":  "rtsp://fakeuser:fakepass@192.0.2.11/stream1",
+                     "quoted":  "rtsp://fakeuser:fakepass@192.0.2.11/stream1"
+                 }
+             ],
+    "commandLine":  "plain \"two words\" \"tab\there\" \"say \\\"hi\\\"\" C:\\dir\\ \"C:\\dir with space\\\\\" \"C:\\dir with space\\x\\\\\" \"a\\\\\\\"b\" \"\\\\server\\share x\" 100% rtsp://fakeuser:fakepass@192.0.2.11/stream1"
+}

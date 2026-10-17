@@ -1,0 +1,1492 @@
+{
+    "fixture":  "SYNTHETIC: invented camera names.",
+    "description":  "Segment file names. pattern is the leaf Get-CamSegmentPattern builds; samples are the names ffmpeg writes for those local times and offsets (substituted here, ffmpeg not run); accept/reject are what Test-CamSegmentName answers for the configured container. A trap row records an observed oddity.",
+    "containers":  [
+                       {
+                           "container":  "mkv",
+                           "extension":  ".mkv",
+                           "segmentFormat":  "matroska",
+                           "names":  [
+                                         {
+                                             "safeName":  "Camera_One",
+                                             "pattern":  "Camera_One_%Y%m%d_%H%M%S%z.mkv",
+                                             "samples":  [
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-10-25 00:30:00",
+                                                                 "name":  "Camera_One_20261025_033000+0300.mkv",
+                                                                 "note":  "first pass through 03:30 on the fall-back day (summer time)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-10-25 01:30:00",
+                                                                 "name":  "Camera_One_20261025_033000+0200.mkv",
+                                                                 "note":  "second pass through the same wall time after the fall-back: only the offset tells them apart"
+                                                             },
+                                                             {
+                                                                 "local":  "2027-03-28 04:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2027-03-28 01:00:00",
+                                                                 "name":  "Camera_One_20270328_040000+0300.mkv",
+                                                                 "note":  "first segment after the spring-forward (03:00 does not exist)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-01-05 23:59:59",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-01-05 21:59:59",
+                                                                 "name":  "Camera_One_20260105_235959+0200.mkv",
+                                                                 "note":  "winter, end of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 00:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-06-30 21:00:00",
+                                                                 "name":  "Camera_One_20260701_000000+0300.mkv",
+                                                                 "note":  "summer, start of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "+0530",
+                                                                 "utc":  "2026-07-01 06:30:00",
+                                                                 "name":  "Camera_One_20260701_120000+0530.mkv",
+                                                                 "note":  "a non-hour offset (not this zone; the pattern must still hold)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "-0330",
+                                                                 "utc":  "2026-07-01 15:30:00",
+                                                                 "name":  "Camera_One_20260701_120000-0330.mkv",
+                                                                 "note":  "a negative non-hour offset"
+                                                             }
+                                                         ],
+                                             "accept":  [
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mkv",
+                                                                "why":  "the exact name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "camera_one_20261025_033000+0300.mkv",
+                                                                "why":  "file name in lower case (the match is case-insensitive)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "CAMERA_ONE_20261025_033000+0300.MKV",
+                                                                "why":  "file name in upper case",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mkv\n",
+                                                                "why":  "a trailing line feed: .NET $ also matches before a final newline",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_\u0662\u0660\u0662\u06661025_033000+0300.mkv",
+                                                                "why":  "Arabic-Indic digits for the year: .NET \\d matches any Unicode digit",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_\uff12\uff10\uff12\uff161025_033000+0300.mkv",
+                                                                "why":  "fullwidth digits for the year",
+                                                                "trap":  true
+                                                            }
+                                                        ],
+                                             "reject":  [
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mp4",
+                                                                "why":  "the other container extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mkv.tmp",
+                                                                "why":  "a .tmp suffix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mkv.mkv",
+                                                                "why":  "a second extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mkvx",
+                                                                "why":  "one trailing character",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300",
+                                                                "why":  "no extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000.mkv",
+                                                                "why":  "offset missing",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+03:00.mkv",
+                                                                "why":  "offset written with a colon",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+03.mkv",
+                                                                "why":  "offset of two digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_0330000300.mkv",
+                                                                "why":  "offset without a sign",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_2021025_033000+0300.mkv",
+                                                                "why":  "year of three digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025033000+0300.mkv",
+                                                                "why":  "date and time not separated",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Zzzera_One_20261025_033000+0300.mkv",
+                                                                "why":  "another camera",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "XCamera_One_20261025_033000+0300.mkv",
+                                                                "why":  "a character before the camera name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  " Camera_One_20261025_033000+0300.mkv",
+                                                                "why":  "leading space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mkv ",
+                                                                "why":  "trailing space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "sub\\Camera_One_20261025_033000+0300.mkv",
+                                                                "why":  "a folder prefix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "_Camera_One_20261025_033000+0300.mkv",
+                                                                "why":  "a leading underscore (folders starting with _ are the product\u0027s own)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_%Y%m%d_%H%M%S%z.mkv",
+                                                                "why":  "the unexpanded pattern",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "",
+                                                                "why":  "empty",
+                                                                "trap":  false
+                                                            }
+                                                        ]
+                                         },
+                                         {
+                                             "safeName":  "Front.Door",
+                                             "pattern":  "Front.Door_%Y%m%d_%H%M%S%z.mkv",
+                                             "samples":  [
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-10-25 00:30:00",
+                                                                 "name":  "Front.Door_20261025_033000+0300.mkv",
+                                                                 "note":  "first pass through 03:30 on the fall-back day (summer time)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-10-25 01:30:00",
+                                                                 "name":  "Front.Door_20261025_033000+0200.mkv",
+                                                                 "note":  "second pass through the same wall time after the fall-back: only the offset tells them apart"
+                                                             },
+                                                             {
+                                                                 "local":  "2027-03-28 04:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2027-03-28 01:00:00",
+                                                                 "name":  "Front.Door_20270328_040000+0300.mkv",
+                                                                 "note":  "first segment after the spring-forward (03:00 does not exist)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-01-05 23:59:59",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-01-05 21:59:59",
+                                                                 "name":  "Front.Door_20260105_235959+0200.mkv",
+                                                                 "note":  "winter, end of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 00:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-06-30 21:00:00",
+                                                                 "name":  "Front.Door_20260701_000000+0300.mkv",
+                                                                 "note":  "summer, start of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "+0530",
+                                                                 "utc":  "2026-07-01 06:30:00",
+                                                                 "name":  "Front.Door_20260701_120000+0530.mkv",
+                                                                 "note":  "a non-hour offset (not this zone; the pattern must still hold)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "-0330",
+                                                                 "utc":  "2026-07-01 15:30:00",
+                                                                 "name":  "Front.Door_20260701_120000-0330.mkv",
+                                                                 "note":  "a negative non-hour offset"
+                                                             }
+                                                         ],
+                                             "accept":  [
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mkv",
+                                                                "why":  "the exact name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "front.door_20261025_033000+0300.mkv",
+                                                                "why":  "file name in lower case (the match is case-insensitive)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "FRONT.DOOR_20261025_033000+0300.MKV",
+                                                                "why":  "file name in upper case",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mkv\n",
+                                                                "why":  "a trailing line feed: .NET $ also matches before a final newline",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_\u0662\u0660\u0662\u06661025_033000+0300.mkv",
+                                                                "why":  "Arabic-Indic digits for the year: .NET \\d matches any Unicode digit",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_\uff12\uff10\uff12\uff161025_033000+0300.mkv",
+                                                                "why":  "fullwidth digits for the year",
+                                                                "trap":  true
+                                                            }
+                                                        ],
+                                             "reject":  [
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mp4",
+                                                                "why":  "the other container extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mkv.tmp",
+                                                                "why":  "a .tmp suffix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mkv.mkv",
+                                                                "why":  "a second extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mkvx",
+                                                                "why":  "one trailing character",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300",
+                                                                "why":  "no extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000.mkv",
+                                                                "why":  "offset missing",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+03:00.mkv",
+                                                                "why":  "offset written with a colon",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+03.mkv",
+                                                                "why":  "offset of two digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_0330000300.mkv",
+                                                                "why":  "offset without a sign",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_2021025_033000+0300.mkv",
+                                                                "why":  "year of three digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025033000+0300.mkv",
+                                                                "why":  "date and time not separated",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Zzznt.Door_20261025_033000+0300.mkv",
+                                                                "why":  "another camera",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "XFront.Door_20261025_033000+0300.mkv",
+                                                                "why":  "a character before the camera name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  " Front.Door_20261025_033000+0300.mkv",
+                                                                "why":  "leading space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mkv ",
+                                                                "why":  "trailing space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "sub\\Front.Door_20261025_033000+0300.mkv",
+                                                                "why":  "a folder prefix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "_Front.Door_20261025_033000+0300.mkv",
+                                                                "why":  "a leading underscore (folders starting with _ are the product\u0027s own)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_%Y%m%d_%H%M%S%z.mkv",
+                                                                "why":  "the unexpanded pattern",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "",
+                                                                "why":  "empty",
+                                                                "trap":  false
+                                                            }
+                                                        ]
+                                         },
+                                         {
+                                             "safeName":  "Cam%z",
+                                             "pattern":  "Cam%z_%Y%m%d_%H%M%S%z.mkv",
+                                             "samples":  [
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-10-25 00:30:00",
+                                                                 "name":  "Cam+0300_20261025_033000+0300.mkv",
+                                                                 "note":  "first pass through 03:30 on the fall-back day (summer time)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-10-25 01:30:00",
+                                                                 "name":  "Cam+0200_20261025_033000+0200.mkv",
+                                                                 "note":  "second pass through the same wall time after the fall-back: only the offset tells them apart"
+                                                             },
+                                                             {
+                                                                 "local":  "2027-03-28 04:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2027-03-28 01:00:00",
+                                                                 "name":  "Cam+0300_20270328_040000+0300.mkv",
+                                                                 "note":  "first segment after the spring-forward (03:00 does not exist)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-01-05 23:59:59",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-01-05 21:59:59",
+                                                                 "name":  "Cam+0200_20260105_235959+0200.mkv",
+                                                                 "note":  "winter, end of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 00:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-06-30 21:00:00",
+                                                                 "name":  "Cam+0300_20260701_000000+0300.mkv",
+                                                                 "note":  "summer, start of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "+0530",
+                                                                 "utc":  "2026-07-01 06:30:00",
+                                                                 "name":  "Cam+0530_20260701_120000+0530.mkv",
+                                                                 "note":  "a non-hour offset (not this zone; the pattern must still hold)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "-0330",
+                                                                 "utc":  "2026-07-01 15:30:00",
+                                                                 "name":  "Cam-0330_20260701_120000-0330.mkv",
+                                                                 "note":  "a negative non-hour offset"
+                                                             }
+                                                         ],
+                                             "accept":  [
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mkv",
+                                                                "why":  "the exact name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "cam+0300_20261025_033000+0300.mkv",
+                                                                "why":  "file name in lower case (the match is case-insensitive)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "CAM+0300_20261025_033000+0300.MKV",
+                                                                "why":  "file name in upper case",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mkv\n",
+                                                                "why":  "a trailing line feed: .NET $ also matches before a final newline",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_\u0662\u0660\u0662\u06661025_033000+0300.mkv",
+                                                                "why":  "Arabic-Indic digits for the year: .NET \\d matches any Unicode digit",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_\uff12\uff10\uff12\uff161025_033000+0300.mkv",
+                                                                "why":  "fullwidth digits for the year",
+                                                                "trap":  true
+                                                            }
+                                                        ],
+                                             "reject":  [
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mp4",
+                                                                "why":  "the other container extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mkv.tmp",
+                                                                "why":  "a .tmp suffix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mkv.mkv",
+                                                                "why":  "a second extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mkvx",
+                                                                "why":  "one trailing character",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300",
+                                                                "why":  "no extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam_20261025_033000.mkv",
+                                                                "why":  "offset missing",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+03:00_20261025_033000+03:00.mkv",
+                                                                "why":  "offset written with a colon",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+03_20261025_033000+03.mkv",
+                                                                "why":  "offset of two digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam0300_20261025_0330000300.mkv",
+                                                                "why":  "offset without a sign",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_2021025_033000+0300.mkv",
+                                                                "why":  "year of three digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025033000+0300.mkv",
+                                                                "why":  "date and time not separated",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Zzz+0300_20261025_033000+0300.mkv",
+                                                                "why":  "another camera",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "XCam+0300_20261025_033000+0300.mkv",
+                                                                "why":  "a character before the camera name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  " Cam+0300_20261025_033000+0300.mkv",
+                                                                "why":  "leading space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mkv ",
+                                                                "why":  "trailing space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "sub\\Cam+0300_20261025_033000+0300.mkv",
+                                                                "why":  "a folder prefix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "_Cam+0300_20261025_033000+0300.mkv",
+                                                                "why":  "a leading underscore (folders starting with _ are the product\u0027s own)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam%z_%Y%m%d_%H%M%S%z.mkv",
+                                                                "why":  "the unexpanded pattern",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "",
+                                                                "why":  "empty",
+                                                                "trap":  false
+                                                            }
+                                                        ]
+                                         },
+                                         {
+                                             "safeName":  "A+B",
+                                             "pattern":  "A+B_%Y%m%d_%H%M%S%z.mkv",
+                                             "samples":  [
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-10-25 00:30:00",
+                                                                 "name":  "A+B_20261025_033000+0300.mkv",
+                                                                 "note":  "first pass through 03:30 on the fall-back day (summer time)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-10-25 01:30:00",
+                                                                 "name":  "A+B_20261025_033000+0200.mkv",
+                                                                 "note":  "second pass through the same wall time after the fall-back: only the offset tells them apart"
+                                                             },
+                                                             {
+                                                                 "local":  "2027-03-28 04:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2027-03-28 01:00:00",
+                                                                 "name":  "A+B_20270328_040000+0300.mkv",
+                                                                 "note":  "first segment after the spring-forward (03:00 does not exist)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-01-05 23:59:59",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-01-05 21:59:59",
+                                                                 "name":  "A+B_20260105_235959+0200.mkv",
+                                                                 "note":  "winter, end of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 00:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-06-30 21:00:00",
+                                                                 "name":  "A+B_20260701_000000+0300.mkv",
+                                                                 "note":  "summer, start of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "+0530",
+                                                                 "utc":  "2026-07-01 06:30:00",
+                                                                 "name":  "A+B_20260701_120000+0530.mkv",
+                                                                 "note":  "a non-hour offset (not this zone; the pattern must still hold)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "-0330",
+                                                                 "utc":  "2026-07-01 15:30:00",
+                                                                 "name":  "A+B_20260701_120000-0330.mkv",
+                                                                 "note":  "a negative non-hour offset"
+                                                             }
+                                                         ],
+                                             "accept":  [
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mkv",
+                                                                "why":  "the exact name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "a+b_20261025_033000+0300.mkv",
+                                                                "why":  "file name in lower case (the match is case-insensitive)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.MKV",
+                                                                "why":  "file name in upper case",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mkv\n",
+                                                                "why":  "a trailing line feed: .NET $ also matches before a final newline",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "A+B_\u0662\u0660\u0662\u06661025_033000+0300.mkv",
+                                                                "why":  "Arabic-Indic digits for the year: .NET \\d matches any Unicode digit",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "A+B_\uff12\uff10\uff12\uff161025_033000+0300.mkv",
+                                                                "why":  "fullwidth digits for the year",
+                                                                "trap":  true
+                                                            }
+                                                        ],
+                                             "reject":  [
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mp4",
+                                                                "why":  "the other container extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mkv.tmp",
+                                                                "why":  "a .tmp suffix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mkv.mkv",
+                                                                "why":  "a second extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mkvx",
+                                                                "why":  "one trailing character",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300",
+                                                                "why":  "no extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000.mkv",
+                                                                "why":  "offset missing",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+03:00.mkv",
+                                                                "why":  "offset written with a colon",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+03.mkv",
+                                                                "why":  "offset of two digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_0330000300.mkv",
+                                                                "why":  "offset without a sign",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_2021025_033000+0300.mkv",
+                                                                "why":  "year of three digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025033000+0300.mkv",
+                                                                "why":  "date and time not separated",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Zzz_20261025_033000+0300.mkv",
+                                                                "why":  "another camera",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "XA+B_20261025_033000+0300.mkv",
+                                                                "why":  "a character before the camera name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  " A+B_20261025_033000+0300.mkv",
+                                                                "why":  "leading space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mkv ",
+                                                                "why":  "trailing space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "sub\\A+B_20261025_033000+0300.mkv",
+                                                                "why":  "a folder prefix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "_A+B_20261025_033000+0300.mkv",
+                                                                "why":  "a leading underscore (folders starting with _ are the product\u0027s own)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_%Y%m%d_%H%M%S%z.mkv",
+                                                                "why":  "the unexpanded pattern",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "",
+                                                                "why":  "empty",
+                                                                "trap":  false
+                                                            }
+                                                        ]
+                                         }
+                                     ]
+                       },
+                       {
+                           "container":  "fmp4",
+                           "extension":  ".mp4",
+                           "segmentFormat":  "mp4",
+                           "names":  [
+                                         {
+                                             "safeName":  "Camera_One",
+                                             "pattern":  "Camera_One_%Y%m%d_%H%M%S%z.mp4",
+                                             "samples":  [
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-10-25 00:30:00",
+                                                                 "name":  "Camera_One_20261025_033000+0300.mp4",
+                                                                 "note":  "first pass through 03:30 on the fall-back day (summer time)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-10-25 01:30:00",
+                                                                 "name":  "Camera_One_20261025_033000+0200.mp4",
+                                                                 "note":  "second pass through the same wall time after the fall-back: only the offset tells them apart"
+                                                             },
+                                                             {
+                                                                 "local":  "2027-03-28 04:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2027-03-28 01:00:00",
+                                                                 "name":  "Camera_One_20270328_040000+0300.mp4",
+                                                                 "note":  "first segment after the spring-forward (03:00 does not exist)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-01-05 23:59:59",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-01-05 21:59:59",
+                                                                 "name":  "Camera_One_20260105_235959+0200.mp4",
+                                                                 "note":  "winter, end of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 00:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-06-30 21:00:00",
+                                                                 "name":  "Camera_One_20260701_000000+0300.mp4",
+                                                                 "note":  "summer, start of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "+0530",
+                                                                 "utc":  "2026-07-01 06:30:00",
+                                                                 "name":  "Camera_One_20260701_120000+0530.mp4",
+                                                                 "note":  "a non-hour offset (not this zone; the pattern must still hold)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "-0330",
+                                                                 "utc":  "2026-07-01 15:30:00",
+                                                                 "name":  "Camera_One_20260701_120000-0330.mp4",
+                                                                 "note":  "a negative non-hour offset"
+                                                             }
+                                                         ],
+                                             "accept":  [
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mp4",
+                                                                "why":  "the exact name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "camera_one_20261025_033000+0300.mp4",
+                                                                "why":  "file name in lower case (the match is case-insensitive)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "CAMERA_ONE_20261025_033000+0300.MP4",
+                                                                "why":  "file name in upper case",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mp4\n",
+                                                                "why":  "a trailing line feed: .NET $ also matches before a final newline",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_\u0662\u0660\u0662\u06661025_033000+0300.mp4",
+                                                                "why":  "Arabic-Indic digits for the year: .NET \\d matches any Unicode digit",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_\uff12\uff10\uff12\uff161025_033000+0300.mp4",
+                                                                "why":  "fullwidth digits for the year",
+                                                                "trap":  true
+                                                            }
+                                                        ],
+                                             "reject":  [
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mkv",
+                                                                "why":  "the other container extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mp4.tmp",
+                                                                "why":  "a .tmp suffix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mp4.mp4",
+                                                                "why":  "a second extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mp4x",
+                                                                "why":  "one trailing character",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300",
+                                                                "why":  "no extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000.mp4",
+                                                                "why":  "offset missing",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+03:00.mp4",
+                                                                "why":  "offset written with a colon",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+03.mp4",
+                                                                "why":  "offset of two digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_0330000300.mp4",
+                                                                "why":  "offset without a sign",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_2021025_033000+0300.mp4",
+                                                                "why":  "year of three digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025033000+0300.mp4",
+                                                                "why":  "date and time not separated",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Zzzera_One_20261025_033000+0300.mp4",
+                                                                "why":  "another camera",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "XCamera_One_20261025_033000+0300.mp4",
+                                                                "why":  "a character before the camera name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  " Camera_One_20261025_033000+0300.mp4",
+                                                                "why":  "leading space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_20261025_033000+0300.mp4 ",
+                                                                "why":  "trailing space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "sub\\Camera_One_20261025_033000+0300.mp4",
+                                                                "why":  "a folder prefix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "_Camera_One_20261025_033000+0300.mp4",
+                                                                "why":  "a leading underscore (folders starting with _ are the product\u0027s own)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Camera_One_%Y%m%d_%H%M%S%z.mp4",
+                                                                "why":  "the unexpanded pattern",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "",
+                                                                "why":  "empty",
+                                                                "trap":  false
+                                                            }
+                                                        ]
+                                         },
+                                         {
+                                             "safeName":  "Front.Door",
+                                             "pattern":  "Front.Door_%Y%m%d_%H%M%S%z.mp4",
+                                             "samples":  [
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-10-25 00:30:00",
+                                                                 "name":  "Front.Door_20261025_033000+0300.mp4",
+                                                                 "note":  "first pass through 03:30 on the fall-back day (summer time)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-10-25 01:30:00",
+                                                                 "name":  "Front.Door_20261025_033000+0200.mp4",
+                                                                 "note":  "second pass through the same wall time after the fall-back: only the offset tells them apart"
+                                                             },
+                                                             {
+                                                                 "local":  "2027-03-28 04:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2027-03-28 01:00:00",
+                                                                 "name":  "Front.Door_20270328_040000+0300.mp4",
+                                                                 "note":  "first segment after the spring-forward (03:00 does not exist)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-01-05 23:59:59",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-01-05 21:59:59",
+                                                                 "name":  "Front.Door_20260105_235959+0200.mp4",
+                                                                 "note":  "winter, end of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 00:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-06-30 21:00:00",
+                                                                 "name":  "Front.Door_20260701_000000+0300.mp4",
+                                                                 "note":  "summer, start of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "+0530",
+                                                                 "utc":  "2026-07-01 06:30:00",
+                                                                 "name":  "Front.Door_20260701_120000+0530.mp4",
+                                                                 "note":  "a non-hour offset (not this zone; the pattern must still hold)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "-0330",
+                                                                 "utc":  "2026-07-01 15:30:00",
+                                                                 "name":  "Front.Door_20260701_120000-0330.mp4",
+                                                                 "note":  "a negative non-hour offset"
+                                                             }
+                                                         ],
+                                             "accept":  [
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mp4",
+                                                                "why":  "the exact name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "front.door_20261025_033000+0300.mp4",
+                                                                "why":  "file name in lower case (the match is case-insensitive)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "FRONT.DOOR_20261025_033000+0300.MP4",
+                                                                "why":  "file name in upper case",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mp4\n",
+                                                                "why":  "a trailing line feed: .NET $ also matches before a final newline",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_\u0662\u0660\u0662\u06661025_033000+0300.mp4",
+                                                                "why":  "Arabic-Indic digits for the year: .NET \\d matches any Unicode digit",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_\uff12\uff10\uff12\uff161025_033000+0300.mp4",
+                                                                "why":  "fullwidth digits for the year",
+                                                                "trap":  true
+                                                            }
+                                                        ],
+                                             "reject":  [
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mkv",
+                                                                "why":  "the other container extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mp4.tmp",
+                                                                "why":  "a .tmp suffix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mp4.mp4",
+                                                                "why":  "a second extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mp4x",
+                                                                "why":  "one trailing character",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300",
+                                                                "why":  "no extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000.mp4",
+                                                                "why":  "offset missing",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+03:00.mp4",
+                                                                "why":  "offset written with a colon",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+03.mp4",
+                                                                "why":  "offset of two digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_0330000300.mp4",
+                                                                "why":  "offset without a sign",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_2021025_033000+0300.mp4",
+                                                                "why":  "year of three digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025033000+0300.mp4",
+                                                                "why":  "date and time not separated",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Zzznt.Door_20261025_033000+0300.mp4",
+                                                                "why":  "another camera",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "XFront.Door_20261025_033000+0300.mp4",
+                                                                "why":  "a character before the camera name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  " Front.Door_20261025_033000+0300.mp4",
+                                                                "why":  "leading space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_20261025_033000+0300.mp4 ",
+                                                                "why":  "trailing space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "sub\\Front.Door_20261025_033000+0300.mp4",
+                                                                "why":  "a folder prefix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "_Front.Door_20261025_033000+0300.mp4",
+                                                                "why":  "a leading underscore (folders starting with _ are the product\u0027s own)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Front.Door_%Y%m%d_%H%M%S%z.mp4",
+                                                                "why":  "the unexpanded pattern",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "",
+                                                                "why":  "empty",
+                                                                "trap":  false
+                                                            }
+                                                        ]
+                                         },
+                                         {
+                                             "safeName":  "Cam%z",
+                                             "pattern":  "Cam%z_%Y%m%d_%H%M%S%z.mp4",
+                                             "samples":  [
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-10-25 00:30:00",
+                                                                 "name":  "Cam+0300_20261025_033000+0300.mp4",
+                                                                 "note":  "first pass through 03:30 on the fall-back day (summer time)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-10-25 01:30:00",
+                                                                 "name":  "Cam+0200_20261025_033000+0200.mp4",
+                                                                 "note":  "second pass through the same wall time after the fall-back: only the offset tells them apart"
+                                                             },
+                                                             {
+                                                                 "local":  "2027-03-28 04:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2027-03-28 01:00:00",
+                                                                 "name":  "Cam+0300_20270328_040000+0300.mp4",
+                                                                 "note":  "first segment after the spring-forward (03:00 does not exist)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-01-05 23:59:59",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-01-05 21:59:59",
+                                                                 "name":  "Cam+0200_20260105_235959+0200.mp4",
+                                                                 "note":  "winter, end of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 00:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-06-30 21:00:00",
+                                                                 "name":  "Cam+0300_20260701_000000+0300.mp4",
+                                                                 "note":  "summer, start of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "+0530",
+                                                                 "utc":  "2026-07-01 06:30:00",
+                                                                 "name":  "Cam+0530_20260701_120000+0530.mp4",
+                                                                 "note":  "a non-hour offset (not this zone; the pattern must still hold)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "-0330",
+                                                                 "utc":  "2026-07-01 15:30:00",
+                                                                 "name":  "Cam-0330_20260701_120000-0330.mp4",
+                                                                 "note":  "a negative non-hour offset"
+                                                             }
+                                                         ],
+                                             "accept":  [
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mp4",
+                                                                "why":  "the exact name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "cam+0300_20261025_033000+0300.mp4",
+                                                                "why":  "file name in lower case (the match is case-insensitive)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "CAM+0300_20261025_033000+0300.MP4",
+                                                                "why":  "file name in upper case",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mp4\n",
+                                                                "why":  "a trailing line feed: .NET $ also matches before a final newline",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_\u0662\u0660\u0662\u06661025_033000+0300.mp4",
+                                                                "why":  "Arabic-Indic digits for the year: .NET \\d matches any Unicode digit",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_\uff12\uff10\uff12\uff161025_033000+0300.mp4",
+                                                                "why":  "fullwidth digits for the year",
+                                                                "trap":  true
+                                                            }
+                                                        ],
+                                             "reject":  [
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mkv",
+                                                                "why":  "the other container extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mp4.tmp",
+                                                                "why":  "a .tmp suffix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mp4.mp4",
+                                                                "why":  "a second extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mp4x",
+                                                                "why":  "one trailing character",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300",
+                                                                "why":  "no extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam_20261025_033000.mp4",
+                                                                "why":  "offset missing",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+03:00_20261025_033000+03:00.mp4",
+                                                                "why":  "offset written with a colon",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+03_20261025_033000+03.mp4",
+                                                                "why":  "offset of two digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam0300_20261025_0330000300.mp4",
+                                                                "why":  "offset without a sign",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_2021025_033000+0300.mp4",
+                                                                "why":  "year of three digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025033000+0300.mp4",
+                                                                "why":  "date and time not separated",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Zzz+0300_20261025_033000+0300.mp4",
+                                                                "why":  "another camera",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "XCam+0300_20261025_033000+0300.mp4",
+                                                                "why":  "a character before the camera name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  " Cam+0300_20261025_033000+0300.mp4",
+                                                                "why":  "leading space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam+0300_20261025_033000+0300.mp4 ",
+                                                                "why":  "trailing space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "sub\\Cam+0300_20261025_033000+0300.mp4",
+                                                                "why":  "a folder prefix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "_Cam+0300_20261025_033000+0300.mp4",
+                                                                "why":  "a leading underscore (folders starting with _ are the product\u0027s own)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Cam%z_%Y%m%d_%H%M%S%z.mp4",
+                                                                "why":  "the unexpanded pattern",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "",
+                                                                "why":  "empty",
+                                                                "trap":  false
+                                                            }
+                                                        ]
+                                         },
+                                         {
+                                             "safeName":  "A+B",
+                                             "pattern":  "A+B_%Y%m%d_%H%M%S%z.mp4",
+                                             "samples":  [
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-10-25 00:30:00",
+                                                                 "name":  "A+B_20261025_033000+0300.mp4",
+                                                                 "note":  "first pass through 03:30 on the fall-back day (summer time)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-10-25 03:30:00",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-10-25 01:30:00",
+                                                                 "name":  "A+B_20261025_033000+0200.mp4",
+                                                                 "note":  "second pass through the same wall time after the fall-back: only the offset tells them apart"
+                                                             },
+                                                             {
+                                                                 "local":  "2027-03-28 04:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2027-03-28 01:00:00",
+                                                                 "name":  "A+B_20270328_040000+0300.mp4",
+                                                                 "note":  "first segment after the spring-forward (03:00 does not exist)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-01-05 23:59:59",
+                                                                 "offset":  "+0200",
+                                                                 "utc":  "2026-01-05 21:59:59",
+                                                                 "name":  "A+B_20260105_235959+0200.mp4",
+                                                                 "note":  "winter, end of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 00:00:00",
+                                                                 "offset":  "+0300",
+                                                                 "utc":  "2026-06-30 21:00:00",
+                                                                 "name":  "A+B_20260701_000000+0300.mp4",
+                                                                 "note":  "summer, start of day"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "+0530",
+                                                                 "utc":  "2026-07-01 06:30:00",
+                                                                 "name":  "A+B_20260701_120000+0530.mp4",
+                                                                 "note":  "a non-hour offset (not this zone; the pattern must still hold)"
+                                                             },
+                                                             {
+                                                                 "local":  "2026-07-01 12:00:00",
+                                                                 "offset":  "-0330",
+                                                                 "utc":  "2026-07-01 15:30:00",
+                                                                 "name":  "A+B_20260701_120000-0330.mp4",
+                                                                 "note":  "a negative non-hour offset"
+                                                             }
+                                                         ],
+                                             "accept":  [
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mp4",
+                                                                "why":  "the exact name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "a+b_20261025_033000+0300.mp4",
+                                                                "why":  "file name in lower case (the match is case-insensitive)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.MP4",
+                                                                "why":  "file name in upper case",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mp4\n",
+                                                                "why":  "a trailing line feed: .NET $ also matches before a final newline",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "A+B_\u0662\u0660\u0662\u06661025_033000+0300.mp4",
+                                                                "why":  "Arabic-Indic digits for the year: .NET \\d matches any Unicode digit",
+                                                                "trap":  true
+                                                            },
+                                                            {
+                                                                "name":  "A+B_\uff12\uff10\uff12\uff161025_033000+0300.mp4",
+                                                                "why":  "fullwidth digits for the year",
+                                                                "trap":  true
+                                                            }
+                                                        ],
+                                             "reject":  [
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mkv",
+                                                                "why":  "the other container extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mp4.tmp",
+                                                                "why":  "a .tmp suffix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mp4.mp4",
+                                                                "why":  "a second extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mp4x",
+                                                                "why":  "one trailing character",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300",
+                                                                "why":  "no extension",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000.mp4",
+                                                                "why":  "offset missing",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+03:00.mp4",
+                                                                "why":  "offset written with a colon",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+03.mp4",
+                                                                "why":  "offset of two digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_0330000300.mp4",
+                                                                "why":  "offset without a sign",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_2021025_033000+0300.mp4",
+                                                                "why":  "year of three digits",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025033000+0300.mp4",
+                                                                "why":  "date and time not separated",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "Zzz_20261025_033000+0300.mp4",
+                                                                "why":  "another camera",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "XA+B_20261025_033000+0300.mp4",
+                                                                "why":  "a character before the camera name",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  " A+B_20261025_033000+0300.mp4",
+                                                                "why":  "leading space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_20261025_033000+0300.mp4 ",
+                                                                "why":  "trailing space",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "sub\\A+B_20261025_033000+0300.mp4",
+                                                                "why":  "a folder prefix",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "_A+B_20261025_033000+0300.mp4",
+                                                                "why":  "a leading underscore (folders starting with _ are the product\u0027s own)",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "A+B_%Y%m%d_%H%M%S%z.mp4",
+                                                                "why":  "the unexpanded pattern",
+                                                                "trap":  false
+                                                            },
+                                                            {
+                                                                "name":  "",
+                                                                "why":  "empty",
+                                                                "trap":  false
+                                                            }
+                                                        ]
+                                         }
+                                     ]
+                       }
+                   ]
+}

@@ -1,0 +1,53 @@
+{
+    "Schema":  1,
+    "State":  "running",
+    "StopKind":  "",
+    "LastUnexpectedStop":  null,
+    "SupervisorPid":  4242,
+    "StartedAt":  "2026-10-17T12:29:59.1234567+03:00",
+    "UpdatedAt":  "2026-10-17T12:30:00.1234567+03:00",
+    "UptimeSeconds":  1,
+    "RootPath":  "D:\\holocron-fixture\\cameras",
+    "Container":  "mkv",
+    "SegmentSeconds":  900,
+    "Disk":  {
+                 "FreeGB":  123.45,
+                 "ReserveGB":  20,
+                 "PruneHysteresisGB":  5,
+                 "ArchiveGB":  null,
+                 "ArchiveBytes":  null,
+                 "ArchiveFiles":  null,
+                 "OldestSegment":  null,
+                 "NewestSegment":  null,
+                 "MeasuredGBPerDay":  null,
+                 "ProjectedDaysRemaining":  null,
+                 "ScannedAt":  null
+             },
+    "Prune":  {
+                  "LastRunAt":  null,
+                  "DeletedTotal":  0,
+                  "FreedGBTotal":  0,
+                  "Blocked":  false,
+                  "LastMessage":  ""
+              },
+    "Restreamer":  {
+                       "Enabled":  false,
+                       "RelayBase":  "rtsp://127.0.0.1:8554",
+                       "Pid":  null,
+                       "LastPid":  null,
+                       "Alive":  false,
+                       "StartedAt":  null,
+                       "RestartsTotal":  0,
+                       "Paths":  [
+
+                                 ],
+                       "LastError":  "",
+                       "LastErrorAt":  null
+                   },
+    "Events":  [
+
+               ],
+    "Cameras":  [
+
+                ]
+}

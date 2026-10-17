@@ -1,0 +1,13 @@
+{
+    "Schema":  1,
+    "SupervisorPid":  4242,
+    "State":  "stopped",
+    "StopKind":  "unexpected",
+    "LastUnexpectedStop":  {
+                               "At":  "2026-10-17T12:31:00.1234567+03:00",
+                               "Reason":  "supervisor process 4242 is gone without a final status",
+                               "SupervisorPid":  4242,
+                               "DetectedBy":  "nvr host"
+                           },
+    "UpdatedAt":  "2026-10-17T12:31:00.1234567+03:00"
+}

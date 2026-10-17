@@ -1,0 +1,67 @@
+{
+    "fixture":  "SYNTHETIC FIXTURE: fake camera (documentation address 192.0.2.11), fake credential fakeuser / fakepass. Not a leak.",
+    "id":  "mkv-relay-900-spacepath",
+    "description":  "archive root with a space: the pattern argument is quoted on the command line",
+    "inputs":  {
+                   "container":  "mkv",
+                   "segmentSeconds":  900,
+                   "inputMode":  "relay",
+                   "ffmpegPath":  "C:\\ffmpeg\\bin\\ffmpeg.exe",
+                   "archiveRoot":  "C:\\holocron fixture\\cam eras",
+                   "cameraName":  "Camera One",
+                   "cameraIP":  "192.0.2.11",
+                   "quality":  "stream1",
+                   "safeName":  "Camera_One",
+                   "relayPath":  "cameraone",
+                   "relayBase":  "rtsp://127.0.0.1:8554",
+                   "rtspTransport":  "tcp",
+                   "timeoutMicroseconds":  10000000,
+                   "url":  "rtsp://127.0.0.1:8554/cameraone",
+                   "outputPattern":  "C:\\holocron fixture\\cam eras\\Camera_One\\Camera_One_%Y%m%d_%H%M%S%z.mkv",
+                   "containerProfile":  {
+                                            "Extension":  ".mkv",
+                                            "SegmentFormat":  "matroska",
+                                            "AudioArgs":  [
+
+                                                          ],
+                                            "ExtraArgs":  [
+
+                                                          ],
+                                            "SegmentFormatOptions":  ""
+                                        }
+               },
+    "args":  [
+                 "-hide_banner",
+                 "-loglevel",
+                 "warning",
+                 "-nostdin",
+                 "-rtsp_transport",
+                 "tcp",
+                 "-timeout",
+                 "10000000",
+                 "-fflags",
+                 "+genpts+discardcorrupt",
+                 "-i",
+                 "rtsp://127.0.0.1:8554/cameraone",
+                 "-map",
+                 "0:v:0",
+                 "-map",
+                 "0:a:0?",
+                 "-c",
+                 "copy",
+                 "-f",
+                 "segment",
+                 "-segment_time",
+                 "900",
+                 "-segment_atclocktime",
+                 "1",
+                 "-reset_timestamps",
+                 "1",
+                 "-strftime",
+                 "1",
+                 "-segment_format",
+                 "matroska",
+                 "C:\\holocron fixture\\cam eras\\Camera_One\\Camera_One_%Y%m%d_%H%M%S%z.mkv"
+             ],
+    "commandLine":  "-hide_banner -loglevel warning -nostdin -rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://127.0.0.1:8554/cameraone -map 0:v:0 -map 0:a:0? -c copy -f segment -segment_time 900 -segment_atclocktime 1 -reset_timestamps 1 -strftime 1 -segment_format matroska \"C:\\holocron fixture\\cam eras\\Camera_One\\Camera_One_%Y%m%d_%H%M%S%z.mkv\""
+}
