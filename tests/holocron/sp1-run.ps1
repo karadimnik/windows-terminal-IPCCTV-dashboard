@@ -3,6 +3,7 @@
 param([string]$Ffmpeg, [string]$Out, [string[]]$Cases)
 $tz = @{ sys = $null; utc = 'UTC'; bucI = 'Europe/Bucharest'; kolI = 'Asia/Kolkata'; stjI = 'America/St_Johns';
          bucP = 'EET-2EEST'; kolP = 'IST-5:30'; stjP = 'NST3:30NDT' }
+$Cases = @($Cases | ForEach-Object { $_ -split "," })
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $procs = @()
 foreach ($key in $Cases) { foreach ($seg in 10, 7) {
