@@ -365,4 +365,3 @@ body.authpage{display:grid;place-items:center;min-height:100vh;padding:18px}
 .authcard .actions .btn{width:100%;padding:10px 14px}
 .authcard .formnote{margin:0;min-height:1.4em}
 .authcard .hint{margin:0;font-size:12px;color:var(--ink-3)}
-.signout{margin-left:6px}

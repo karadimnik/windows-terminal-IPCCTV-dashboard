@@ -1231,6 +1231,37 @@ function Invoke-CamCheckUiGuard {
         . $expect 'GET /api/tls/info on the loopback listener' (Invoke-CamRawHttp -Port $port -Path '/api/tls/info') @(404)
         . $expect 'GET /api/status with a LAN Host (192.168.1.50:8443): the loopback allowlist is not widened' `
             (Invoke-CamRawHttp -Port $port -Path '/api/status' -Headers ([ordered]@{ 'Host' = '192.168.1.50:8443' })) @(403)
+
+        # The LAN login is not on the loopback listener: no login page, no login or logout route; /api/auth/me says no login is needed;
+        # the first-run page exists only while no user exists, only here, is guarded like every other route, and is 404 once a user exists.
+        $me = Invoke-CamRawHttp -Port $port -Path '/api/auth/me'
+        . $expect 'GET /api/auth/me on loopback (no login required)' $me @(200)
+        $meOk = ($me.Body -match '"loginRequired":\s*false' -and $me.Body -match '"authenticated":\s*true')
+        if (-not $meOk) { $ok = $false }
+        $evidence += ('  {0,-4} /api/auth/me says authenticated and loginRequired false: {1}' -f $(if ($meOk) { 'ok' } else { 'FAIL' }), $meOk)
+        . $expect 'GET /login on loopback' (Invoke-CamRawHttp -Port $port -Path '/login') @(404)
+        . $expect 'GET /login.js on loopback' (Invoke-CamRawHttp -Port $port -Path '/login.js') @(404)
+        . $expect 'GET /login.html on loopback (the file server never hands out the auth pages)' (Invoke-CamRawHttp -Port $port -Path '/login.html') @(404)
+        . $expect 'POST /api/auth/login on loopback' (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/auth/login' -Body '{"username":"a","password":"b"}' -Headers ([ordered]@{ 'Content-Type' = 'application/json' })) @(404, 405)
+        . $expect 'GET /setup with no user (the first-run page)' (Invoke-CamRawHttp -Port $port -Path '/setup') @(200)
+        . $expect 'GET /setup with a rebinding Host' (Invoke-CamRawHttp -Port $port -Path '/setup' -Headers ([ordered]@{ 'Host' = 'attacker-rebind.example:18788' })) @(403)
+        . $expect 'POST /api/auth/setup, cross-site (no user may be created by a web page)' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/auth/setup' -Body '{"username":"mallory","password":"a long enough password"}' -Headers ([ordered]@{
+                'Origin' = 'http://evil.example'; 'Sec-Fetch-Site' = 'cross-site'; 'Content-Type' = 'application/json' })) @(403)
+        . $expect 'POST /api/auth/setup with a too short password' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/auth/setup' -Body '{"username":"anna","password":"short"}' -Headers ([ordered]@{ 'Content-Type' = 'application/json' })) @(422)
+        $setupPassword = 'Pw-' + [guid]::NewGuid().ToString('N')
+        . $expect 'POST /api/auth/setup creates the first user' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/auth/setup' -Body (ConvertTo-Json -Compress @{ username = 'anna'; password = $setupPassword }) -Headers ([ordered]@{ 'Content-Type' = 'application/json' })) @(201)
+        . $expect 'GET /setup once a user exists' (Invoke-CamRawHttp -Port $port -Path '/setup') @(404)
+        . $expect 'GET /setup.js once a user exists' (Invoke-CamRawHttp -Port $port -Path '/setup.js') @(404)
+        . $expect 'POST /api/auth/setup once a user exists' `
+            (Invoke-CamRawHttp -Port $port -Method POST -Path '/api/auth/setup' -Body '{"username":"mallory","password":"a long enough password"}' -Headers ([ordered]@{ 'Content-Type' = 'application/json' })) @(404)
+        $usersFile = Join-Path -Path $ui.AuthDir -ChildPath 'users.json'
+        $usersText = [System.IO.File]::ReadAllText($usersFile)
+        $usersOk = ($usersText -match '"username":\s*"anna"' -and $usersText -notmatch 'mallory' -and -not $usersText.Contains($setupPassword) -and $usersText -match 'pbkdf2-sha256')
+        if (-not $usersOk) { $ok = $false }
+        $evidence += ('  {0,-4} users.json holds exactly the first user, hashed (no mallory, no password): {1}' -f $(if ($usersOk) { 'ok' } else { 'FAIL' }), $usersOk)
     }
     finally {
         $logLines = @(Stop-CamTestUi -Ui $ui)
@@ -1239,7 +1270,7 @@ function Invoke-CamCheckUiGuard {
     $evidence += @($logLines | Where-Object { $_ -match 'request refused' } | Select-Object -First 3 | ForEach-Object { '  log: ' + $_ })
 
     Add-CamTestResult -Run $Run -Check 'uiguard' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) `
-        -Message 'camui refuses a cross-site POST, a DNS-rebinding Host, a foreign Origin and a non-JSON state change, and still serves the page and a request shaped like its own' `
+        -Message 'camui refuses a cross-site POST, a DNS-rebinding Host, a foreign Origin and a non-JSON state change, and still serves the page and a request shaped like its own; the loopback listener has no login and its first-run page works only while no user exists' `
         -Evidence $evidence
 }
 
@@ -9429,12 +9460,13 @@ function Invoke-CamCheckLiveTls {
         private address. The test camui runs from the path an EXISTING Windows Firewall allow rule already covers, so the bind beyond loopback
         raises no prompt; if there is no such rule the check is SKIPPED. The check creates no firewall rule and writes nothing to any Windows
         certificate store (the counts are compared before and after); trust is per probe or per browser process only.
-          (a) probes with the generated CA: every route x {no token, wrong token, right token}; handshake details; plain HTTP refused;
+          (a) probes with the generated CA: every route x {no session, wrong cookie, signed-in session}; handshake details; plain HTTP refused;
               an untrusted client and a wrong name refused; foreign Origin, http:// Origin, cross-site and a rebinding Host refused with no new
               live session; the CA download holds no key; the keys' ACL names only this account; a leak scan of the TLS responses with a
-              positive control; then, last, the failure limiter (429)
+              positive control; login CSRF; then the username lockout and the per-address throttle (429 with Retry-After)
           (b) Chrome and Edge, throwaway profile: WITHOUT the SPKI flag the page is refused (certificate warning: the negative control); WITH
-              --ignore-certificate-errors-spki-list it loads, the token is gone from the URL, the cookie is Secure, tiles play on the LAN media
+              --ignore-certificate-errors-spki-list it loads and lands on /login; wrong passwords show the generic error; a burst shows the lockout; a second sign-in lands on /#live, the cookie
+              is Secure/HttpOnly/Strict, tiles play on the LAN media, the session survives a camui restart, Sign out returns to /login
         Needs CAMUI_TEST_EXE. Screenshots (page only) go to $env:CAMTEST_SHOTS when set.
     #>
     param($Run)
@@ -9485,10 +9517,28 @@ function Invoke-CamCheckLiveTls {
         if (Test-Path -LiteralPath $allowed) { $backup = $allowed + '.livetls-bak'; Move-Item -LiteralPath $allowed -Destination $backup -Force }
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $allowed) -Force)
         Copy-Item -LiteralPath $env:CAMUI_TEST_EXE -Destination $allowed -Force
-        $token = (@(& $allowed '-new-token') -join '').Trim()
-        $token2 = (@(& $allowed '-new-token') -join '').Trim()
-        & $note ("camui.exe -new-token: {0} hex characters, two calls differ: {1}, nothing written (the tls folder exists yet: {2})" -f $token.Length, ($token -ne $token2), (Test-Path $tlsDir))
-        if ($token -notmatch '^[0-9a-f]{64}$' -or $token -eq $token2) { & $fail '-new-token did not print a fresh 64-hex token' }
+        $authDir = Join-Path -Path $rig.Dir -ChildPath 'auth'
+        $password = 'Pw-' + [guid]::NewGuid().ToString('N') + '-throwaway'
+        # The LAN listener refuses to start without a user.
+        $emptyAuth = Join-Path -Path $rig.Dir -ChildPath 'auth-empty'
+        $refuseErr = Join-Path -Path $rig.Dir -ChildPath 'refuse.err'
+        $refuse = Start-Process -FilePath $allowed -ArgumentList @('-listen', '127.0.0.1:18790', '-tls-listen', ('{0}:{1}' -f $lan, $tlsPort), '-tls-dir', $tlsDir, '-auth-dir', $emptyAuth) -PassThru -WindowStyle Hidden -RedirectStandardError $refuseErr
+        if (-not $refuse.WaitForExit(15000)) { try { $refuse.Kill() } catch { }; & $fail 'camui with a TLS listener and no user did not refuse to start' }
+        else {
+            $refuseText = (@(Get-Content -LiteralPath $refuseErr -ErrorAction SilentlyContinue) -join ' ')
+            & $note ("camui -tls-listen with no user: exit code {0}, message names -set-password and /setup: {1}, created the tls folder: {2}" -f $refuse.ExitCode, ($refuseText -match 'refusing to start' -and $refuseText -match '-set-password' -and $refuseText -match '/setup'), (Test-Path $tlsDir))
+            if ($refuse.ExitCode -ne 2 -or $refuseText -notmatch 'refusing to start' -or (Test-Path $tlsDir)) { & $fail 'the no-user refusal is wrong' }
+        }
+        # Users are created the way the Operator does it: the password on standard input, never on a command line.
+        $timer = [System.Diagnostics.Stopwatch]::StartNew()
+        $made = @(foreach ($name in @('probe', 'chrome', 'edge')) { $password | & $allowed '-set-password' $name '-auth-dir' $authDir 2>&1 })
+        $timer.Stop()
+        & $note ("camui.exe -set-password x3 (process start + one PBKDF2 hash each): {0:n0} ms in total; output: {1}; output holds the password: {2}" -f $timer.ElapsedMilliseconds, ($made -join ' / '), (($made -join ' ').Contains($password)))
+        if (($made -join ' ').Contains($password) -or @($made | Where-Object { $_ -match '^created user' }).Count -ne 3) { & $fail '-set-password output is wrong' }
+        $usersJson = [System.IO.File]::ReadAllText((Join-Path $authDir 'users.json'))
+        $hashTail = (ConvertFrom-Json -InputObject $usersJson).users[0].hash.Split('$')[3]
+        & $note ("users.json: scheme {0}, holds the password: {1}" -f (ConvertFrom-Json -InputObject $usersJson).users[0].hash.Substring(0, 21), $usersJson.Contains($password))
+        if ($usersJson.Contains($password) -or $usersJson -notmatch 'pbkdf2-sha256\$600000\$') { & $fail 'users.json holds the password or the wrong hash scheme' }
         $printed = @(& $allowed '-print-ca' '-tls-dir' $tlsDir)
         $printedFp = ([regex]::Match(($printed -join "`n"), 'SHA-256:\s+([0-9A-F:]{95})')).Groups[1].Value
         $caPem = [System.IO.File]::ReadAllText((Join-Path $tlsDir 'ca.crt'))
@@ -9497,15 +9547,21 @@ function Invoke-CamCheckLiveTls {
         & $note ("camui.exe -print-ca: file printed, fingerprint matches the ca.crt on disk: {0}; leaf created by it: {1}; printed text holds PRIVATE KEY: {2}" -f ($printedFp -eq $caFp), (Test-Path (Join-Path $tlsDir 'leaf.crt')), (($printed -join "`n") -match 'PRIVATE KEY'))
         if ($printedFp -ne $caFp -or (Test-Path (Join-Path $tlsDir 'leaf.crt')) -or ($printed -join "`n") -match 'PRIVATE KEY') { & $fail '-print-ca output is wrong' }
 
-        $env:CAMUI_TLS_TOKEN = $token
-        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livetls' -RunExe $allowed -ExtraArgs @('-tls-listen', ('{0}:{1}' -f $lan, $tlsPort), '-tls-dir', $tlsDir)
-        Remove-Item Env:\CAMUI_TLS_TOKEN -ErrorAction SilentlyContinue
+        $uiArgs = @('-tls-listen', ('{0}:{1}' -f $lan, $tlsPort), '-tls-dir', $tlsDir, '-auth-dir', $authDir)
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livetls' -RunExe $allowed -ExtraArgs $uiArgs
         if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
         $up = $false
         for ($i = 0; $i -lt 40 -and -not $up; $i++) { $tcp = New-Object System.Net.Sockets.TcpClient; try { $tcp.Connect($lan, $tlsPort); $up = $true } catch { Start-Sleep -Milliseconds 250 } finally { $tcp.Close() } }
         if (-not $up) { throw 'the HTTPS listener did not come up' }
         $tls = { param([hashtable]$a) $args2 = @{ Address = $lan; Port = $tlsPort; CaPem = $caPem } + $a; Invoke-CamTestTls @args2 }
-        $bearer = @{ Authorization = "Bearer $token" }
+        $jsonH = @{ 'Content-Type' = 'application/json' }
+        $loginBodyOf = { param([string]$u, [string]$p) ConvertTo-Json -InputObject @{ username = $u; password = $p } -Compress }
+        $loginProbe = & $tls @{ Method = 'POST'; Path = '/api/auth/login'; Headers = $jsonH; Body = (& $loginBodyOf 'probe' $password) }
+        $cookieHeader = [string]$loginProbe.Headers['set-cookie']
+        $sessionValue = [regex]::Match($cookieHeader, 'camui_session=([^;]+)').Groups[1].Value
+        & $note ("login over TLS: HTTP {0}; Set-Cookie flags: Secure {1}, HttpOnly {2}, SameSite=Strict {3}, Path=/ {4}, Max-Age=2592000 {5}; token length {6}" -f $loginProbe.Status, ($cookieHeader -match '; Secure'), ($cookieHeader -match 'HttpOnly'), ($cookieHeader -match 'SameSite=Strict'), ($cookieHeader -match 'Path=/'), ($cookieHeader -match 'Max-Age=2592000'), $sessionValue.Length)
+        if ($loginProbe.Status -ne 200 -or $sessionValue.Length -lt 43 -or $cookieHeader -notmatch '; Secure' -or $cookieHeader -notmatch 'HttpOnly' -or $cookieHeader -notmatch 'SameSite=Strict' -or $cookieHeader -notmatch 'Max-Age=2592000') { throw ('the probe login failed or its cookie is wrong: HTTP ' + $loginProbe.Status) }
+        $bearer = @{ Cookie = "camui_session=$sessionValue" }
 
         # ---- certificate facts (no keys) ----
         $probe = & $tls @{ Path = '/api/tls/info'; Headers = $bearer }
@@ -9532,16 +9588,24 @@ function Invoke-CamCheckLiveTls {
             if ($principals.Count -ne 1 -or $principals[0] -ne $me) { & $fail "ACL of $name is not this account alone" }
         }
 
-        # ---- every route x token state ----
+        foreach ($name in @('users.json', 'sessions.json', 'auth.log', '.')) {
+            $target = Join-Path $authDir $name
+            $acl = @(& icacls.exe $target) | Where-Object { $_ -match '[:]\(' -or $_ -match '\\' -and $_ -match '\(' }
+            $principals = @($acl | ForEach-Object { ([regex]::Match($_, '(?:^\S+\s+)?([^\s:][^:]*?):\(')).Groups[1].Value.Trim() } | Where-Object { $_ })
+            & $note ("ACL of {0}: {1} principal(s): {2}" -f $(if ($name -eq '.') { 'the auth folder' } else { $name }), $principals.Count, ($principals -join '; '))
+            if ($principals.Count -ne 1 -or $principals[0] -ne $me) { & $fail "ACL of auth $name is not this account alone" }
+        }
+
+        # ---- every route x session state ----
         $routes = @(
-            @{ M = 'GET'; P = '/' }, @{ M = 'GET'; P = '/app.js' }, @{ M = 'GET'; P = '/live.js' }, @{ M = 'GET'; P = '/api/status' }, @{ M = 'GET'; P = '/api/live' },
+            @{ M = 'GET'; P = '/' }, @{ M = 'GET'; P = '/login'; Public = $true }, @{ M = 'GET'; P = '/login.js'; Public = $true }, @{ M = 'GET'; P = '/style.css'; Public = $true }, @{ M = 'GET'; P = '/api/auth/me'; Public = $true }, @{ M = 'GET'; P = '/setup' }, @{ M = 'POST'; P = '/api/auth/setup'; H = $jsonH; B = '{}' }, @{ M = 'GET'; P = '/app.js' }, @{ M = 'GET'; P = '/live.js' }, @{ M = 'GET'; P = '/api/status' }, @{ M = 'GET'; P = '/api/live' },
             @{ M = 'GET'; P = '/api/cameras' }, @{ M = 'GET'; P = '/api/config' }, @{ M = 'GET'; P = '/api/footage' }, @{ M = 'GET'; P = '/api/tls/ca.crt' }, @{ M = 'GET'; P = '/api/tls/info' },
             @{ M = 'POST'; P = '/api/live/Cam%201/whep?stream=sub'; H = @{ 'Content-Type' = 'application/sdp' }; B = $offer },
             @{ M = 'DELETE'; P = '/api/live/session/00000000000000000000000000000000' }, @{ M = 'GET'; P = '/nothing' })
         $needles = [ordered]@{
             'live secret' = ([System.IO.File]::ReadAllText([string]$rig.Sandbox.Config.LiveSecretPath)).Trim(); 'live user' = 'camlive'; 'live port' = '18889'
             'live path name' = 'cam1sub|cam1main|cam2sub|cam2main|cam3sub|cam3main'; 'camera password' = 'FakePassword-DoNotUse-9c41'; 'camera user' = 'fakeuser:'
-            'camera/relay port' = '18554|18564|18567'; 'TLS token' = $token
+            'camera/relay port' = '18554|18564|18567'; 'password' = $password; 'session token' = $sessionValue; 'password hash' = $hashTail
             'key material' = ((@('ca.key', 'leaf.key') | ForEach-Object { ([System.IO.File]::ReadAllLines((Join-Path $tlsDir $_)))[1].Substring(0, 30) }) -join '|') + '|PRIVATE KEY'
         }
         $scan = {
@@ -9563,27 +9627,23 @@ function Invoke-CamCheckLiveTls {
         & $note ("leak scan positive control: {0} of {1} needle classes, the scheme rule and the certificate rule lit up" -f $classes, $needles.Count)
         if ($classes -ne $needles.Count -or -not ($controlHits -like 'URL scheme*') -or -not ($controlHits -like 'certificate PEM*')) { & $fail 'the TLS leak scanner did not light up on its positive control' }
 
-        & $note '  route                                        no token | wrong token (first 8 routes) | right token'
+        & $note '  route                                        no session | wrong cookie | signed in'
         $leakHits = 0
         $locations = @()
-        $routeIndex = 0
         foreach ($r in $routes) {
             $base = @{ Method = $r.M; Path = $r.P }
             if ($r.H) { $base.Headers = $r.H }
             if ($r.B) { $base.Body = $r.B }
             $none = & $tls $base
-            # A wrong token counts toward the failure limiter (10 a minute per address), so only the first 8 routes are asked with one; the Go
-            # tests ask every route with every token state from a fresh source each time.
-            $wrong = [pscustomobject]@{ Status = 401; Headers = @{}; Body = ''; Asked = $false }
-            if ($routeIndex -lt 8) {
-                $wrongArgs = $base.Clone(); $wrongArgs.Headers = @{ Authorization = 'Bearer ' + ('0' * 64) } + $(if ($r.H) { $r.H } else { @{} })
-                $wrong = & $tls $wrongArgs
-            }
-            $routeIndex++
+            $wrongArgs = $base.Clone(); $wrongArgs.Headers = @{ Cookie = 'camui_session=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' } + $(if ($r.H) { $r.H } else { @{} })
+            $wrong = & $tls $wrongArgs
             $rightArgs = $base.Clone(); $rightArgs.Headers = $bearer + $(if ($r.H) { $r.H } else { @{} })
             $right = & $tls $rightArgs
-            & $note ("  {0,-6} {1,-40} {2,8} | {3,11} | {4,11}" -f $r.M, $r.P.Substring(0, [Math]::Min(40, $r.P.Length)), $none.Status, $(if ($wrong.Asked -ne $false) { $wrong.Status } else { '-' }), $right.Status)
-            if ($none.Status -ne 401 -or $wrong.Status -ne 401 -or $right.Status -in 0, 401, 429) { & $fail "route $($r.M) $($r.P): $($none.Status)/$($wrong.Status)/$($right.Status)" }
+            & $note ("  {0,-6} {1,-40} {2,8} | {3,11} | {4,11}{5}" -f $r.M, $r.P.Substring(0, [Math]::Min(40, $r.P.Length)), $none.Status, $wrong.Status, $right.Status, $(if ($r.Public) { '  (public)' } else { '' }))
+            if ($r.Public) {
+                if ($none.Status -ne 200 -or $wrong.Status -ne 200 -or $right.Status -notin 200, 303) { & $fail "public route $($r.M) $($r.P): $($none.Status)/$($wrong.Status)/$($right.Status)" }
+            }
+            elseif ($none.Status -ne 401 -or $wrong.Status -ne 401 -or $right.Status -in 0, 401, 429 -or $none.Body -notmatch 'authentication required') { & $fail "route $($r.M) $($r.P): $($none.Status)/$($wrong.Status)/$($right.Status)" }
             foreach ($x in @($none, $wrong, $right)) {
                 $text = ($x.Headers.GetEnumerator() | ForEach-Object { '{0}: {1}' -f $_.Key, $_.Value }) -join "`n"
                 $hits = @(& $scan "$($r.M) $($r.P)" ($text + "`n" + $x.Body) ($r.P -eq '/api/tls/ca.crt'))
@@ -9594,7 +9654,14 @@ function Invoke-CamCheckLiveTls {
             }
             if ($r.P -like '*whep*' -and $right.Headers['location']) { $locations += $right.Headers['location'] }
         }
-        & $note ("leak scan over {0} routes x 3 token states of TLS responses (headers and bodies): {1} hit(s)" -f $routes.Count, $leakHits)
+        $nav = & $tls @{ Path = '/'; Headers = @{ Accept = 'text/html,application/xhtml+xml' } }
+        $me0 = & $tls @{ Path = '/api/auth/me' }
+        & $note ("  browser navigation to / without a session: HTTP {0}, Location [{1}]; /api/auth/me signed out: {2}" -f $nav.Status, $nav.Headers['location'], $me0.Body.Trim())
+        if ($nav.Status -ne 303 -or $nav.Headers['location'] -ne '/login?next=%2F' -or $me0.Body -notmatch '"authenticated":false') { & $fail 'the unauthenticated navigation is not sent to /login' }
+        $loginPage = & $tls @{ Path = '/login' }
+        & $note ("  /login headers: CSP [{0}], Cache-Control [{1}]" -f $loginPage.Headers['content-security-policy'], $loginPage.Headers['cache-control'])
+        if ($loginPage.Headers['content-security-policy'] -notmatch "script-src 'self'" -or $loginPage.Body -match '<script>' ) { & $fail 'the login page lacks its CSP or carries inline script' }
+        & $note ("leak scan over {0} routes x 3 session states of TLS responses (headers and bodies): {1} hit(s)" -f $routes.Count, $leakHits)
         foreach ($loc in $locations) { $d = & $tls @{ Method = 'DELETE'; Path = $loc; Headers = $bearer }; & $note ("  DELETE of the session the probe opened: HTTP $($d.Status)") }
         $down = & $tls @{ Path = '/api/tls/ca.crt'; Headers = $bearer }
         $disk = [System.IO.File]::ReadAllText((Join-Path $tlsDir 'ca.crt'))
@@ -9615,6 +9682,11 @@ function Invoke-CamCheckLiveTls {
             $x = & $tls @{ Method = 'POST'; Path = '/api/live/Cam%201/whep?stream=sub'; Headers = ($bearer + @{ 'Content-Type' = 'application/sdp' } + $case.H); Body = $offer }
             & $note ("  refused with the right token: {0} -> HTTP {1}" -f $case.L, $x.Status)
             if ($x.Status -ne 403) { & $fail "$($case.L) was not refused (HTTP $($x.Status))" }
+        }
+        foreach ($case in $refusals) {
+            $x = & $tls @{ Method = 'POST'; Path = '/api/auth/login'; Headers = ($jsonH + $case.H); Body = (& $loginBodyOf 'probe' $password) }
+            & $note ("  login CSRF with the RIGHT password: {0} -> HTTP {1}, cookie issued: {2}" -f $case.L, $x.Status, [bool]$x.Headers['set-cookie'])
+            if ($x.Status -ne 403 -or $x.Headers['set-cookie']) { & $fail "login with $($case.L) was not refused (HTTP $($x.Status))" }
         }
         $ok = & $tls @{ Method = 'POST'; Path = '/api/live/Cam%201/whep?stream=sub'; Headers = ($bearer + @{ 'Content-Type' = 'application/sdp'; Origin = "https://$hostPort"; 'Sec-Fetch-Site' = 'same-origin' }); Body = $offer }
         & $note ("  positive control: the page's own https Origin with the token -> HTTP {0} (a live session)" -f $ok.Status)
@@ -9668,7 +9740,17 @@ function Invoke-CamCheckLiveTls {
 
         # ---- browsers ----
         $spki = (Get-CamTestSpkiHash -Certificate $leaf) + ',' + (Get-CamTestSpkiHash -Certificate $ca)
-        $url = "https://${hostPort}/?token=$token#live"
+        $url = "https://${hostPort}/#live"
+        $restartUi = {
+            param([string[]]$More)
+            [void](Stop-CamTestUi -Ui $ui)
+            $fresh = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livetls' -RunExe $allowed -ExtraArgs ($uiArgs + $More)
+            Set-Variable -Name ui -Value $fresh -Scope 1
+            if (-not $fresh.Started) { throw ('camui did not restart: ' + $fresh.Reason) }
+            $upAgain = $false
+            for ($i = 0; $i -lt 40 -and -not $upAgain; $i++) { $tcp = New-Object System.Net.Sockets.TcpClient; try { $tcp.Connect($lan, $tlsPort); $upAgain = $true } catch { Start-Sleep -Milliseconds 250 } finally { $tcp.Close() } }
+            if (-not $upAgain) { throw 'the HTTPS listener did not come back' }
+        }
         foreach ($browser in @('chrome', 'edge')) {
             $found = Get-CamTestBrowser -Browser $browser
             if (-not $found.Exe) { & $fail ("$browser could not be run: " + $found.Reason); continue }
@@ -9692,18 +9774,89 @@ function Invoke-CamCheckLiveTls {
                     }
                     & $note ("  WITH --ignore-certificate-errors-spki-list (leaf and CA SPKI, base64 SHA-256; this process only): navigation error '{0}'" -f $errorText)
                     if ($errorText) { & $fail "$browser with the SPKI flag still hit a certificate error ($errorText)" }
+
+                    $ev = { param([string]$js) Invoke-CamTestCdpEval -Cdp $cdp -Expression $js -Await }
+                    $until = {
+                        param([string]$js, [int]$sec = 25)
+                        $stop = [DateTime]::UtcNow.AddSeconds($sec)
+                        while ([DateTime]::UtcNow -lt $stop) { try { if (Invoke-CamTestCdpEval -Cdp $cdp -Expression $js) { return $true } } catch { }; Start-Sleep -Milliseconds 300 }
+                        return $false
+                    }
+                    $submit = {
+                        param([string]$user, [string]$pw)
+                        [void](& $ev ('(async () => { document.getElementById("username").value = ' + (ConvertTo-Json -InputObject $user -Compress) + '; document.getElementById("password").value = ' + (ConvertTo-Json -InputObject $pw -Compress) + '; document.getElementById("go").click(); return true; })()'))
+                    }
+                    $message = { try { [string](& $ev '(async () => { const m = document.getElementById("msg"); return m.hidden ? "" : m.textContent; })()') } catch { '' } }
+                    $settled = '(async () => { const m = document.getElementById("msg"); return !document.getElementById("go").disabled || /Too many/.test(m.textContent); })()'
+
+                    # 1. the unauthenticated navigation lands on the login page
+                    $onLogin = & $until '(location.pathname === "/login") && !!document.getElementById("form")'
+                    $where = & $ev 'location.pathname + location.search + location.hash'
+                    & $note ("  unauthenticated navigation to /#live lands on: {0} (login form present: {1})" -f $where, $onLogin)
+                    if (-not $onLogin -or $where -notmatch '^/login\?next=%2F') { & $fail "$browser : an unauthenticated navigation did not land on /login ($where)" }
+                    $fields = & $ev '(async () => ({ user: document.getElementById("username").autocomplete, pass: document.getElementById("password").autocomplete, type: document.getElementById("password").type }))()'
+                    & $note ("  login form autocomplete: username [{0}], password [{1}], password input type [{2}]" -f $fields.user, $fields.pass, $fields.type)
+                    if ($fields.user -ne 'username' -or $fields.pass -ne 'current-password' -or $fields.type -ne 'password') { & $fail "$browser : the login form attributes are wrong" }
+                    if ($shots) {
+                        foreach ($size in @(@(1920, 1080, $false), @(390, 844, $true))) {
+                            [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Emulation.setDeviceMetricsOverride' -Params @{ width = $size[0]; height = $size[1]; deviceScaleFactor = 1; mobile = [bool]$size[2] })
+                            Start-Sleep -Milliseconds 500
+                            [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots ("{0}-login-{1}x{2}.png" -f $browser, $size[0], $size[1])))
+                        }
+                    }
+
+                    # 2. two wrong passwords: the generic message
+                    foreach ($n in 1, 2) {
+                        & $submit $browser ("wrong-password-$n-" + [guid]::NewGuid().ToString('N'))
+                        [void](& $until $settled 15)
+                        $m = & $message
+                        & $note ("  wrong password #{0}: message [{1}]" -f $n, $m)
+                        if ($m -ne 'Invalid username or password') { & $fail "$browser : wrong password #$n did not show the generic message ($m)" }
+                    }
+                    # 3. a burst of wrong passwords: the lockout message with the retry time, and the right password is refused during it
+                    $lockMsg = ''
+                    for ($n = 3; $n -le 10 -and $lockMsg -eq ''; $n++) {
+                        & $submit $browser ("wrong-password-$n-" + [guid]::NewGuid().ToString('N'))
+                        [void](& $until $settled 15)
+                        $m = & $message
+                        if ($m -match 'Too many attempts. Try again in \d+ seconds?') { $lockMsg = $m }
+                    }
+                    & $note ("  after the burst of wrong passwords: message [{0}]" -f $lockMsg)
+                    if ($lockMsg -eq '') { & $fail "$browser : the burst of wrong passwords never showed the lockout message" }
+                    elseif ($shots) { [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-login-lockout-390x844.png")) }
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Emulation.setDeviceMetricsOverride' -Params @{ width = 1280; height = 800; deviceScaleFactor = 1; mobile = $false })
+                    [void](& $until '(async () => !document.getElementById("go").disabled)()' 60)
+                    $refusedRight = $false
+                    # 4. the right password: refused while the lock lasts, accepted after
+                    $landed = $false
+                    for ($k = 0; $k -lt 8 -and -not $landed; $k++) {
+                        & $submit $browser $password
+                        Start-Sleep -Milliseconds 1500
+                        $path = try { [string](& $ev 'location.pathname') } catch { '' }
+                        if ($path -eq '/') { $landed = $true; break }
+                        $m = & $message
+                        if ($m -match 'Too many attempts. Try again in (\d+) second') { $refusedRight = $true; & $note ("  right password during the lock: message [{0}]" -f $m); Start-Sleep -Seconds ([int]$Matches[1] + 1) }
+                        elseif ($m -ne '') { & $note ("  right password: message [{0}]" -f $m); Start-Sleep -Seconds 2 }
+                    }
+                    if (-not $refusedRight) { & $fail "$browser : the right password was not refused during the lockout" }
+                    if (-not $landed) { & $fail "$browser : the right password never signed in"; continue }
+                    $hashOk = & $until 'location.pathname === "/" && location.hash === "#live"' 15
+                    & $note ("  signed in: lands on / with the #live fragment kept: {0}" -f $hashOk)
+                    if (-not $hashOk) { & $fail "$browser : after sign-in the page is not / with #live" }
+
+                    # 5. tiles play, as before
                     $stats = { try { Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.__liveStats ? window.__liveStats() : null' -Await } catch { $null } }
                     $end = [DateTime]::UtcNow.AddSeconds(45); $s = $null
                     while ([DateTime]::UtcNow -lt $end) { $s = & $stats; if ($s -and $s.shown -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -ge 3) { break }; Start-Sleep -Milliseconds 500 }
                     $href = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'location.protocol + "//" + (location.host.replace(/^[0-9.]+/, "a.b.c.d")) + location.pathname + location.search + location.hash'
                     $secure = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.isSecureContext'
                     $cookies = (Invoke-CamTestCdp -Cdp $cdp -Method 'Network.getCookies' -Params @{ urls = @("https://$hostPort/") }).cookies
-                    $cookie = @($cookies | Where-Object { $_.name -eq 'camui_token' })[0]
-                    & $note ("  page URL after the redirect: {0} (the token is gone: {1}); secure context: {2}" -f $href, ($href -notmatch 'token'), $secure)
-                    & $note ("  cookie camui_token: Secure={0} HttpOnly={1} SameSite={2}; its value is the token: {3}" -f $cookie.secure, $cookie.httpOnly, $cookie.sameSite, ($cookie.value -eq $token))
-                    if ($href -match 'token' -or $href -notmatch '^https://') { & $fail "$browser : the token is still in the URL or the page is not https ($href)" }
-                    if (-not $cookie -or -not $cookie.secure -or -not $cookie.httpOnly -or $cookie.sameSite -ne 'Strict' -or $cookie.value -eq $token) { & $fail "$browser : the session cookie is not Secure, HttpOnly, SameSite=Strict and derived" }
-                    if (-not ($s -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -ge 3)) { & $fail "$browser : three tiles did not reach playing over HTTPS"; if ($s) { foreach ($t in @($s.tiles)) { & $note ("    {0}: {1} | {2}" -f $t.name, $t.state, $t.diag.line) } }; continue }
+                    $cookie = @($cookies | Where-Object { $_.name -eq 'camui_session' })[0]
+                    & $note ("  page URL: {0}; secure context: {1}" -f $href, $secure)
+                    & $note ("  cookie camui_session: Secure={0} HttpOnly={1} SameSite={2} persistent (has an expiry)={3} path={4}; value length {5}; value is the password: {6}" -f $cookie.secure, $cookie.httpOnly, $cookie.sameSite, (-not $cookie.session), $cookie.path, ([string]$cookie.value).Length, ($cookie.value -eq $password))
+                    if ($href -notmatch '^https://') { & $fail "$browser : the page is not https ($href)" }
+                    if (-not $cookie -or -not $cookie.secure -or -not $cookie.httpOnly -or $cookie.sameSite -ne 'Strict' -or $cookie.session -or $cookie.path -ne '/' -or ([string]$cookie.value).Length -lt 43 -or $cookie.value -eq $password) { & $fail "$browser : the session cookie is not Secure, HttpOnly, SameSite=Strict, persistent and random" }
+                    if (-not ($s -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge 25 }).Count -ge 3)) { & $fail "$browser : three tiles did not reach playing over HTTPS"; if ($s) { foreach ($t in @($s.tiles)) { & $note ("    {0}: {1} | {2}" -f $t.name, $t.state, $t.diag.line) } } }
                     Start-Sleep -Seconds 3
                     $s2 = & $stats
                     foreach ($t in @($s.tiles)) {
@@ -9714,12 +9867,38 @@ function Invoke-CamCheckLiveTls {
                     $panel = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(async () => { location.hash = "set"; await new Promise(r => setTimeout(r, 1500)); return { shown: !document.getElementById("tlsPanel").classList.contains("hide"), fp: document.getElementById("tlsFingerprint").textContent.length }; })()' -Await
                     & $note ("    Settings > Connect a phone panel shown: {0}; fingerprint text {1} characters" -f $panel.shown, $panel.fp)
                     if (-not $panel.shown -or $panel.fp -ne 95) { & $fail "$browser : the Connect a phone panel is missing over HTTPS" }
-                    $dom = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(async () => { location.hash = "dash"; await new Promise(r => setTimeout(r, 2500)); const vis = (e) => !!e && getComputedStyle(e).display !== "none" && e.getClientRects().length > 0; const tg = Array.from(document.querySelectorAll("#camsA .tgl, #camsC .tgl")); const panels = Array.from(document.querySelectorAll("section[data-tab=set] > .panel:not(#tlsPanel)")); return { viewonly: document.body.classList.contains("viewonly"), banner: vis(document.getElementById("viewOnly")), controlsVisible: vis(document.getElementById("controls")), toggles: tg.length, togglesClickable: tg.filter(t => getComputedStyle(t).pointerEvents !== "none" && vis(t)).length, settingsInert: panels.length > 0 && panels.every(p => p.inert), ackVisible: Array.from(document.querySelectorAll("[data-ack]")).filter(vis).length }; })()' -Await
-                    & $note ("    page in view-only mode: body.viewonly {0}, explanation banner visible {1}, Start/Stop controls visible {2}, record toggles {3} (clickable: {4}), settings panels inert {5}" -f $dom.viewonly, $dom.banner, $dom.controlsVisible, $dom.toggles, $dom.togglesClickable, $dom.settingsInert)
+                    $dom = Invoke-CamTestCdpEval -Cdp $cdp -Expression '(async () => { location.hash = "dash"; await new Promise(r => setTimeout(r, 2500)); const vis = (e) => !!e && getComputedStyle(e).display !== "none" && e.getClientRects().length > 0; const tg = Array.from(document.querySelectorAll("#camsA .tgl, #camsC .tgl")); const panels = Array.from(document.querySelectorAll("section[data-tab=set] > .panel:not(#tlsPanel)")); return { viewonly: document.body.classList.contains("viewonly"), banner: vis(document.getElementById("viewOnly")), controlsVisible: vis(document.getElementById("controls")), toggles: tg.length, togglesClickable: tg.filter(t => getComputedStyle(t).pointerEvents !== "none" && vis(t)).length, settingsInert: panels.length > 0 && panels.every(p => p.inert), ackVisible: Array.from(document.querySelectorAll("[data-ack]")).filter(vis).length, signOut: vis(document.getElementById("signOut")), who: document.getElementById("who").textContent }; })()' -Await
+                    & $note ("    page in view-only mode: body.viewonly {0}, explanation banner visible {1}, Start/Stop controls visible {2}, record toggles {3} (clickable: {4}), settings panels inert {5}; Sign out visible {6} for [{7}]" -f $dom.viewonly, $dom.banner, $dom.controlsVisible, $dom.toggles, $dom.togglesClickable, $dom.settingsInert, $dom.signOut, $dom.who)
                     if (-not $dom.viewonly -or -not $dom.banner -or $dom.controlsVisible -or $dom.togglesClickable -ne 0 -or -not $dom.settingsInert -or $dom.toggles -lt 1) { & $fail "$browser : the view-only page still offers controls ($($dom | ConvertTo-Json -Compress))" }
+                    if (-not $dom.signOut -or $dom.who -ne $browser) { & $fail "$browser : the Sign out control is missing or names the wrong user ($($dom.who))" }
                     if ($shots) { [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-https-dashboard-viewonly.png")) }
                     [void](Invoke-CamTestCdpEval -Cdp $cdp -Expression 'location.hash = "set"'); Start-Sleep -Milliseconds 1200
                     if ($shots) { [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-https-settings.png")); [void](Invoke-CamTestCdpEval -Cdp $cdp -Expression 'location.hash = "live"'); Start-Sleep -Milliseconds 800; [void](Save-CamTestPageShot -Cdp $cdp -Path (Join-Path $shots "$browser-https-live.png")) }
+
+                    # 6. the loopback page shows no Sign out and needs no login
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = 'http://127.0.0.1:18789/#dash' })
+                    [void](& $until 'document.readyState === "complete" && location.port === "18789"' 15)
+                    Start-Sleep -Milliseconds 2500
+                    $loopDom = & $ev '(async () => ({ path: location.pathname, signOutHidden: document.getElementById("signOut").classList.contains("hide"), whoHidden: document.getElementById("who").classList.contains("hide"), me: await (await fetch("api/auth/me")).json() }))()'
+                    & $note ("  loopback page: path {0}, Sign out hidden {1}, /api/auth/me {2}" -f $loopDom.path, $loopDom.signOutHidden, ($loopDom.me | ConvertTo-Json -Compress))
+                    if ($loopDom.path -ne '/' -or -not $loopDom.signOutHidden -or $loopDom.me.loginRequired -ne $false) { & $fail "$browser : the loopback page shows a login control or demands a login" }
+
+                    # 7. the session survives a camui restart
+                    & $restartUi @()
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = $url })
+                    $stays = & $until 'location.pathname === "/" && !!document.getElementById("signOut") && !document.getElementById("signOut").classList.contains("hide")' 25
+                    & $note ("  after restarting camui: the same browser session still opens the app without a new login: {0}" -f $stays)
+                    if (-not $stays) { & $fail "$browser : the session did not survive a camui restart" }
+
+                    # 8. Sign out returns to /login and the session is over
+                    [void](& $ev '(async () => { document.getElementById("signOut").click(); return true; })()')
+                    $out = & $until 'location.pathname === "/login"' 15
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = "https://${hostPort}/" })
+                    $again = & $until 'location.pathname === "/login"' 15
+                    $left = @((Invoke-CamTestCdp -Cdp $cdp -Method 'Network.getCookies' -Params @{ urls = @("https://$hostPort/") }).cookies | Where-Object { $_.name -eq 'camui_session' -and $_.value }).Count
+                    $old = & $tls @{ Path = '/api/status'; Headers = @{ Cookie = "camui_session=$($cookie.value)" } }
+                    & $note ("  Sign out: returns to /login {0}; navigating to / afterwards lands on /login {1}; session cookies left {2}; the old cookie against /api/status -> HTTP {3}" -f $out, $again, $left, $old.Status)
+                    if (-not $out -or -not $again -or $left -ne 0 -or $old.Status -ne 401) { & $fail "$browser : Sign out did not end the session" }
                 }
                 catch { & $fail ("$browser run aborted: " + $_.Exception.Message) }
                 finally {
@@ -9730,20 +9909,37 @@ function Invoke-CamCheckLiveTls {
             }
         }
 
-        # ---- the limiter, last (it locks this source address out for a minute) ----
-        $codes = @(1..12 | ForEach-Object { (& $tls @{ Path = '/api/status'; Headers = @{ Authorization = 'Bearer ' + ('1' * 64) } }).Status })
-        $limited = & $tls @{ Path = '/api/status'; Headers = $bearer }
-        & $note ("failure limiter: 12 wrong-token attempts from one address answered {0}; then even the right token -> HTTP {1}, Retry-After [{2}]" -f (($codes | Group-Object | ForEach-Object { '{0} x{1}' -f $_.Name, $_.Count }) -join ', '), $limited.Status, $limited.Headers['retry-after'])
-        if ($limited.Status -ne 429 -or -not $limited.Headers['retry-after'] -or ($codes -notcontains 429)) { & $fail 'the failure limiter did not answer 429 with Retry-After' }
+        # ---- the username lockout and the per-address throttle, over the wire ----
+        Start-Sleep -Seconds 31   # the address bucket refills one attempt per 6 s, 5 banked
+        $wrongLogin = { param([string]$u, [string]$tag) & $tls @{ Method = 'POST'; Path = '/api/auth/login'; Headers = $jsonH; Body = (& $loginBodyOf $u ("wrong-$tag-" + [guid]::NewGuid().ToString('N'))) } }
+        $fails = @(1..5 | ForEach-Object { & $wrongLogin 'probe' $_ })
+        $uniform = (@($fails | ForEach-Object { '{0}|{1}' -f $_.Status, $_.Body.Trim() } | Select-Object -Unique)).Count -eq 1
+        & $note ("lockout: 5 wrong passwords for one user from one address -> HTTP {0}; identical answers: {1}; body {2}" -f (($fails | ForEach-Object { $_.Status }) -join ','), $uniform, $fails[0].Body.Trim())
+        if ($uniform -ne $true -or $fails[0].Status -ne 401 -or $fails[0].Body -notmatch 'Invalid username or password') { & $fail 'wrong passwords were not answered uniformly with the generic message' }
+        Start-Sleep -Seconds 7    # one address token is back, so a refusal now is the USERNAME lock
+        $locked = & $tls @{ Method = 'POST'; Path = '/api/auth/login'; Headers = $jsonH; Body = (& $loginBodyOf 'probe' $password) }
+        $wait = 0; [void][int]::TryParse([string]$locked.Headers['retry-after'], [ref]$wait)
+        & $note ("lockout: the RIGHT password while locked -> HTTP {0}, Retry-After [{1}], body {2}, cookie issued: {3}" -f $locked.Status, $locked.Headers['retry-after'], $locked.Body.Trim(), [bool]$locked.Headers['set-cookie'])
+        if ($locked.Status -ne 429 -or $wait -lt 1 -or $wait -gt 30 -or $locked.Body -notmatch 'Too many attempts' -or $locked.Headers['set-cookie']) { & $fail 'a locked username was not refused with 429 and Retry-After' }
+        Start-Sleep -Seconds ($wait + 1)
+        $unlocked = & $tls @{ Method = 'POST'; Path = '/api/auth/login'; Headers = $jsonH; Body = (& $loginBodyOf 'probe' $password) }
+        & $note ("lockout: after the delay the right password -> HTTP {0}; the answer holds no hint of the earlier failures: {1}" -f $unlocked.Status, ($unlocked.Body -notmatch 'attempt|fail|lock'))
+        if ($unlocked.Status -ne 200) { & $fail 'the lock did not end on schedule' }
+        $burst = @(1..8 | ForEach-Object { & $wrongLogin ("ghost-$_") $_ })
+        $throttled = @($burst | Where-Object { $_.Status -eq 429 })
+        & $note ("per-address throttle: 8 quick wrong logins (different names) -> HTTP {0}; Retry-After on the first refusal [{1}]" -f (($burst | ForEach-Object { $_.Status }) -join ','), $(if ($throttled.Count) { $throttled[0].Headers['retry-after'] } else { '' }))
+        if ($throttled.Count -lt 1 -or -not $throttled[0].Headers['retry-after'] -or $burst[0].Status -ne 401) { & $fail 'the per-address throttle did not answer 429 with Retry-After' }
+        $authLog = [System.IO.File]::ReadAllText((Join-Path $authDir 'auth.log'))
+        $results = @([regex]::Matches($authLog, 'result=(\w+)') | ForEach-Object { $_.Groups[1].Value } | Group-Object | ForEach-Object { '{0} x{1}' -f $_.Name, $_.Count })
+        & $note ("auth.log: {0} lines; results: {1}; holds the password: {2}; holds a session token: {3}; holds the hash: {4}" -f ($authLog -split "`n" | Where-Object { $_ }).Count, ($results -join ', '), $authLog.Contains($password), $authLog.Contains($sessionValue), $authLog.Contains($hashTail))
+        if ($authLog.Contains($password) -or $authLog.Contains($sessionValue) -or $authLog.Contains($hashTail) -or $authLog -notmatch 'result=ok' -or $authLog -notmatch 'result=fail' -or $authLog -notmatch 'result=locked' -or $authLog -notmatch 'result=throttled') { & $fail 'auth.log is missing outcomes or holds a secret' }
         $logText = (@(Get-Content -LiteralPath $ui.StdOut -ErrorAction SilentlyContinue) -join "`n")
-        & $note ("camui log: token appears: {0}; cookie value appears: {1}; 'token refused' lines: {2}" -f $logText.Contains($token), $false, ([regex]::Matches($logText, 'token refused')).Count)
-        if ($logText.Contains($token)) { & $fail 'the token reached the camui log' }
+        & $note ("camui console log: password appears: {0}; session token appears: {1}; hash appears: {2}" -f $logText.Contains($password), $logText.Contains($sessionValue), $logText.Contains($hashTail))
+        if ($logText.Contains($password) -or $logText.Contains($sessionValue) -or $logText.Contains($hashTail)) { & $fail 'a secret reached the camui log' }
 
         # ---- [Stage 2b.1] tlsReadOnly=false: the same POST now reaches its handler (a harmless, invalid one) ----
         [void](Stop-CamTestUi -Ui $ui)
-        $env:CAMUI_TLS_TOKEN = $token
-        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livetls' -RunExe $allowed -ExtraArgs @('-tls-listen', ('{0}:{1}' -f $lan, $tlsPort), '-tls-dir', $tlsDir, '-tls-readonly', 'false')
-        Remove-Item Env:\CAMUI_TLS_TOKEN -ErrorAction SilentlyContinue
+        $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-livetls' -RunExe $allowed -ExtraArgs ($uiArgs + @('-tls-readonly', 'false'))
         if (-not $ui.Started) { throw ('camui did not restart with -tls-readonly false: ' + $ui.Reason) }
         $up = $false
         for ($i = 0; $i -lt 40 -and -not $up; $i++) { $tcp = New-Object System.Net.Sockets.TcpClient; try { $tcp.Connect($lan, $tlsPort); $up = $true } catch { Start-Sleep -Milliseconds 250 } finally { $tcp.Close() } }
@@ -9763,7 +9959,6 @@ function Invoke-CamCheckLiveTls {
     }
     catch { & $fail ('check aborted: ' + $_.Exception.Message) }
     finally {
-        Remove-Item Env:\CAMUI_TLS_TOKEN -ErrorAction SilentlyContinue
         Disconnect-CamTestCdp -Cdp $cdp
         foreach ($b in @($script:CamTlsBrowsers)) { try { [void](Stop-CamTestBrowser -Started $b) } catch { } }
         if ($ui) { [void](Stop-CamTestUi -Ui $ui) }
@@ -9780,7 +9975,7 @@ function Invoke-CamCheckLiveTls {
 
     if ($script:CamTlsOk -or $script:CamTlsEvidence.Count) {
         Add-CamTestResult -Run $Run -Check 'livetls' -Status $(if ($script:CamTlsOk) { 'PASS' } else { 'FAIL' }) `
-            -Message 'camui serves the app and the Live screen over HTTPS on the LAN address with a token and a local CA, view-only by default: nothing without the token, nothing leaked, no write with it, trust per probe or per browser process only' `
+            -Message 'camui serves the app and the Live screen over HTTPS on the LAN address behind a login (username and password, brute-force protected) and a local CA, view-only by default: nothing without a session, nothing leaked, no write with one, trust per probe or per browser process only' `
             -Evidence $script:CamTlsEvidence
     }
 }

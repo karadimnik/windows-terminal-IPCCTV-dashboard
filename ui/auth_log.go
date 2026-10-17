@@ -24,9 +24,7 @@ type authLog struct {
 	dir string
 	now func() time.Time
 
-	mu   sync.Mutex
-	file *os.File
-	size int64
+	mu sync.Mutex
 }
 
 func newAuthLog(dir string, now func() time.Time) *authLog { return &authLog{dir: dir, now: now} }
@@ -49,43 +47,22 @@ func cleanLoggedName(name string) string {
 	return b.String()
 }
 
-// record appends one line. A failure to log is reported to the caller, who logs
-// it to the console; it never blocks a sign-in.
+// record appends one line. The file is opened for each line and closed again:
+// these events are rare, and it leaves nothing open for an editor, a backup or a
+// cleanup to trip over. A failure to log is reported to the caller, who writes it
+// to the console; it never blocks a sign-in.
 func (l *authLog) record(ip, username, event, result string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if err := l.openLocked(); err != nil {
-		return err
-	}
-	line := fmt.Sprintf("%s ip=%s event=%s result=%s user=%q\n", l.now().UTC().Format(time.RFC3339), cleanLoggedName(ip), event, result, cleanLoggedName(username))
-	n, err := l.file.WriteString(line)
-	l.size += int64(n)
-	return err
-}
-
-func (l *authLog) openLocked() error {
-	if l.file == nil {
-		if err := l.openFileLocked(); err != nil {
-			return err
-		}
-	}
-	if l.size < authLogMaxBytes {
-		return nil
-	}
-	path := filepath.Join(l.dir, authLogName)
-	l.file.Close()
-	l.file = nil
-	_ = os.Remove(path + ".1")
-	if err := os.Rename(path, path+".1"); err != nil {
-		return err
-	}
-	return l.openFileLocked()
-}
-
-func (l *authLog) openFileLocked() error {
 	path := filepath.Join(l.dir, authLogName)
 	if err := os.MkdirAll(l.dir, 0o700); err != nil {
 		return err
+	}
+	if info, err := os.Stat(path); err == nil && info.Size() >= authLogMaxBytes {
+		_ = os.Remove(path + ".1")
+		if err := os.Rename(path, path+".1"); err != nil {
+			return err
+		}
 	}
 	_, statErr := os.Stat(path)
 	fresh := os.IsNotExist(statErr)
@@ -98,26 +75,12 @@ func (l *authLog) openFileLocked() error {
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 	if fresh {
 		if err := restrictToOwner(path, false); err != nil {
-			f.Close()
 			return err
 		}
 	}
-	info, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return err
-	}
-	l.file, l.size = f, info.Size()
-	return nil
-}
-
-func (l *authLog) close() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.file != nil {
-		l.file.Close()
-		l.file = nil
-	}
+	_, err = fmt.Fprintf(f, "%s ip=%s event=%s result=%s user=%q\n", l.now().UTC().Format(time.RFC3339), cleanLoggedName(ip), event, result, cleanLoggedName(username))
+	return err
 }

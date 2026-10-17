@@ -638,7 +638,6 @@ func TestNoPasswordHashOrTokenInLogsResponsesOrAuthLog(t *testing.T) {
 	for i := 0; i < 6; i++ {
 		collect(rig.loginFrom("192.168.9.4:1", testUser, wrongPw))
 	}
-	rig.auth.authLog.close()
 
 	logText := rig.logs.String()
 	authLogText := string(mustRead(t, filepath.Join(rig.cfg.AuthDir, "auth.log")))
@@ -678,7 +677,6 @@ func TestAuthLogFormatSanitizingAndCap(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "auth")
 	clock := newFakeClock()
 	l := newAuthLog(dir, clock.now)
-	defer l.close()
 	evil := "bob\nresult=ok forged\r\x00\x1b[31m" + strings.Repeat("z", 200)
 	if err := l.record("192.168.1.7", evil, "login", "fail"); err != nil {
 		t.Fatal(err)
@@ -718,7 +716,6 @@ func TestAuthLogFormatSanitizingAndCap(t *testing.T) {
 	}
 	// A restart appends to the existing file.
 	l2 := newAuthLog(dir, clock.now)
-	defer l2.close()
 	before := fileSize(filepath.Join(dir, "auth.log"))
 	_ = l2.record("192.168.1.8", "carol", "login", "ok")
 	if fileSize(filepath.Join(dir, "auth.log")) <= before {

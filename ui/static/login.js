@@ -19,7 +19,10 @@
   // The server decides where "next" may lead (same-origin path only); this page
   // never navigates to a value it has not been handed back.
   function leave(target) {
-    location.replace(target || "/");
+    target = target || "/";
+    // A deep link such as /#live survives the detour through this page.
+    if (!target.includes("#")) target += location.hash;
+    location.replace(target);
   }
 
   // A link opened from another site arrives without the SameSite=Strict cookie
