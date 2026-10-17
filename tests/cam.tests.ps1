@@ -7502,6 +7502,9 @@ function Invoke-CamCheckLivePage {
                     & $viewport $W $H
                     $s2 = & $until { param($s) $s.innerWidth -eq $W -and $s.fit -and $s.fit.vw -eq $W -and $s.fit.vh -eq $H -and @(@($s.tiles) | Where-Object { $_.rect.w -eq $s.fit.tile }).Count -eq @($s.tiles).Count } 8
                     if (-not $s2) { $s2 = & $stats; & $fail "${browser} ${Label}: the tiles never took the computed size"; if (-not $s2) { return $null } }
+                    # a vertical scrollbar that appears once the tiles are laid out narrows the grid and makes the page re-fit (debounced): let that settle
+                    Start-Sleep -Milliseconds 700
+                    $s2 = & $stats
                     $lay = & $layout $s2
                     $px = $null
                     if ($WithShot) { $px = & $shot "$browser-$Label" $s2 }
