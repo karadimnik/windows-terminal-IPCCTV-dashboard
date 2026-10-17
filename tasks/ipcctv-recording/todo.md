@@ -1400,3 +1400,25 @@ The Operator approved all four. Documentation only; no code touched.
       throwaway build; `uiguard` (new harness check) and the Go table tests were red on the old binary and green on the new; the
       page and every front-end call (all through one JSON helper) still work. Not proven: a real-browser cross-site POST (headless
       Chrome gated loopback itself), LAN mode with the real binary.
+
+- [x] **[92]** DONE 2026-10-17 on branch `executor/camera-down-threshold` (not merged; checks `downalert`, `downalertrun`). FALSE ALERT 110
+      on a healthy camera. `E:\cameras\_logs\recorder.log` 2026-10-17: Rear Balcony raised "a camera has stopped recording" at
+      08:45:01 and 09:00:01, each followed 5-6 s later by "is writing again after 15m down"; the footage is intact, one 137 MB segment
+      every 15 minutes (`Rear_Balcony_20261017_0830/0845/0900...mkv`). Cause: `CameraDownAlertMinutes` (15) equals `SegmentSeconds`
+      (900), so at every boundary a healthy camera is 900 s past its newest progress marker (`Measure-CamCameraDown`) until the
+      next status tick whose per-camera directory scan (`Get-CamDirScan`, refreshed on every status tick, NOT on
+      `ArchiveScanSeconds`) sees the new file, a few seconds later (the keyframe wait after the clock boundary plus the tick); any
+      tick in that window alerted. Only Rear Balcony showed it because of its timing offsets.
+
+      Fix: `Get-CamDownAlertSeconds` returns `max(CameraDownAlertMinutes x 60, SegmentSeconds + StatusIntervalSeconds + 30)` - 935 s
+      (15.6 min) with the defaults - and the status tick uses it; the supervisor logs one line at start when the floor raised the
+      value. The configuration is never refused, only raised. A dark camera still alerts at the effective limit, 35 s later than
+      before with the defaults. `CameraDownRepeatHours`, segmenting, scanning and the stall watchdog are unchanged. Documented in
+      `docs/alerts.md`, `docs/configuration.md`, `docs/troubleshooting.md`.
+
+      Verified: `downalert` (unit table on the product's own functions) was red on the old formula (901 s and the effective-limit
+      table failed) and is green; `downalertrun` (real supervisor, synthetic camera, SegmentSeconds 20, alert minutes equal to the
+      segment, 11 s GOP) raised 3 false alerts in 3 segment rolls on the old rule and none on the fix, then exactly one alert
+      shortly after the 51 s limit once the camera went dark. `ArchiveScanSeconds` does not move the limit (a unit row guards it).
+      `Test-CamChildStalled` (2.5 x segment) has no such window at its default; documented limit: a `StallFactor` below about 1.01
+      (validation only requires > 1) would have the same boundary exposure and restart a healthy child.
