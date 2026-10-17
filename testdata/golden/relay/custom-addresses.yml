@@ -1,0 +1,113 @@
+# ---------------------------------------------------------------------------
+# MediaMTX configuration TEMPLATE for the IPCCTV restreamer.
+#
+# This file is not usable as-is. `cam.recorder.ps1 -InstallRestreamer` renders
+# it to the path in recorder.config.json (RestreamerConfigPath, by default
+# C:\mediamtx\mediamtx.yml). Five placeholders are substituted: the RTSP
+# bind address and the API bind address, both taken from RelayBase and
+# RelayApiBase so the addresses have one source of truth, the control API's
+# user name and password hash, from relay_api_creds.xml, and the paths block,
+# generated with one entry per camera in cameras.json. The placeholder tokens
+# are deliberately absent from these comments, because the substitution is a
+# plain text replacement over the whole file.
+#
+# Role: transport fan-out ONLY. One RTSP session per camera is pulled here and
+# re-served to local consumers, which frees the second of each camera's two
+# session slots. Recording stays entirely in cam.recorder.ps1 - MediaMTX's own
+# record feature is deliberately NOT used, because the supervisor already has
+# proven crash safety, credential redaction, backoff and a stall watchdog.
+#
+# WHERE THE RENDERED FILE MUST LIVE: an NTFS path, NOT the repo. MediaMTX
+# watches its config file with ReadDirectoryChanges, which the WSL
+# \\wsl.localhost 9P share does not implement; started from the repo it exits
+# at once with "ReadDirectoryChanges: Incorrect function." Measured on v1.21.2.
+# ---------------------------------------------------------------------------
+
+logLevel: info
+# stdout, so the supervisor can pipe every line through Get-CamRedacted before
+# it reaches a log file. A file destination would write the camera URL - and
+# therefore the password - to disk on the first connection error.
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 2048             # 2048 packets ~ 40 s of one camera's audio+video
+
+# Who may do what. Without this block MediaMTX's built-in default lets ANY
+# local process call the control API with no login, and /v3/config/paths then
+# returns every camera's source URL - password included. Setting
+# authInternalUsers replaces the defaults, so the first entry restates the
+# default anonymous access the consumers rely on: publish, read and playback,
+# from any address (RTSP below is loopback only). The second is the product's
+# own API login, loopback only, API only. Nothing grants api, metrics or pprof
+# without a login. The password is never in this file: pass holds its SHA-256
+# (the sha256: form MediaMTX documents), and the password itself is in
+# relay_api_creds.xml beside the scripts, protected by DPAPI.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+        path:
+      - action: read
+        path:
+      - action: playback
+        path:
+  - user: camrelayapi
+    pass: sha256:fz6gtfKSgZ+BV36qEwvjZ5+K8yHQTCLUSHGqccarb4g=
+    ips: ["127.0.0.1", "::1"]
+    permissions:
+      - action: api
+
+# Localhost control API. Used by the recorder's and the dashboard's per-attempt
+# readiness check and for diagnostics; it exposes no media.
+api: yes
+apiAddress: 127.0.0.1:19997
+metrics: no
+pprof: no
+playback: no
+
+# RTSP fan-out, TCP only, LOOPBACK ONLY.
+# Loopback binding is what makes anonymous access acceptable: no process off
+# this machine can reach it. If this is ever bound to a LAN address, internal
+# authentication MUST be configured first.
+rtsp: yes
+rtspTransports: [tcp]
+rtspAddress: 127.0.0.1:18554
+
+# Every other server off. This is a fan-out, not a media server.
+rtmp: no
+hls: no
+webrtc: no
+srt: no
+moq: no
+
+pathDefaults:
+  rtspTransport: tcp
+  # Hold the camera session continuously, independent of how many consumers are
+  # attached. On-demand pulling would re-open a camera session on every
+  # consumer gap and defeat the single-session guarantee.
+  sourceOnDemand: no
+
+# One path per camera, named by its safe name lowercased with every character
+# that is not a letter or a digit removed.
+#
+# The name MUST stay alphanumeric. MediaMTX maps a path parameter to the
+# environment variable MTX_PATHS_<PATHNAME>_<PARAM> and cuts the path name at
+# the first underscore, so a path named workshop_entrance silently becomes a
+# stray "workshop" plus an offline "workshop_entrance" - no error, no stream.
+#
+# Each source below stays `publisher` in the file and is replaced at launch by
+# MTX_PATHS_<PATHNAME>_SOURCE, set on the child process by the supervisor. That
+# is the only reason the camera password is never written to disk.
+paths:
+  cameraone:
+    # Camera One at 192.0.2.11 - source supplied at launch by MTX_PATHS_CAMERAONE_SOURCE
+    source: publisher
+  cameratwo:
+    # Camera Two at 192.0.2.12 - source supplied at launch by MTX_PATHS_CAMERATWO_SOURCE
+    source: publisher
+  camerathree:
+    # Camera Three at 192.0.2.13 - source supplied at launch by MTX_PATHS_CAMERATHREE_SOURCE
+    source: publisher

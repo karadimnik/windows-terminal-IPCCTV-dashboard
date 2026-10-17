@@ -1,0 +1,112 @@
+{
+    "fixture":  "SYNTHETIC FIXTURE: fake cameras on documentation addresses and fake logins. Not a leak.",
+    "description":  "The inputs behind every file in relay/ and live/; the YAML files are the expected output, byte for byte (CRLF).",
+    "cameras":  [
+                    {
+                        "Name":  "Camera One",
+                        "IP":  "192.0.2.11",
+                        "Quality":  "stream1",
+                        "Record":  true
+                    },
+                    {
+                        "Name":  "Camera Two",
+                        "IP":  "192.0.2.12",
+                        "Quality":  "stream2",
+                        "Record":  true
+                    },
+                    {
+                        "Name":  "Camera Three",
+                        "IP":  "192.0.2.13",
+                        "Quality":  "",
+                        "Record":  false
+                    }
+                ],
+    "apiLogin":  {
+                     "user":  "camrelayapi",
+                     "password":  "FAKE-API-PASSWORD-NOT-A-SECRET",
+                     "passwordHash":  "sha256:fz6gtfKSgZ+BV36qEwvjZ5+K8yHQTCLUSHGqccarb4g="
+                 },
+    "liveLogin":  {
+                      "user":  "camlive",
+                      "secret":  "FAKE-LIVE-SECRET-NOT-A-SECRET",
+                      "secretHash":  "sha256:YmZ/HeIzPZ69YYCAVp3zqzs2koQtYv3dnjCc4jph3Wc="
+                  },
+    "relayPaths":  [
+                       "cameraone",
+                       "cameratwo",
+                       "camerathree"
+                   ],
+    "template":  "mediamtx.template.yml (repository root)",
+    "templateSha256":  "89b595eef49ae235dff721e4e928332a2b703721cceb558ed6eb11e27571b58d",
+    "variants":  [
+                     {
+                         "file":  "relay/default.yml",
+                         "kind":  "relay",
+                         "description":  "default configuration",
+                         "settings":  {
+
+                                      }
+                     },
+                     {
+                         "file":  "relay/live-off.yml",
+                         "kind":  "relay",
+                         "description":  "live view explicitly off with live keys set: must equal default.yml (and master)",
+                         "settings":  {
+                                          "LiveCloseAfterSeconds":  7,
+                                          "LiveSubStream":  "stream2",
+                                          "LiveViewEnabled":  false
+                                      }
+                     },
+                     {
+                         "file":  "relay/live-on.yml",
+                         "kind":  "relay",
+                         "description":  "live view on: the RELAY config must not change: must equal default.yml",
+                         "settings":  {
+                                          "LiveCloseAfterSeconds":  7,
+                                          "LiveSubStream":  "stream2",
+                                          "LiveViewEnabled":  true
+                                      }
+                     },
+                     {
+                         "file":  "relay/custom-addresses.yml",
+                         "kind":  "relay",
+                         "description":  "other loopback ports for the RTSP and API listeners",
+                         "settings":  {
+                                          "RelayApiBase":  "http://127.0.0.1:19997",
+                                          "RelayBase":  "rtsp://127.0.0.1:18554"
+                                      }
+                     },
+                     {
+                         "file":  "live/default.yml",
+                         "kind":  "live",
+                         "description":  "live view on, all defaults",
+                         "settings":  {
+                                          "LiveViewEnabled":  true
+                                      }
+                     },
+                     {
+                         "file":  "live/sub-stream-and-close.yml",
+                         "kind":  "live",
+                         "description":  "LiveSubStream stream2 (camera Two already records stream2, so it gets only a main path), close after 7 s",
+                         "settings":  {
+                                          "LiveCloseAfterSeconds":  7,
+                                          "LiveSubStream":  "stream2",
+                                          "LiveViewEnabled":  true
+                                      }
+                     },
+                     {
+                         "file":  "live/lan.yml",
+                         "kind":  "live",
+                         "description":  "media port on all interfaces and two advertised LAN addresses",
+                         "settings":  {
+                                          "LiveAdvertiseHosts":  [
+                                                                     "192.0.2.50",
+                                                                     "192.0.2.51"
+                                                                 ],
+                                          "LiveUdpAddress":  "0.0.0.0:18189",
+                                          "LiveViewEnabled":  true,
+                                          "LiveWhepAddress":  "127.0.0.1:18889"
+                                      }
+                     }
+                 ]
+}
