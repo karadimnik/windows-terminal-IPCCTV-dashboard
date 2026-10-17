@@ -165,6 +165,10 @@ Commissioned on master of the original repository, ahead of this project, as the
   rebuilt; killed servers, restarted cameras and camui, a sleeping page and a hung server recover without a reload with capped retry
   traffic; tiles scrolled out of view are parked; `live-diag/3`. Design `live-robust-design.md`; proven by the new opt-in `liverobust`
   check in Chrome and Edge (docs `ui.md`).
+- **Status (2026-10-17), Live Fit / Fill on branch `portable-nvr-fitfill` (not merged): a toggle for the whole screen.** Front end only. Fit (default,
+  unchanged: 3x2 of 633x356 at 1920x1080, ~69 % of the height) or Fill (`bestGridFill`: the cells divide the whole area, `object-fit: cover`,
+  1920x1080 3x2 of 633x495, ~99 % covered, ~28 % of each picture cropped); persisted in `localStorage` `camui.live.fit`; layout only, no
+  new sessions; phone rule falls back to Fit's scrolling column below 180 px per tile; proven by `bestgrid.test.js` and the `livepage` Fit/Fill block (docs `ui.md`).
 
 ### Stage 3 - the internet
 
