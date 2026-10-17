@@ -728,9 +728,10 @@ func TestLiveListEndpoint(t *testing.T) {
 		t.Fatalf("got %d", rec.Code)
 	}
 	var body struct {
-		Enabled bool `json:"enabled"`
-		Alive   bool `json:"alive"`
-		Cameras []struct {
+		Enabled            bool `json:"enabled"`
+		Alive              bool `json:"alive"`
+		HiddenGraceSeconds int  `json:"hiddenGraceSeconds"`
+		Cameras            []struct {
 			Name      string `json:"name"`
 			Sub       bool   `json:"sub"`
 			Main      bool   `json:"main"`
@@ -741,6 +742,9 @@ func TestLiveListEndpoint(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
+	}
+	if body.HiddenGraceSeconds != 300 {
+		t.Errorf("hiddenGraceSeconds = %d, want the default 300", body.HiddenGraceSeconds)
 	}
 	if !body.Enabled || !body.Alive || len(body.Cameras) != 2 {
 		t.Fatalf("unexpected body %s", rec.Body)

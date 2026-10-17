@@ -159,6 +159,12 @@ Commissioned on master of the original repository, ahead of this project, as the
   a frame, with no change to the grid (design `live-fit-design.md`, docs `ui.md`). Proven by `livepage` in Chrome and Edge (measured
   rectangles, instant picture, swap to the 1280x720 main, grid untouched, close/Esc/backdrop/deep link/Back, pre-warm leaves no session,
   HD-unavailable path, hidden window, fullscreen calls) and `tests/live/bestgrid.test.js`.
+- **Status (2026-10-17), Live robustness A on branch `portable-nvr-liverobust` (not merged): a wall that stays on.** A hidden window or
+  another camui tab keeps its streams for a grace period (camui `liveHiddenGraceSeconds`, default 300, 0 = free at once, -1 = never;
+  env `CAMUI_LIVE_HIDDEN_GRACE`; `hiddenGraceSeconds` in `GET /api/live`) and frees them after it; a stalled picture (no decoded frames for 8 s) is
+  rebuilt; killed servers, restarted cameras and camui, a sleeping page and a hung server recover without a reload with capped retry
+  traffic; tiles scrolled out of view are parked; `live-diag/3`. Design `live-robust-design.md`; proven by the new opt-in `liverobust`
+  check in Chrome and Edge (docs `ui.md`).
 
 ### Stage 3 - the internet
 
@@ -299,7 +305,7 @@ the product's control-API login does not govern it. That is acceptable on loopba
    response or SDP contains a camera URL or credential; `Authorization` never reaches the browser; the wrong-ufrag probe
    yields no media.
 
-## Cross-cutting: no stray processes (Operator's rule, 2026-10-16) - TASKS, NOT BUILT
+## Cross-cutting: no stray processes (Operator's rule, 2026-10-16) - SPECIFICATION FOR THE PORTABLE SUPERVISOR, NOT BUILT IN POWERSHELL
 
 **The rule.** Nothing may run that should not be running, and the Operator must be told when something does. This
 section is the task list only; nothing here is implemented. It was raised after leftovers were found in the session
@@ -320,6 +326,9 @@ know if three recorders ran, or if live-view tabs left things behind.
 on the health strip; no detection of a duplicate ffmpeg for one camera, an extra MediaMTX or `camui`; no count of live
 view sessions or their ages. Today he finds out only by running `-Status` and reading the table.
 
+**Operator decision (2026-10-16): S1 to S5 are the specification for the portable (Go) supervisor and are NOT built in the PowerShell
+scripts.** Nothing in `cam.recorder.ps1`, `cam.common.ps1` or `cam.ps1` changes for them.
+
 **Decisions.** Alert first; never kill by process name alone (the Operator may run other `ffmpeg` or `mediamtx`
 processes); no stress tests (feasibility scenarios, one clean run each, each detector with a negative control that can
 fail). The Operator declined a change to his shell aliases (`cp`, `rm`, `mv` are interactive there): agents keep using
@@ -334,8 +343,8 @@ the explicit force forms.
 | **S5 Leak assertion for tests and agents** | `Assert-CamNoStrays` in the harness: snapshot before and after each check, by marker and by image path, and fail on anything extra; sandbox rigs run inside a job object so they die with the test; a final sweep at the end of a `-Checks` run. The commission template asks every agent to list processes before and after and report the diff. | A check that leaves a process behind fails, a clean check passes, and the sweep removes only marked rig processes. |
 | **S6 Carry into the Go supervisor (Stage 5)** | S1 to S3 are the specification of the portable supervisor's lock, process group or job, and census, on Windows and Linux. | Re-expressed as Go tests, green on both. |
 
-**Open question.** S1 to S3 would also protect the original PowerShell system that runs from `master`. The portable plan
-may never reach `master`, so a backport is a separate commission on `master`, with the Operator's approval.
+**Closed (2026-10-16).** The Operator decided against building S1 to S5 in PowerShell; a backport to the original system on `master`
+would be a separate commission with his approval.
 
 ## Order and what each stage depends on
 

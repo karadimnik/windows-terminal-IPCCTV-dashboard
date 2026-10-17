@@ -27,7 +27,7 @@
 [CmdletBinding()]
 param(
     # Which checks to run. Default: every check that touches no camera.
-    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'livegone', 'livelan', 'livetls')]
+    [ValidateSet('parse', 'cameralist', 'inputs', 'selftest', 'layout', 'strip', 'sections', 'autostart', 'crashsafe', 'windowclose', 'windowid', 'nvrstart', 'leak', 'uileak', 'uiguard', 'procs', 'relay', 'viewer', 'viewerpw', 'relayapi', 'prunematrix', 'pruneroots', 'pruneage', 'prunewatermark', 'pruneclock', 'prunebreaker', 'pruneblocked', 'pruneconfig', 'pruneowner', 'prunelive', 'installsteps', 'installplan', 'installpreflight', 'installsandbox', 'docswitches', 'doclinks', 'logrotate', 'segments', 'backoff', 'logrotatelive', 'stallwatch', 'logheld', 'pruneloop', 'dst', 'dstloop', 'clocklint', 'soak', 'livecfg', 'livesecret', 'livewhep', 'liveondemand', 'livepage', 'liverobust', 'livegone', 'livelan', 'livetls')]
     [string[]]$Checks,
 
     # Allows the checks that open RTSP sessions against the real cameras.
@@ -7502,6 +7502,9 @@ function Invoke-CamCheckLivePage {
                     & $viewport $W $H
                     $s2 = & $until { param($s) $s.innerWidth -eq $W -and $s.fit -and $s.fit.vw -eq $W -and $s.fit.vh -eq $H -and @(@($s.tiles) | Where-Object { $_.rect.w -eq $s.fit.tile }).Count -eq @($s.tiles).Count } 8
                     if (-not $s2) { $s2 = & $stats; & $fail "${browser} ${Label}: the tiles never took the computed size"; if (-not $s2) { return $null } }
+                    # a vertical scrollbar that appears once the tiles are laid out narrows the grid and makes the page re-fit (debounced): let that settle
+                    Start-Sleep -Milliseconds 700
+                    $s2 = & $stats
                     $lay = & $layout $s2
                     $px = $null
                     if ($WithShot) { $px = & $shot "$browser-$Label" $s2 }
@@ -7539,6 +7542,8 @@ function Invoke-CamCheckLivePage {
                 if (@(@($s.tiles) | Where-Object { $_.stream -ne 'sub' }).Count) { & $fail "${browser}: a tile was not on the sub stream" }
                 $n = & $readersIs 6
                 $liveN = & $sessions
+                $endWait = [DateTime]::UtcNow.AddSeconds(40)
+                while ($liveN -ne 6 -and [DateTime]::UtcNow -lt $endWait) { Start-Sleep -Milliseconds 500; $liveN = & $sessions }    # the previous browser's sessions time out on their own
                 & $note ("  sessions with six sub tiles: camera stream2 readers {0}, live instance WebRTC sessions {1}" -f $n, $liveN)
                 if ($n -ne 6 -or $liveN -ne 6) { & $fail "${browser}: stream2 had $n and the live instance $liveN sessions with six viewers, wanted 6 and 6" }
                 $base0 = $s
@@ -7608,7 +7613,7 @@ function Invoke-CamCheckLivePage {
                 $m = $c1.diag.ms
                 & $note ("  tile diagnostics v2 (Cam 1): gather {0} ms, signalling POST {1} ms, connected {2} ms, first frame {3} ms; line: {4}" -f $m.gather, $m.post, $m.connected, $m.frame, $c1.diag.line)
                 if ($null -eq $m.gather -or $null -eq $m.post -or $null -eq $m.connected -or $null -eq $m.frame) { & $fail "${browser}: the tile diagnostics lack a timing" }
-                if ($c1.diag.line -notmatch '^live-diag/2 .* post=\d+ms .* connected=\d+ms frame=\d+ms ' -or $c1.diag.line -match '\d+\.\d+\.\d+\.\d+|rtsp:|://' -or $c1.diag.line -match "`n") { & $fail "${browser}: the tile diagnostics line is not one address-free live-diag/2 line with the timings" }
+                if ($c1.diag.line -notmatch '^live-diag/3 .* post=\d+ms .* connected=\d+ms frame=\d+ms ' -or $c1.diag.line -match '\d+\.\d+\.\d+\.\d+|rtsp:|://' -or $c1.diag.line -match "`n") { & $fail "${browser}: the tile diagnostics line is not one address-free live-diag/3 line with the timings" }
 
                 # ---- the modal ----
                 $tileClasses = { & $js 'Array.from(document.querySelectorAll(''.ltile'')).map((e) => e.className + ''/'' + e.style.cssText).join(''|'')' }
@@ -7678,7 +7683,7 @@ function Invoke-CamCheckLivePage {
                     $line = $mh.line
                     & $note ("  modal diagnostics v2: gather {0} ms, POST {1} ms, connected {2} ms, first frame {3} ms, hd {4} ms; line: {5}" -f $mh.ms.gather, $mh.ms.post, $mh.ms.connected, $mh.ms.frame, $mh.ms.hd, $line)
                     if ($null -eq $mh.ms.gather -or $null -eq $mh.ms.post -or $null -eq $mh.ms.connected -or $null -eq $mh.ms.frame -or $null -eq $mh.ms.hd) { & $fail "${browser}: the modal diagnostics lack a timing" }
-                    if ($line -notmatch '^live-diag/2 .*stream=main .* post=\d+ms .* connected=\d+ms frame=\d+ms hd=\d+ms ' -or $line -match '\d+\.\d+\.\d+\.\d+|rtsp:|://') { & $fail "${browser}: the modal diagnostics line is not an address-free live-diag/2 line with the timings" }
+                    if ($line -notmatch '^live-diag/3 .*stream=main .* post=\d+ms .* connected=\d+ms frame=\d+ms hd=\d+ms ' -or $line -match '\d+\.\d+\.\d+\.\d+|rtsp:|://') { & $fail "${browser}: the modal diagnostics line is not an address-free live-diag/3 line with the timings" }
                 }
 
                 # 3. Close button: session gone, tile unaffected, focus back on the tile, hash back to #live
@@ -7825,14 +7830,16 @@ function Invoke-CamCheckLivePage {
                 Start-Sleep -Milliseconds 400
                 & $viewport 1920 1080
 
-                # 10. hidden with the modal open: every connection closes, restoring reopens tiles and modal
+                # 10. hidden with the modal open. The default (a grace period) keeps everything; the old behaviour is grace 0, set here through the test hook,
+                # so that the free-and-reopen path stays covered (liverobust measures the default and the expiry).
+                [void](& $js 'window.__liveTune({ grace: 0 })')
                 $mh = (& $stats).modal
                 $window = Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.getWindowForTarget'
                 [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'minimized' } })
                 $hid = & $until { param($s) $s.visibility -eq 'hidden' -and @(@($s.tiles) | Where-Object { $_.open }).Count -eq 0 -and $s.modal -and -not $s.modal.session -and -not $s.modal.connection } 15
                 $liveN = & $sessionsIs 0 14
                 $n = & $readersIs 0 14
-                & $note ("  window minimized with the modal open: visibility {0}, open tile connections {1}, modal session {2}, modal still open {3}; live sessions {4}, camera stream2 readers {5}" -f $(if ($hid) { $hid.visibility } else { 'not hidden' }), $(if ($hid) { @(@($hid.tiles) | Where-Object { $_.open }).Count } else { '?' }), $(if ($hid) { $hid.modal.session } else { '?' }), $(if ($hid) { $hid.modal.dialogOpen } else { '?' }), $liveN, $n)
+                & $note ("  window minimized with the modal open (grace 0): visibility {0}, open tile connections {1}, modal session {2}, modal still open {3}; live sessions {4}, camera stream2 readers {5}" -f $(if ($hid) { $hid.visibility } else { 'not hidden' }), $(if ($hid) { @(@($hid.tiles) | Where-Object { $_.open }).Count } else { '?' }), $(if ($hid) { $hid.modal.session } else { '?' }), $(if ($hid) { $hid.modal.dialogOpen } else { '?' }), $liveN, $n)
                 if (-not $hid) { & $fail "${browser}: minimizing did not close the tiles' and the modal's connections" }
                 if ($liveN -ne 0 -or $n -ne 0) { & $fail "${browser}: sessions remained while hidden (live $liveN, stream2 $n)" }
                 [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $window.windowId; bounds = @{ windowState = 'normal' } })
@@ -7845,6 +7852,7 @@ function Invoke-CamCheckLivePage {
                 $c = & $closedIs
                 $liveN = & $sessionsIs 6 10
                 if (-not $c -or $liveN -ne 6) { & $fail "${browser}: closing after the restore left $liveN sessions" }
+                [void](& $js 'window.__liveTune({ grace: null })')
 
                 # 11. the grid's Fullscreen button
                 $fs0 = (& $fxState).fs
@@ -7966,6 +7974,699 @@ function Invoke-CamCheckLivePage {
     Add-CamTestResult -Run $Run -Check 'livepage' -Status $(if ($script:CamLivePageOk) { 'PASS' } else { 'FAIL' }) `
         -Message 'the Live screen plays six sub tiles in Chrome and Edge at desktop and phone widths, focuses on main, mutes, closes when hidden, says so when live view is off, and a foreign page gets no session' `
         -Evidence ($evidence + $script:CamLivePageEvidence)
+}
+
+
+function Suspend-CamTestProcess {
+    <# NtSuspendProcess / NtResumeProcess for ONE pid this check started (a rig process); never by image name. #>
+    param([Parameter(Mandatory = $true)][int]$ProcessId, [switch]$Resume)
+
+    Add-Type -ErrorAction SilentlyContinue -Name Nt -Namespace CamTest -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("ntdll.dll")] public static extern int NtSuspendProcess(System.IntPtr h);
+[System.Runtime.InteropServices.DllImport("ntdll.dll")] public static extern int NtResumeProcess(System.IntPtr h);
+'@
+    $process = Get-Process -Id $ProcessId -ErrorAction Stop
+    if ($Resume) { [void][CamTest.Nt]::NtResumeProcess($process.Handle) } else { [void][CamTest.Nt]::NtSuspendProcess($process.Handle) }
+}
+
+
+function Get-CamTestBrowserCpu {
+    <# Total CPU seconds (user + kernel) of every process of one test browser (profile marker plus descendants). #>
+    param([Parameter(Mandatory = $true)]$Started)
+
+    $ids = @(Get-CamTestBrowserPids -Started $Started)
+    $sum = 0.0
+    foreach ($p in @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, UserModeTime, KernelModeTime | Where-Object { $ids -contains [int]$_.ProcessId })) {
+        $sum += ([double]$p.UserModeTime + [double]$p.KernelModeTime) / 1e7
+    }
+    return $sum
+}
+
+
+function Invoke-CamCheckLiveRobust {
+    <#
+        [Live robustness, opt-in: opens browser windows] A Live wall that stays on.
+        The REAL supervisor with a live instance against a synthetic camera (six cameras, the
+        main stream 1280x720, the sub 640x360), camui built to a temp path on 18789, Chrome and
+        Edge on a throwaway profile driven through DevTools. Sections (CAMTEST_ROBUST=a,b picks
+        some; default all): quick (hide and show inside the grace period: nothing reconnects),
+        cpu (the hidden-painting variants compared: browser CPU, bytes, frames, time to paint
+        again), expiry (grace ran out while minimized: everything freed, reopened on return),
+        audio, stall (a camera that stops delivering frames: detected, rebuilt; negative
+        controls), recover (the live server killed, camui restarted, the camera restarted, the
+        page frozen and thawed, the live server hung: seconds to playing again and the traffic
+        camui sees), cycles (10 modal open/closes and 10 hide/show cycles back to baseline),
+        offscreen (a phone layout parks tiles scrolled out of view).
+        Needs CAMUI_TEST_EXE. Screenshots go to $env:CAMTEST_SHOTS when set.
+    #>
+    param($Run)
+
+    $evidence = @()
+    $fail = { param([string]$Text) $script:CamRobOk = $false; $script:CamRobEvidence += ('FAIL ' + $Text) }
+    $note = { param([string]$Text) $script:CamRobEvidence += $Text }
+    $script:CamRobOk = $true
+    $script:CamRobEvidence = @()
+    $script:CamRobBrowsers = @()
+    $script:CamRobSeconds = 0
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $rig = $null; $ui = $null
+    $only = @(([string]$env:CAMTEST_ROBUST) -split ',' | Where-Object { $_ })
+    $want = { param([string]$Section) (-not $only.Count) -or ($only -contains $Section) }
+    $dir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\liverobust'
+    $shots = [string]$env:CAMTEST_SHOTS
+    $base = 'http://127.0.0.1:18789'
+
+    try {
+        if (-not $env:CAMUI_TEST_EXE -or -not (Test-Path -LiteralPath $env:CAMUI_TEST_EXE)) { throw 'CAMUI_TEST_EXE must name a camui.exe built from this tree (cross-compile it to a temp path).' }
+        foreach ($p in @(18789, 18300, 18892)) { if (-not (Test-CamTestPortFree -Port $p)) { throw "TCP port $p is already in use; the check needs it free." } }
+        if ($shots) { [void](New-Item -ItemType Directory -Path $shots -Force) }
+
+        $cameras = 1..6 | ForEach-Object { [pscustomobject]@{ Name = "Cam $_"; IP = '127.0.0.1:18554'; Quality = 'stream1'; Record = ($_ -eq 1) } }
+        $rig = Start-CamTestLiveRig -Name 'liverobust' -Cameras $cameras -CameraPath @('stream1', 'stream2') -LiveCloseAfterSeconds 4 -LiveApiPort 18892 -VideoSpec @{ stream1 = '1280x720:high' }
+        $dir = $rig.Dir
+        # camui's grace period for this run: 10 s, through the environment variable (the path a real setting takes).
+        $env:CAMUI_LIVE_HIDDEN_GRACE = '10'
+        try { $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-liverobust' } finally { Remove-Item Env:\CAMUI_LIVE_HIDDEN_GRACE -ErrorAction SilentlyContinue }
+        if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
+        $camuiExe = Get-Item -LiteralPath $env:CAMUI_TEST_EXE
+        & $note ("camui {0} ({1:n0} bytes, built {2}) on {3}, liveHiddenGraceSeconds 10 by CAMUI_LIVE_HIDDEN_GRACE; sections: {4}" -f $camuiExe.Name, $camuiExe.Length, $camuiExe.LastWriteTime.ToString('s'), $base, $(if ($only.Count) { $only -join ',' } else { 'all' }))
+        $liveInfo = ConvertFrom-Json -InputObject (Invoke-CamLiveHttp -Url "$base/api/live").Body
+        & $note ("GET /api/live hiddenGraceSeconds = {0}" -f $liveInfo.hiddenGraceSeconds)
+        if ($liveInfo.hiddenGraceSeconds -ne 10) { & $fail "GET /api/live reported hiddenGraceSeconds $($liveInfo.hiddenGraceSeconds), wanted 10" }
+
+        $readers = { (Get-CamTestPathReaders -ApiPort $rig.CamApi -Path 'stream2').Count }
+        $sessions = { (Get-CamTestLiveSessions -Rig $rig).Count }
+        $sessionsIs = {
+            param([int]$Want, [int]$Seconds = 12)
+            $end = [DateTime]::UtcNow.AddSeconds($Seconds); $n = -1
+            while ([DateTime]::UtcNow -lt $end) { $n = & $sessions; if ($n -eq $Want) { return $n }; Start-Sleep -Milliseconds 300 }
+            return $n
+        }
+        $readersIs = {
+            param([int]$Want, [int]$Seconds = 14)
+            $end = [DateTime]::UtcNow.AddSeconds($Seconds); $n = -1
+            while ([DateTime]::UtcNow -lt $end) { $n = & $readers; if ($n -eq $Want) { return $n }; Start-Sleep -Milliseconds 400 }
+            return $n
+        }
+
+        $instrument = @'
+(() => {
+  if (window.__rx) return 'already';
+  const orig = window.fetch.bind(window);
+  const rx = window.__rx = { posts: 0, deletes: 0, pcs: new Set() };
+  window.fetch = (url, opts) => { const m = opts && opts.method; if (m === 'POST') rx.posts++; if (m === 'DELETE') rx.deletes++; return orig(url, opts); };
+  const P = window.RTCPeerConnection;
+  window.RTCPeerConnection = function (...a) { const pc = new P(...a); rx.pcs.add(pc); return pc; };
+  window.RTCPeerConnection.prototype = P.prototype;
+  rx.open = () => Array.from(rx.pcs).filter((p) => p.signalingState !== 'closed').length;
+  return 'installed';
+})()
+'@
+        $paintProbe = @'
+(() => Array.from(document.querySelectorAll('#lgrid video')).map((v) => ({ t: v.currentTime, paused: v.paused, vw: v.videoWidth })))()
+'@
+
+        foreach ($browser in @($(if ($env:CAMTEST_ROBUST_BROWSERS) { ([string]$env:CAMTEST_ROBUST_BROWSERS) -split ',' } else { @('chrome', 'edge') }))) {
+            $found = Get-CamTestBrowser -Browser $browser
+            if (-not $found.Exe) { & $fail ("$browser could not be run: " + $found.Reason); continue }
+            $cdp = $null; $started = $null
+            $began = [DateTime]::UtcNow
+            try {
+                $started = Start-CamTestBrowser -Browser $browser -BaseDir $dir -Url 'about:blank' -DebugPort 18300 -WindowSize '1280,900'
+                $script:CamRobBrowsers += $started
+                $cdp = Connect-CamTestCdp -Port 18300
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.enable')
+                [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.addScriptToEvaluateOnNewDocument' -Params @{ source = $instrument })
+                & $note ("== $browser $($found.Version) (throwaway profile, DevTools on 18300) ==")
+
+                $js = { param([string]$Code) Invoke-CamTestCdpEval -Cdp $cdp -Expression $Code }
+                $stats = { try { Invoke-CamTestCdpEval -Cdp $cdp -Expression 'window.__liveStats ? window.__liveStats() : null' -Await } catch { $null } }
+                $until = {
+                    param([scriptblock]$Done, [int]$Seconds = 40, [int]$Pause = 300)
+                    $end = [DateTime]::UtcNow.AddSeconds($Seconds); $s = $null
+                    while ([DateTime]::UtcNow -lt $end) { $s = & $stats; if ($s -and (& $Done $s)) { return $s }; Start-Sleep -Milliseconds $Pause }
+                    return $null
+                }
+                $playing = { param($s, [int]$n = 6, [int]$min = 20) $s.shown -and @(@($s.tiles) | Where-Object { $_.state -eq 'live' -and $_.v -and $_.v.framesDecoded -ge $min }).Count -ge $n }
+                $rx = { Invoke-CamTestCdpEval -Cdp $cdp -Expression 'JSON.stringify({ posts: window.__rx.posts, deletes: window.__rx.deletes, open: window.__rx.open() })' | ConvertFrom-Json }
+                $viewport = { param([int]$Width, [int]$Height) [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Emulation.setDeviceMetricsOverride' -Params @{ width = $Width; height = $Height; deviceScaleFactor = 1; mobile = $false }); Start-Sleep -Milliseconds 700 }
+                $navigate = {
+                    param([string]$Url)
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = 'about:blank' })
+                    Start-Sleep -Milliseconds 400
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.navigate' -Params @{ url = $Url })
+                }
+                $click = {
+                    param([double]$X, [double]$Y)
+                    foreach ($type in @('mouseMoved', 'mousePressed', 'mouseReleased')) {
+                        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchMouseEvent' -Params @{ type = $type; x = $X; y = $Y; button = 'left'; clickCount = 1; buttons = $(if ($type -eq 'mousePressed') { 1 } else { 0 }) })
+                    }
+                }
+                $center = {
+                    param([string]$Selector, [double]$FracY = 0.5)
+                    $q = ConvertTo-Json -InputObject $Selector -Compress
+                    & $js ("(() => { const e = document.querySelector($q); if (!e) return null; const r = e.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height * $FracY }; })()")
+                }
+                $minimize = {
+                    $script:CamRobWindow = Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.getWindowForTarget'
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $script:CamRobWindow.windowId; bounds = @{ windowState = 'minimized' } })
+                }
+                # While the page is minimized a full __liveStats() call (getStats on every connection) can take seconds in headed Chrome and would eat the
+                # grace period being measured: waiting for 'hidden' uses a one-line evaluation instead.
+                $waitHidden = {
+                    $end = [DateTime]::UtcNow.AddSeconds(10); $v = ''
+                    while ([DateTime]::UtcNow -lt $end) { try { $v = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'document.visibilityState' } catch { }; if ($v -eq 'hidden') { return $true }; Start-Sleep -Milliseconds 100 }
+                    return $false
+                }
+                $restore = { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $script:CamRobWindow.windowId; bounds = @{ windowState = 'normal' } }) }
+                # Milliseconds from now until every tile video has advanced its currentTime and is not paused (or $null on timeout).
+                $paintAgain = {
+                    param([datetime]$T0, [int]$Seconds = 25, [int]$Tiles = 6)
+                    $t0 = $T0
+                    $before = @(Invoke-CamTestCdpEval -Cdp $cdp -Expression $paintProbe)
+                    $end = [DateTime]::UtcNow.AddSeconds($Seconds)
+                    while ([DateTime]::UtcNow -lt $end) {
+                        Start-Sleep -Milliseconds 60
+                        $now = @(Invoke-CamTestCdpEval -Cdp $cdp -Expression $paintProbe)
+                        $moved = 0
+                        for ($i = 0; $i -lt $now.Count; $i++) { if (-not $now[$i].paused -and $now[$i].vw -gt 0 -and $i -lt $before.Count -and $now[$i].t -gt $before[$i].t + 0.001) { $moved++ } }
+                        if ($moved -ge $Tiles) { return [int](((Get-Date) - $t0).TotalMilliseconds) }
+                    }
+                    return $null
+                }
+                # The window may have been covered or minimized by something else (the Operator is using this PC): bring it forward before a section.
+                $front = { try { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.bringToFront') } catch { } }
+                $reload = {
+                    & $viewport 1920 1080
+                    & $navigate "$base/#live"
+                    $s = & $until { param($s) & $playing $s } 60
+                    return $s
+                }
+
+                # The camera's stream2 publisher: its command line is kept so that it can be started again (a suspended publisher is dropped by
+                # the camera's MediaMTX after its 10 s read timeout, and ffmpeg then exits).
+                $pubCmd = (Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$($rig.Camera.Publishers[1].Id)").CommandLine
+                $pubExe = (Get-CamConfigDefault).FfmpegPath
+                $startPub = {
+                    $newPub = Start-Process -FilePath $pubExe -ArgumentList $pubCmd.Substring($pubCmd.IndexOf('" ') + 2) -PassThru -WindowStyle Hidden `
+                        -RedirectStandardOutput (Join-Path $rig.Camera.Dir 'publish-stream2b.out') -RedirectStandardError (Join-Path $rig.Camera.Dir 'publish-stream2b.err')
+                    [void]$newPub.Handle
+                    $rig.Camera.Publishers[1] = $newPub
+                    return $newPub
+                }
+                $ready = & $reload
+                if (-not $ready) { & $fail "${browser}: six tiles never played"; continue }
+                [void](& $sessionsIs 6 40)    # the previous browser's sessions time out on their own
+                & $note ("  instrumentation on every new document; six tiles playing; live sessions {0}, RTCPeerConnections open {1}" -f (& $sessions), (& $rx).open)
+
+                # waits for a state, then for six tiles playing again; returns @(detectSeconds, recoverSeconds) from $T0
+                $watchRecovery = {
+                    param([datetime]$T0, [int]$Seconds = 90, [scriptblock]$StopFault = $null, [int]$FaultSeconds = 0)
+                    $detect = $null; $rec = $null; $faultEnded = $false
+                    while (((Get-Date) - $T0).TotalSeconds -lt $Seconds) {
+                        if ($StopFault -and -not $faultEnded -and ((Get-Date) - $T0).TotalSeconds -ge $FaultSeconds) { & $StopFault; $faultEnded = $true; $tEnd = Get-Date }
+                        $s = & $stats
+                        if ($s) {
+                            if (-not $detect -and (@($s.tiles | Where-Object { $_.state -ne 'live' }).Count -or $s.freed)) { $detect = ((Get-Date) - $T0).TotalSeconds }
+                            if ($detect -and (& $playing $s 6 4) -and @($s.tiles | Where-Object { $_.fails -eq 0 }).Count -eq 6) { $rec = ((Get-Date) - $T0).TotalSeconds; break }
+                        }
+                        Start-Sleep -Milliseconds 300
+                    }
+                    return [pscustomobject]@{ Detect = $detect; Recover = $rec; FaultEnded = $faultEnded }
+                }
+                $fmt = { param($v) if ($null -eq $v) { 'NEVER' } else { [math]::Round($v, 1) } }
+                # A fresh modal (a new main session) after a fault: does signalling still work end to end?
+                $modalProbe = {
+                    param([string]$Label)
+                    $p = & $center '.ltile[data-camera="Cam 1"]' 0.4
+                    & $click $p.x $p.y
+                    $t0 = Get-Date
+                    $m = & $until { param($s) $s.modal -and $s.modal.hd -eq 'ready' } 25 150
+                    $secs = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+                    $line = if ($m) { 'HD after ' + $secs + ' s' } else { $x = & $stats; 'NO HD in 25 s (modal ' + $(if ($x.modal) { 'hd ' + $x.modal.hd + ', verdict ' + $x.modal.verdict } else { 'closed' }) + ')' }
+                    & $note ("      a new modal after $Label : " + $line)
+                    if (-not $m) { & $fail "${browser}: no HD modal after $Label" }
+                    foreach ($t in @('keyDown', 'keyUp')) { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = $t; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 }) }
+                    [void](& $until { param($s) -not $s.modal } 8 150)
+                }
+
+
+                # ---- quick: hide and show inside the grace period ----
+                if (& $want 'quick') {
+                    & $front
+                    & $note "  -- quick: minimize, wait 5 s (inside camui's 10 s grace), restore --"
+                    $s0 = & $stats; $rx0 = & $rx; $live0 = & $sessions
+                    & $minimize
+                    $h = & $waitHidden
+                    $trace = @()
+                    foreach ($wait in 1, 1) {
+                        Start-Sleep -Seconds $wait
+                        try { $q = Invoke-CamTestCdpEval -Cdp $cdp -Expression 'JSON.stringify(window.__liveProbe())' | ConvertFrom-Json; $trace += ('hiddenFor {0}s freed {1} grace {2} vis {3}' -f $q.hiddenFor, $q.freed, $q.grace, $q.vis) } catch { $trace += 'probe failed' }
+                    }
+                    & $note ("  while minimized (probes about 1 and 2 s after hidden was seen): " + ($trace -join ' | '))
+                    $mid = & $rx
+                    $live1 = & $sessions
+                    $t0 = Get-Date
+                    & $restore
+                    $ms = & $paintAgain $t0
+                    $s1 = & $stats; $rx1 = & $rx; $live2 = & $sessions
+                    & $note ("  hidden state while away: open peer connections {0} (mode '{2}'); live sessions before {3}, while hidden {4}, after restore {5}; POSTs {6}, DELETEs {7} during the whole cycle; tiles painting again {8} ms after the restore command; RTCPeerConnections {9} -> {10}" -f `
+                        $mid.open, 0, $s0.mode, $live0, $live1, $live2, ($rx1.posts - $rx0.posts), ($rx1.deletes - $rx0.deletes), $ms, $rx0.open, $rx1.open)
+                    if (-not $h) { & $fail "${browser} quick: the window never became hidden" }
+                    if ($rx1.posts - $rx0.posts -ne 0 -or $rx1.deletes - $rx0.deletes -ne 0 -or $live2 -ne $live0 -or $live1 -ne $live0) { & $fail "${browser} quick: sessions changed inside the grace period" }
+                    if ($null -eq $ms -or $ms -gt 1500) { & $fail "${browser} quick: tiles painted again after $ms ms (wanted about 1000 at most; this includes the window-restore command's own latency)" }
+                    if (@(@($s1.tiles) | Where-Object { $_.state -ne 'live' }).Count -or @(@($s1.tiles) | Where-Object { -not $_.muted }).Count) { & $fail "${browser} quick: a tile is not live or not muted after the restore" }
+
+                    # the same with a modal open
+                    & $click ((& $center '.ltile[data-camera="Cam 1"]' 0.4).x) ((& $center '.ltile[data-camera="Cam 1"]' 0.4).y)
+                    $m = & $until { param($s) $s.modal -and $s.modal.hd -eq 'ready' } 15
+                    if (-not $m) { & $fail "${browser} quick: the modal never reached HD"; }
+                    else {
+                        $rx0 = & $rx; $live0 = & $sessions; $f0 = $m.modal.v.framesDecoded
+                        & $minimize
+                        [void](& $waitHidden)
+                        Start-Sleep -Seconds 5
+                        $t0 = Get-Date
+                        & $restore
+                        $mm = & $until { param($s) $s.visibility -eq 'visible' -and $s.modal -and $s.modal.hd -eq 'ready' -and $s.modal.v -and $s.modal.v.framesDecoded -gt $f0 } 10 100
+                        $ms = [int](((Get-Date) - $t0).TotalMilliseconds)
+                        $rx1 = & $rx; $live2 = & $sessions
+                        & $note ("  modal open across hide/show: modal still open {0}, hd {1}, shown {2}, main picture decoding again after {3} ms; POSTs {4}, DELETEs {5}; live sessions {6} -> {7}" -f [bool]$mm, $(if ($mm) { $mm.modal.hd } else { '-' }), $(if ($mm) { $mm.modal.shown } else { '-' }), $ms, ($rx1.posts - $rx0.posts), ($rx1.deletes - $rx0.deletes), $live0, $live2)
+                        if (-not $mm -or $rx1.posts - $rx0.posts -ne 0 -or $rx1.deletes - $rx0.deletes -ne 0 -or $live2 -ne $live0) { & $fail "${browser} quick: the open modal did not survive hide/show without reconnecting" }
+                        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyDown'; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 })
+                        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyUp'; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 })
+                        [void](& $until { param($s) -not $s.modal } 8)
+                        [void](& $sessionsIs 6 10)
+                    }
+                }
+
+                # ---- cpu: what to do with the pictures while hidden ----
+                if (& $want 'cpu') {
+                    & $front
+                    & $note "  -- cpu: browser CPU while minimized, 20 s window after 5 s settle (percent of ONE core: 100 = one core busy; the 'visible' row is the same wall in view) --"
+                    $cores = [Environment]::ProcessorCount
+                    & $note ("  this PC reports {0} logical processors" -f $cores)
+                    $rows = @()
+                    $measure = {
+                        param([string]$Label, [bool]$Hidden)
+                        $cpu0 = Get-CamTestBrowserCpu -Started $started; $a = & $stats; $w0 = Get-Date
+                        Start-Sleep -Seconds 20
+                        $cpu1 = Get-CamTestBrowserCpu -Started $started; $b = & $stats; $w1 = Get-Date
+                        $secs = ($w1 - $w0).TotalSeconds
+                        $frames = 0; $bytes = 0; $n = 0
+                        if ($a -and $b) { for ($i = 0; $i -lt @($b.tiles).Count; $i++) { if ($a.tiles[$i].v -and $b.tiles[$i].v) { $frames += ($b.tiles[$i].v.framesDecoded - $a.tiles[$i].v.framesDecoded); $bytes += ($b.tiles[$i].v.bytes - $a.tiles[$i].v.bytes); $n++ } } }
+                        [pscustomobject]@{ Label = $Label; CpuPct = [math]::Round(100 * ($cpu1 - $cpu0) / $secs, 1); Frames = $frames; KB = [int]($bytes / 1024); Tiles = $n }
+                    }
+                    $rows += & $measure 'visible (reference)' $false
+                    foreach ($variant in @(@{ Name = 'keep (nothing touched)'; Mode = 'keep'; Grace = -1 }, @{ Name = 'pause (video.pause)'; Mode = 'pause'; Grace = -1 }, @{ Name = 'detach (srcObject = null)'; Mode = 'detach'; Grace = -1 },
+                            @{ Name = 'disable (video tracks off)'; Mode = 'disable'; Grace = -1 }, @{ Name = 'close at once (the old behaviour, grace 0)'; Mode = 'keep'; Grace = 0 })) {
+                        [void](& $js ("window.__liveTune({ mode: '" + $variant.Mode + "', grace: " + $variant.Grace + " })"))
+                        $live0 = & $sessions; $rx0 = & $rx
+                        & $minimize
+                        [void](& $waitHidden)
+                        Start-Sleep -Seconds 5
+                        $row = & $measure $variant.Name $true
+                        $live1 = & $sessions
+                        $t0 = Get-Date
+                        & $restore
+                        $ms = & $paintAgain $t0 40
+                        $rx1 = & $rx
+                        $row | Add-Member -NotePropertyName Resume -NotePropertyValue $ms
+                        $row | Add-Member -NotePropertyName Sessions -NotePropertyValue ("{0}->{1}; +{2} POST/+{3} DELETE" -f $live0, $live1, ($rx1.posts - $rx0.posts), ($rx1.deletes - $rx0.deletes))
+                        $rows += $row
+                        $null = & $until { param($s) & $playing $s } 40
+                    }
+                    [void](& $js "window.__liveTune({ mode: 'pause', grace: null })")
+                    foreach ($r in $rows) { & $note ("  {0,-44} CPU {1,5} % of one core | frames decoded in 20 s (6 tiles) {2,5} | received {3,6} KB | resume (paint again) {4} ms | sessions {5}" -f $r.Label, $r.CpuPct, $r.Frames, $r.KB, $(if ($r.PSObject.Properties['Resume']) { $r.Resume } else { '-' }), $(if ($r.PSObject.Properties['Sessions']) { $r.Sessions } else { '-' })) }
+                }
+
+                # ---- expiry: the grace period runs out while minimized ----
+                if (& $want 'expiry') {
+                    & $front
+                    & $note "  -- expiry: minimize and stay away past camui's 10 s grace (the timer must fire in a minimized page) --"
+                    $null = & $until { param($s) & $playing $s } 40
+                    $rx0 = & $rx; $live0 = & $sessions
+                    $t0 = Get-Date
+                    & $minimize
+                    $freed = $null; $s = $null
+                    while (((Get-Date) - $t0).TotalSeconds -lt 45) { $s = & $stats; if ($s -and $s.freed) { $freed = ((Get-Date) - $t0).TotalSeconds; break }; Start-Sleep -Milliseconds 400 }
+                    $zeroAt = $null; $n = & $sessionsIs 0 15; if ($n -eq 0) { $zeroAt = ((Get-Date) - $t0).TotalSeconds }
+                    $r0 = & $readersIs 0 15; $rAt = ((Get-Date) - $t0).TotalSeconds
+                    $rx1 = & $rx
+                    & $note ("  page says freed after {0} s hidden (visibility {1}); live sessions {2} -> {3} (reached {4} s after minimizing); camera stream2 readers {5} (at {6} s); DELETEs sent {7}; RTCPeerConnections open {8}; tile states {9}" -f $(if ($freed) { [math]::Round($freed, 1) } else { 'NEVER' }), $(if ($s) { $s.visibility } else { '?' }), $live0, $n, $(if ($zeroAt) { [math]::Round($zeroAt, 1) } else { '-' }), $r0, [math]::Round($rAt, 1), ($rx1.deletes - $rx0.deletes), $rx1.open, $(if ($s) { (@($s.tiles | ForEach-Object { $_.state }) -join ',') } else { '?' }))
+                    if (-not $freed) { & $fail "${browser} expiry: the grace period never expired in the minimized page" }
+                    if ($freed -and ($freed -lt 9 -or $freed -gt 25)) { & $fail "${browser} expiry: freed after $freed s, wanted about 10" }
+                    if ($n -ne 0 -or $r0 -ne 0 -or $rx1.open -ne 0) { & $fail "${browser} expiry: sessions ($n), stream2 readers ($r0) or peer connections ($($rx1.open)) remained" }
+                    $t0 = Get-Date
+                    & $restore
+                    $ms = & $paintAgain $t0 60
+                    $sf = & $until { param($s) & $playing $s 6 3 } 40
+                    $firsts = if ($sf) { @($sf.tiles | ForEach-Object { $_.diag.ms.frame }) } else { @() }
+                    & $note ("  restored after the expiry: six tiles painting again {0} ms after the restore command; each tile's own first frame from its connect start (ms): {1}; live sessions now {2}" -f $ms, ($firsts -join ','), (& $sessions))
+                    if ($null -eq $ms) { & $fail "${browser} expiry: the tiles never came back" }
+                }
+
+                # ---- audio: what is heard stays heard ----
+                if (& $want 'audio') {
+                    & $front
+                    & $note "  -- audio: an unmuted tile across hide/show --"
+                    [void](& $js "window.__liveTune({ grace: -1 })")
+                    $p = & $center '.ltile[data-camera="Cam 2"] .lmute'
+                    & $click $p.x $p.y
+                    Start-Sleep -Milliseconds 1500
+                    $a0 = & $stats
+                    & $minimize
+                    [void](& $waitHidden)
+                    Start-Sleep -Seconds 3
+                    $mid = & $stats
+                    $t0 = Get-Date
+                    & $restore
+                    $ms = & $paintAgain $t0 20
+                    Start-Sleep -Milliseconds 1500
+                    $a1 = & $stats
+                    $c0 = $a0.tiles[1]; $cm = $mid.tiles[1]; $c1 = $a1.tiles[1]
+                    & $note ("  Cam 2 unmuted: before muted={0} paused={1}; hidden: paused={2} hid={3}; after: muted={4} paused={5}, audio packets {6} -> {7}; other tiles unmuted {8}; the other tiles while hidden: hid '{9}'" -f $c0.muted, $c0.paused, $cm.paused, $cm.hid, $c1.muted, $c1.paused, $c0.a.packets, $c1.a.packets, @(@($a1.tiles) | Where-Object { $_.name -ne 'Cam 2' -and -not $_.muted }).Count, $mid.tiles[0].hid)
+                    if ($c1.muted -or $c1.paused -or $c1.a.packets -le $c0.a.packets -or @(@($a1.tiles) | Where-Object { $_.name -ne 'Cam 2' -and -not $_.muted }).Count) { & $fail "${browser} audio: the mute state or the sound of the unmuted tile did not survive hide/show" }
+                    & $click $p.x $p.y
+                    [void](& $js "window.__liveTune({ grace: null })")
+                }
+
+                # ---- stall: a camera that stops delivering frames ----
+                if (& $want 'stall') {
+                    & $front
+                    & $note "  -- stall: the stream2 publisher of the synthetic camera is suspended (NtSuspendProcess, by pid) --"
+                    $pub = $rig.Camera.Publishers[1]
+                    $null = & $until { param($s) & $playing $s } 40
+                    # negative control 1: detector off -> the picture stays frozen and nothing is rebuilt
+                    [void](& $js "window.__liveTune({ stallMs: 1000000, grace: -1 })")
+                    $c0 = & $stats
+                    Suspend-CamTestProcess -ProcessId $pub.Id
+                    Start-Sleep -Seconds 4
+                    $c1 = & $stats; Start-Sleep -Seconds 3; $c2 = & $stats
+                    $frozen = @(0..5 | Where-Object { $c2.tiles[$_].v.framesDecoded -eq $c1.tiles[$_].v.framesDecoded }).Count
+                    $stallsC = ($c2.tiles | Measure-Object stalls -Sum).Sum
+                    Suspend-CamTestProcess -ProcessId $pub.Id -Resume
+                    & $note ("  control, detector off: after 7 s of suspended camera {0} of 6 tiles still show a frozen picture (framesDecoded unchanged over 3 s), stalls counted {1}, rebuilds 0" -f $frozen, $stallsC)
+                    if ($frozen -lt 5 -or $stallsC -ne 0) { & $fail "${browser} stall control: the frozen picture was not frozen ($frozen) or a stall was counted ($stallsC) with the detector off" }
+                    $null = & $until { param($s) & $playing $s 6 5 } 40
+                    [void](& $js "window.__liveTune({ stallMs: 8000, grace: null })")
+                    Start-Sleep -Seconds 2
+                    # the real thing
+                    $b0 = & $stats; $stallBase = ($b0.tiles | Measure-Object stalls -Sum).Sum; $recBase = $b0.recoveries
+                    $t0 = Get-Date
+                    Suspend-CamTestProcess -ProcessId $pub.Id
+                    $detect = $null
+                    while (((Get-Date) - $t0).TotalSeconds -lt 30) { $s = & $stats; if ($s -and (($s.tiles | Measure-Object stalls -Sum).Sum -gt $stallBase)) { $detect = ((Get-Date) - $t0).TotalSeconds; break }; Start-Sleep -Milliseconds 300 }
+                    Start-Sleep -Milliseconds 500
+                    $mid = & $stats
+                    $t1 = Get-Date
+                    Suspend-CamTestProcess -ProcessId $pub.Id -Resume
+                    Start-Sleep -Milliseconds 1500
+                    $pubDied = $pub.HasExited
+                    if ($pubDied) { $pub = & $startPub; $t1 = Get-Date }
+                    $rec = $null
+                    $end = [DateTime]::UtcNow.AddSeconds(60)
+                    while ([DateTime]::UtcNow -lt $end) { $s = & $stats; if ($s -and (& $playing $s 6 3) -and @($s.tiles | Where-Object { $_.fails -eq 0 }).Count -eq 6) { $rec = ((Get-Date) - $t1).TotalSeconds; break }; Start-Sleep -Milliseconds 300 }
+                    $e = & $stats
+                    & $note ("  stall detected {0} s after the camera stopped (stall time 8 s, check every 2 s); suspended {1} s in all; first tile line: {2}" -f $(if ($detect) { [math]::Round($detect, 1) } else { 'NEVER' }), [math]::Round(($t1 - $t0).TotalSeconds, 1), $(if ($mid) { $mid.tiles[0].diag.line } else { '' }))
+                    & $note ("  after the camera resumed{5}: all six tiles playing again with a moving picture {0} s later; stalls counted {1}, recoveries {2} (page total), reconnect attempts in the last minute {3}; tile states {4}" -f $(if ($rec) { [math]::Round($rec, 1) } else { 'NEVER' }), (($e.tiles | Measure-Object stalls -Sum).Sum - $stallBase), ($e.recoveries - $recBase), $e.dialsLastMinute, (@($e.tiles | ForEach-Object { $_.state }) -join ','), $(if ($pubDied) { ' (the camera had dropped the suspended publisher: restarted)' } else { '' }))
+                    if (-not $detect -or $detect -lt 7 -or $detect -gt 16) { & $fail "${browser} stall: detection took $detect s (wanted 8 to about 12)" }
+                    if (-not $rec) { & $fail "${browser} stall: the tiles did not recover after the camera resumed" }
+                    # negative control 2: a hidden page is never "stalled"
+                    $st0 = ($e.tiles | Measure-Object stalls -Sum).Sum
+                    & $minimize
+                    [void](& $waitHidden)
+                    Suspend-CamTestProcess -ProcessId $pub.Id
+                    Start-Sleep -Seconds 8
+                    Suspend-CamTestProcess -ProcessId $pub.Id -Resume
+                    Start-Sleep -Seconds 2
+                    if ($pub.HasExited) { $pub = & $startPub }
+                    $t0 = Get-Date
+                    & $restore
+                    Start-Sleep -Seconds 3
+                    $h = & $stats
+                    $st1 = ($h.tiles | Measure-Object stalls -Sum).Sum
+                    $okAgain = & $until { param($s) & $playing $s 6 3 } 30
+                    & $note ("  control, hidden page with the camera suspended 8 s: stalls counted {0} -> {1} (no false stall); tiles playing after the restore: {2}" -f $st0, $st1, [bool]$okAgain)
+                    if ($st1 -ne $st0) { & $fail "${browser} stall: a hidden page counted $($st1 - $st0) stall(s)" }
+                    if (-not $okAgain) { & $fail "${browser} stall: tiles did not play after the hidden-camera-stop test" }
+                }
+
+                # ---- recover: faults, no reload ----
+                if (& $want 'recover') {
+                    & $front
+                    & $note "  -- recover: faults injected on the rig, the page is never reloaded --"
+                    $null = & $until { param($s) & $playing $s } 40
+                    [void](& $js "window.__liveTune({ grace: -1 })")
+                    $liveLog = $ui.StdOut
+                    # (a) the live MediaMTX is killed; the rig's supervisor restarts it
+                    $livePid = [int](Get-CamTestStatusJson -Sandbox $rig.Sandbox).Snapshot.Live.Pid
+                    $r0 = (& $stats).recoveries
+                    $t0 = Get-Date
+                    Stop-Process -Id $livePid -Force
+                    $res = & $watchRecovery $t0 90
+                    $e = & $stats
+                    & $note ("  (a) live MediaMTX (pid {0}) killed: tiles stopped playing after {1} s, all six playing again after {2} s; the page was not reloaded (recoveries counted {3}); camui requests since: see (e)" -f $livePid, (& $fmt $res.Detect), (& $fmt $res.Recover), ($e.recoveries - $r0))
+                    if ($null -eq $res.Recover) { & $fail "${browser} recover (a): the tiles did not come back after the live server was killed" }
+                    $null = & $until { param($s) & $playing $s 6 3 } 20
+
+                    # (b) camui restarted: playing pictures must not notice; the list comes back
+                    $f0 = & $stats
+                    $t0 = Get-Date
+                    [void](Stop-CamTestUi -Ui $ui)
+                    Start-Sleep -Seconds 6
+                    $f1 = & $stats
+                    $grew = @(0..5 | Where-Object { $f1.tiles[$_].v.framesDecoded -gt $f0.tiles[$_].v.framesDecoded }).Count
+                    $err = $f1.listError
+                    $env:CAMUI_LIVE_HIDDEN_GRACE = '10'
+                    try { $ui = Start-CamTestLiveCamui -Rig $rig -Port 18789 -Name 'camui-liverobust' } finally { Remove-Item Env:\CAMUI_LIVE_HIDDEN_GRACE -ErrorAction SilentlyContinue }
+                    if (-not $ui.Started) { throw ('camui did not restart: ' + $ui.Reason) }
+                    $t1 = Get-Date
+                    $cleared = & $until { param($s) -not $s.listError } 30 500
+                    $clearedAfter = ((Get-Date) - $t1).TotalSeconds
+                    $liveLog = $ui.StdOut
+                    & $click ((& $center '.ltile[data-camera="Cam 3"]' 0.4).x) ((& $center '.ltile[data-camera="Cam 3"]' 0.4).y)
+                    $m = & $until { param($s) $s.modal -and $s.modal.hd -eq 'ready' } 20
+                    & $note ("  (b) camui killed for 6 s: {0} of 6 tiles kept decoding meanwhile (page's list error: '{1}'); camui back: the list read again {2} s later; a new modal after the restart reached HD: {3}" -f $grew, $err, [math]::Round($clearedAfter, 1), [bool]$m)
+                    if ($grew -lt 6 -or -not $cleared -or -not $m) { & $fail "${browser} recover (b): camui restart broke running pictures ($grew of 6), the list ($([bool]$cleared)) or a new modal ($([bool]$m))" }
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyDown'; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 })
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = 'keyUp'; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 })
+                    [void](& $until { param($s) -not $s.modal } 8)
+
+                    # (c) the camera's stream2 publisher is killed and restarted 8 s later
+                    $oldPub = $rig.Camera.Publishers[1]
+                    $r0 = (& $stats).recoveries
+                    $t0 = Get-Date
+                    try { $oldPub.Kill() } catch { }
+                    $restart = { [void](& $startPub) }
+                    $res = & $watchRecovery $t0 90 $restart 8
+                    $e = & $stats
+                    & $note ("  (c) camera stream2 publisher killed, restarted after 8 s: tiles stopped playing after {0} s, all six playing again after {1} s (the restart was at 8 s); recoveries counted {2}; states at the end {3}" -f (& $fmt $res.Detect), (& $fmt $res.Recover), ($e.recoveries - $r0), (@($e.tiles | ForEach-Object { $_.state }) -join ','))
+                    if ($null -eq $res.Recover) { & $fail "${browser} recover (c): the tiles did not come back after the camera restarted" }
+                    $null = & $until { param($s) & $playing $s 6 3 } 20
+
+                    [void](& $js "window.__liveTune({ grace: null })")
+                }
+
+                # ---- hang: the live server hangs ----
+                if (& $want 'hang') {
+                    & $front
+                    & $note "  -- hang: the live MediaMTX is suspended for 70 s --"
+                    $null = & $until { param($s) & $playing $s } 40
+                    [void](& $js "window.__liveTune({ grace: -1 })")
+                    $liveLog = $ui.StdOut
+                    $livePid = [int](Get-CamTestStatusJson -Sandbox $rig.Sandbox).Snapshot.Live.Pid
+                    $rxA = & $rx
+                    $t0 = Get-Date
+                    Suspend-CamTestProcess -ProcessId $livePid
+                    Start-Sleep -Seconds 70
+                    $e = & $stats
+                    $rxB = & $rx
+                    $t1 = Get-Date
+                    Suspend-CamTestProcess -ProcessId $livePid -Resume
+                    $lines = @(Get-Content -LiteralPath $liveLog -ErrorAction SilentlyContinue | Where-Object { $_ -match 'msg=request' })
+                    $count = @{ list = 0; post = 0; delete = 0; other = 0 }
+                    foreach ($line in $lines) {
+                        if ($line -notmatch 'time=(\S+)') { continue }
+                        $when = [DateTimeOffset]::Parse($Matches[1]).LocalDateTime
+                        if ($when -lt $t0.AddSeconds(5) -or $when -gt $t0.AddSeconds(65)) { continue }
+                        if ($line -notmatch 'path=/api/live') { continue }
+                        if ($line -match 'method=GET path=/api/live ') { $count.list++ } elseif ($line -match 'method=POST') { $count.post++ } elseif ($line -match 'method=DELETE') { $count.delete++ } else { $count.other++ }
+                    }
+                    $res = & $watchRecovery $t1 90
+                    $e3 = & $stats
+                    & $note ("  (e) live server hung 70 s: the page issued {9} session POSTs and {10} DELETEs in the 70 s ({11} POSTs/min); camui finished (logged) in the 60 s from +5 s to +65 s: list reads {0}, session POSTs {1} (a POST is logged when it ends, and hung ones end at camui's 15 s timeout or after the resume), DELETEs {2}, other {3}; page state at 70 s: tile states {5}, reconnect attempts counted in the last minute {6}, list error '{7}', hold {8} ms" -f $count.list, $count.post, $count.delete, $count.other, ($count.list + $count.post + $count.delete + $count.other), (@($e.tiles | ForEach-Object { $_.state }) -join ','), $e.dialsLastMinute, $e.listError, $e.holdMs, ($rxB.posts - $rxA.posts), ($rxB.deletes - $rxA.deletes), [math]::Round(($rxB.posts - $rxA.posts) * 60 / 70, 1))
+                    & $note ("      after the server was resumed: tiles stopped playing {0} s, all six playing again {1} s later (page not reloaded)" -f (& $fmt $res.Detect), (& $fmt $res.Recover))
+                    if ((($rxB.posts - $rxA.posts) + ($rxB.deletes - $rxA.deletes) + $count.list) * 60 / 70 -gt 60) { & $fail "${browser} hang: the page sent $(($rxB.posts - $rxA.posts) + ($rxB.deletes - $rxA.deletes)) POST/DELETE and camui logged $($count.list) list reads in 70 s while the server was hung" }
+                    if ($null -eq $res.Recover) { & $fail "${browser} hang: the tiles did not come back after the live server resumed" }
+                    [void](& $js "window.__liveTune({ grace: null })")
+                    $null = & $until { param($s) & $playing $s 6 3 } 40
+                    # a timeline after the resume: what the tiles say and how the server answers
+                    $tl = @()
+                    for ($i = 0; $i -lt 12; $i++) {
+                        $q = & $stats
+                        if ($q) { $tl += ("+{0,3}s states {1} | http {2} | fails {3} | sessions {4} | dials/min {5} | hold {6} ms" -f ($i * 10), (@($q.tiles | ForEach-Object { $_.state.Substring(0, [Math]::Min(4, $_.state.Length)) }) -join ','), (@($q.tiles | ForEach-Object { $_.diag.http }) -join ','), (@($q.tiles | ForEach-Object { $_.fails }) -join ','), (& $sessions), $q.dialsLastMinute, $q.holdMs) }
+                        if ($q -and (& $playing $q 6 4)) { break }
+                        Start-Sleep -Seconds 10
+                    }
+                    foreach ($line in $tl) { & $note ("      timeline " + $line) }
+                    & $modalProbe 'the live server hang'
+                    [void](& $js "window.__liveTune({ grace: null })")
+                    $null = & $until { param($s) & $playing $s 6 3 } 60
+                }
+
+                # ---- cycles: 10 modal open/close and 10 hide/show, back to baseline ----
+                if (& $want 'cycles') {
+                    & $front
+                    & $note "  -- cycles: 10 modal open/close cycles, then 10 hide/show cycles --"
+                    $null = & $until { param($s) & $playing $s 6 5 } 40
+                    [void](& $js "window.__liveTune({ grace: -1 })")
+                    $heap = {
+                        [void](Invoke-CamTestCdp -Cdp $cdp -Method 'HeapProfiler.collectGarbage')
+                        [int]((Invoke-CamTestCdp -Cdp $cdp -Method 'Runtime.getHeapUsage').usedSize / 1024)
+                    }
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'HeapProfiler.enable')
+                    [void](& $sessionsIs 6 45)    # sessions orphaned by a hung server time out on their own
+                    Start-Sleep -Seconds 2
+                    $b = [pscustomobject]@{ Live = (& $sessions); Rx = (& $rx); Heap = (& $heap); Readers = (& $readers) }
+                    for ($i = 1; $i -le 10; $i++) {
+                        $p = & $center '.ltile[data-camera="Cam 1"]' 0.4
+                        & $click $p.x $p.y
+                        $m = & $until { param($s) $s.modal -and $s.modal.hd -eq 'ready' } 12 150
+                        if (-not $m) { & $fail "${browser} cycles: modal cycle $i never reached HD"; foreach ($t in @('keyDown', 'keyUp')) { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = $t; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 }) }; break }
+                        foreach ($t in @('keyDown', 'keyUp')) { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Input.dispatchKeyEvent' -Params @{ type = $t; key = 'Escape'; code = 'Escape'; windowsVirtualKeyCode = 27 }) }
+                        $c = & $until { param($s) -not $s.modal } 6 100
+                        if (-not $c) { & $fail "${browser} cycles: modal cycle $i did not close"; break }
+                    }
+                    Start-Sleep -Seconds 3
+                    $a = [pscustomobject]@{ Live = (& $sessionsIs 6 12); Rx = (& $rx); Heap = (& $heap); Readers = (& $readers) }
+                    & $note ("  after 10 modal cycles: live sessions {0} -> {1}, camera stream2 readers {2} -> {3}, RTCPeerConnections open {4} -> {5} (created in total: POSTs {6} -> {7}), JS heap {8} -> {9} KB" -f $b.Live, $a.Live, $b.Readers, $a.Readers, $b.Rx.open, $a.Rx.open, $b.Rx.posts, $a.Rx.posts, $b.Heap, $a.Heap)
+                    if ($a.Live -ne $b.Live -or $a.Rx.open -ne $b.Rx.open -or $a.Readers -ne $b.Readers) { & $fail "${browser} cycles: sessions, readers or peer connections did not return to baseline after the modal cycles" }
+                    if ($a.Heap -gt $b.Heap * 1.5 + 2048) { & $fail "${browser} cycles: the JS heap grew from $($b.Heap) to $($a.Heap) KB" }
+                    $b2 = $a
+                    for ($i = 1; $i -le 10; $i++) {
+                        & $minimize
+                        [void](& $waitHidden)
+                        Start-Sleep -Milliseconds 1500
+                        & $restore
+                        [void](& $until { param($s) $s.visibility -eq 'visible' } 8 150)
+                        Start-Sleep -Milliseconds 1200
+                    }
+                    $null = & $until { param($s) & $playing $s 6 5 } 40
+                    Start-Sleep -Seconds 2
+                    $a2 = [pscustomobject]@{ Live = (& $sessions); Rx = (& $rx); Heap = (& $heap); Readers = (& $readers); Stats = (& $stats) }
+                    & $note ("  after 10 hide/show cycles (grace never): live sessions {0} -> {1}, readers {2} -> {3}, RTCPeerConnections open {4} -> {5} (POSTs {6} -> {7}, DELETEs {8} -> {9}), JS heap {10} -> {11} KB, tiles live {12}" -f $b2.Live, $a2.Live, $b2.Readers, $a2.Readers, $b2.Rx.open, $a2.Rx.open, $b2.Rx.posts, $a2.Rx.posts, $b2.Rx.deletes, $a2.Rx.deletes, $b2.Heap, $a2.Heap, @($a2.Stats.tiles | Where-Object { $_.state -eq 'live' }).Count)
+                    if ($a2.Live -ne $b2.Live -or $a2.Rx.open -ne $b2.Rx.open -or $a2.Rx.posts -ne $b2.Rx.posts) { & $fail "${browser} cycles: hide/show changed sessions or created connections" }
+                    if ($a2.Heap -gt $b2.Heap * 1.5 + 2048) { & $fail "${browser} cycles: the JS heap grew across hide/show from $($b2.Heap) to $($a2.Heap) KB" }
+                    [void](& $js "window.__liveTune({ grace: null })")
+                }
+
+                # ---- offscreen: a phone layout parks tiles scrolled out of view ----
+                if (& $want 'offscreen') {
+                    & $front
+                    & $note "  -- offscreen: 390x844, six full-width tiles stacked --"
+                    & $viewport 390 844
+                    $null = & $until { param($s) $s.fit -and $s.fit.vw -eq 390 -and (& $playing $s 6 3) } 40
+                    [void](& $js "window.__liveTune({ offMs: 8000 })")
+                    Start-Sleep -Seconds 3
+                    $s = & $stats
+                    $off = @($s.tiles | Where-Object { -not $_.inView })
+                    & $note ("  tiles out of view {0} of 6; of those paused at once (muted, not painting) {1}; live sessions {2}" -f $off.Count, @($off | Where-Object { $_.hid -eq 'off' }).Count, (& $sessions))
+                    if ($off.Count -lt 2 -or @($off | Where-Object { $_.hid -eq 'off' }).Count -ne $off.Count) { & $fail "${browser} offscreen: out-of-view tiles were not paused ($($off.Count) out of view)" }
+                    Start-Sleep -Seconds 12
+                    $s = & $stats
+                    $parked = @($s.tiles | Where-Object { $_.parked }).Count
+                    $liveN = & $sessionsIs (6 - $parked) 8
+                    & $note ("  after 8 s out of view: {0} tiles parked (connections closed), live sessions {1} (in view: {2})" -f $parked, $liveN, (6 - $parked))
+                    if ($parked -ne $off.Count -or $liveN -ne 6 - $parked) { & $fail "${browser} offscreen: parked $parked of $($off.Count) tiles, sessions $liveN" }
+                    $t0 = Get-Date
+                    [void](& $js 'window.scrollTo(0, document.documentElement.scrollHeight)')
+                    $back = & $until { param($s) @($s.tiles | Where-Object { $_.parked }).Count -eq 0 -and @($s.tiles | Where-Object { $_.inView -and $_.state -eq 'live' }).Count -ge 2 } 30 200
+                    & $note ("  scrolled to the bottom: the tiles that came into view are playing again after {0} s; tiles now out of view are paused, not yet closed" -f [math]::Round(((Get-Date) - $t0).TotalSeconds, 1))
+                    if (-not $back) { & $fail "${browser} offscreen: parked tiles did not reopen when scrolled into view" }
+                    [void](& $js "window.__liveTune({ offMs: 60000 }); window.scrollTo(0, 0)")
+                    & $viewport 1920 1080
+                }
+
+                # ---- sleep: a PC that sleeps ----
+                if (& $want 'sleep') {
+                    & $front
+                    & $note "  -- sleep --"
+                    $null = & $until { param($s) & $playing $s } 60
+                    [void](& $js "window.__liveTune({ grace: -1 })")
+                    # the page's renderer process is suspended for 40 s (by pid): the nearest thing to a PC that slept. Suspending the GPU and browser processes too left the headless compositor wedged in a rehearsal, so only renderers are suspended.
+                    $r0 = (& $stats).recoveries
+                    $ids = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, CommandLine | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($started.Profile) -and $_.CommandLine -match '--type=renderer' } | ForEach-Object { [int]$_.ProcessId })
+                    $liveBefore = & $sessions
+                    foreach ($id in $ids) { try { Suspend-CamTestProcess -ProcessId $id } catch { } }
+                    Start-Sleep -Seconds 40
+                    foreach ($id in $ids) { try { Suspend-CamTestProcess -ProcessId $id -Resume } catch { } }
+                    $t1 = Get-Date
+                    $liveAfter = & $sessions
+                    $res = & $watchRecovery $t1 90
+                    $e = & $stats
+                    & $note ("  sleep: renderer suspended 40 s ({0} processes): live sessions {1} before, {2} right after the thaw; tiles not playing after {3} s, all six playing again {4} s after the thaw; recoveries counted {5}" -f $ids.Count, $liveBefore, $liveAfter, (& $fmt $res.Detect), (& $fmt $res.Recover), ($e.recoveries - $r0))
+                    if ($null -eq $res.Recover -and $null -ne $res.Detect) { & $fail "${browser} sleep: tiles did not come back after the browser was suspended" }
+                    $null = & $until { param($s) & $playing $s 6 3 } 40
+                    & $modalProbe 'the renderer sleep'
+                    [void](& $js "window.__liveTune({ grace: null })")
+                }
+
+                # ---- freeze ----
+                if (& $want 'freeze') {
+                    & $front
+                    & $note "  -- freeze --"
+                    $null = & $until { param($s) & $playing $s } 60
+                    [void](& $js "window.__liveTune({ grace: -1 })")
+                    # CDP's frozen state stops the page's JavaScript only. Measured: the connections keep running (the network stack answers the server) and
+                    # after 'active' the page is left HIDDEN until the window is shown again, so the wake-up here is a minimize and restore. LAST in the run.
+                    $r0 = (& $stats).recoveries
+                    $liveBefore = & $sessions
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.setWebLifecycleState' -Params @{ state = 'frozen' })
+                    Start-Sleep -Seconds 40
+                    $liveFrozen = & $sessions
+                    [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Page.setWebLifecycleState' -Params @{ state = 'active' })
+                    $w = Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.getWindowForTarget'
+                    foreach ($st in 'minimized', 'normal') { [void](Invoke-CamTestCdp -Cdp $cdp -Method 'Browser.setWindowBounds' -Params @{ windowId = $w.windowId; bounds = @{ windowState = $st } }); Start-Sleep -Milliseconds 800 }
+                    $t1 = Get-Date
+                    $up = & $until { param($s) $s.visibility -eq 'visible' -and (& $playing $s 6 3) } 60
+                    $secs = [math]::Round(((Get-Date) - $t1).TotalSeconds, 1)
+                    $e = & $stats
+                    & $note ("  freeze: page frozen 40 s: live sessions {0} before, {1} at the end of the freeze (the server kept them); after the thaw and a window restore all six playing {2} (checked {3} s after the restore), recoveries counted {4}, tile states {5}" -f $liveBefore, $liveFrozen, [bool]$up, $secs, ($e.recoveries - $r0), (@($e.tiles | ForEach-Object { $_.state }) -join ','))
+                    if (-not $up) { & $fail "${browser} freeze: tiles were not playing after the page thawed and the window was restored" }
+                    [void](& $js "window.__liveTune({ grace: null })")
+                }
+
+            }
+            catch { & $fail ("$browser run aborted: " + $_.Exception.Message + " (line " + $_.InvocationInfo.ScriptLineNumber + ")") }
+            finally {
+                Disconnect-CamTestCdp -Cdp $cdp
+                if ($started) { $end = Stop-CamTestBrowser -Started $started } else { $end = [pscustomobject]@{ Left = @(); ProfileRemoved = $true } }
+                $secs = ([DateTime]::UtcNow - $began).TotalSeconds
+                $script:CamRobSeconds += $secs
+                & $note ("  $browser window up {0:n0} s (minimized for most of the cpu and expiry sections); processes left after the kill: {1}; profile removed: {2}" -f $secs, $end.Left.Count, $end.ProfileRemoved)
+                if ($end.Left.Count -or -not $end.ProfileRemoved) { & $fail "$browser left processes or a profile behind" }
+            }
+        }
+    }
+    catch { & $fail ('check aborted: ' + $_.Exception.Message) }
+    finally {
+        foreach ($b in @($script:CamRobBrowsers)) { try { [void](Stop-CamTestBrowser -Started $b) } catch { } }
+        Remove-Item Env:\CAMUI_LIVE_HIDDEN_GRACE -ErrorAction SilentlyContinue
+        if ($ui) { [void](Stop-CamTestUi -Ui $ui) }
+        $notes = @()
+        if ($rig) { try { foreach ($p in @($rig.Camera.Publishers)) { if ($p -and -not $p.HasExited) { try { Suspend-CamTestProcess -ProcessId $p.Id -Resume } catch { } } } } catch { } }
+        if ($rig) { $notes = @(Stop-CamTestLiveRig -Rig $rig) }
+        $evidence += ("browser windows were up {0:n0} s in total; whole check {1:n0} s" -f $script:CamRobSeconds, $watch.Elapsed.TotalSeconds)
+        $evidence += $notes
+        if ($notes -match 'forced: (?!nothing)') { & $fail 'the supervisor had to be forced' }
+        if ($script:CamRobOk -and $rig) { try { Remove-CamTestTree -Path $rig.Dir } catch { $script:CamRobEvidence += 'cleanup failed' } }
+        elseif ($rig) { $script:CamRobEvidence += "left for inspection: $($rig.Dir)" }
+    }
+
+    Add-CamTestResult -Run $Run -Check 'liverobust' -Status $(if ($script:CamRobOk) { 'PASS' } else { 'FAIL' }) `
+        -Message 'a hidden wall keeps its streams for the grace period and frees them after it; stalled, killed, restarted and frozen streams recover without a reload with bounded retry traffic; cycles return to baseline' `
+        -Evidence ($evidence + $script:CamRobEvidence)
 }
 
 
@@ -8800,6 +9501,7 @@ foreach ($check in $Checks) {
         'livewhep'  { Invoke-CamCheckLiveWhep  -Run $run }
         'liveondemand' { Invoke-CamCheckLiveOnDemand -Run $run }
         'livepage'  { Invoke-CamCheckLivePage  -Run $run }
+        'liverobust' { Invoke-CamCheckLiveRobust -Run $run }
         'livegone'  { Invoke-CamCheckLiveGone  -Run $run }
         'livelan'   { Invoke-CamCheckLiveLan   -Run $run }
         'livetls'   { Invoke-CamCheckLiveTls   -Run $run }

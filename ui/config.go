@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -83,6 +84,35 @@ type Config struct {
 	// Absent means true. Only `false` gives a token full control. It never
 	// affects the loopback listener.
 	TLSReadOnly *bool `json:"tlsReadOnly"`
+
+	// LiveHiddenGraceSeconds is how long the Live screen keeps its streams
+	// connected after its window is hidden or another camui tab is selected,
+	// before it frees them. Absent means 300; 0 frees at once (the pre-1C
+	// behaviour); -1 never frees. The page reads it from GET /api/live.
+	LiveHiddenGraceSeconds *int `json:"liveHiddenGraceSeconds"`
+}
+
+// defaultLiveHiddenGrace is the grace period used when nothing is configured.
+const defaultLiveHiddenGrace = 300
+
+// maxLiveHiddenGrace caps a configured value: a day is "never" in practice and
+// a typo such as 3000000 must not be taken literally.
+const maxLiveHiddenGrace = 86400
+
+// LiveHiddenGraceEffective is LiveHiddenGraceSeconds with its default, clamped to
+// -1 (never free) .. one day.
+func (c Config) LiveHiddenGraceEffective() int {
+	if c.LiveHiddenGraceSeconds == nil {
+		return defaultLiveHiddenGrace
+	}
+	value := *c.LiveHiddenGraceSeconds
+	if value < -1 {
+		return -1
+	}
+	if value > maxLiveHiddenGrace {
+		return maxLiveHiddenGrace
+	}
+	return value
 }
 
 // TLSReadOnlyEffective is TLSReadOnly with its default (true).
@@ -165,6 +195,12 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 	}
 	if value, ok := parseBoolSetting(os.Getenv("CAMUI_TLS_READONLY")); ok {
 		cfg.TLSReadOnly = &value
+	}
+
+	if text := strings.TrimSpace(os.Getenv("CAMUI_LIVE_HIDDEN_GRACE")); text != "" {
+		if value, err := strconv.Atoi(text); err == nil {
+			cfg.LiveHiddenGraceSeconds = &value
+		}
 	}
 
 	if cfg.Listen == "" {

@@ -49,8 +49,17 @@ const Live = (() => {
   const GATHER_MS = 2000;                        // non-trickle: wait this long for candidates, at most
   const CONNECT_MS = 15000;                      // an answer that never turns into media is a failure
   const DISCONNECT_MS = 4000;                    // a transient 'disconnected' may heal on its own
-  const BACKOFF_MS = [1000, 2000, 4000, 8000, 15000];
-  const REFRESH_MS = 10000;
+  const BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
+  const REFRESH_MS = 10000;                      // the list is re-read this often while all is well
+  const REFRESH_FAST_MS = 5000;                  // ... and this often while it cannot be read or live view is not running
+  const REFRESH_AWAY_MS = 30000;                 // ... and this often while the page is hidden
+  const DEFAULT_GRACE = 300;                     // seconds a hidden page keeps its streams (camui: liveHiddenGraceSeconds)
+  const STALL_MS = 8000;                         // a connected picture whose decoded frames stand still this long is rebuilt
+  const WAKE_CHECK_MS = 3000;                    // after a suspension a connected picture must move again within this
+  const STALL_TICK_MS = 2000;                    // how often frames are looked at
+  const DIAL_CAP = 20;                           // reconnect attempts per DIAL_WINDOW_MS for all tiles together
+  const DIAL_WINDOW_MS = 60000;
+  const OFFSCREEN_GRACE_MS = 60000;              // a tile scrolled out of view stops painting at once and closes after this
   const GRID_GAP = 4;                            // px between tiles
   const MIN_TILE = 300;                          // narrower than this: one column and the page scrolls
   const STAGGER_MS = 150;                        // between tiles opening, so six sources do not start in one burst
@@ -68,12 +77,23 @@ const Live = (() => {
     shown: false,        // the Live tab is the one on screen
     hidden: document.hidden,
     timer: null,
+    hiddenSince: null,   // Date.now() when the window was hidden or another camui tab chosen; null while it is being looked at
+    freed: false,        // the grace period ran out: every connection is closed until the page is looked at again
+    watch: null,         // 1 s interval that checks the grace period while away
+    holdUntil: 0,        // after a 503 "unavailable" no new session is tried before this
+    downFails: 0,
+    dials: [],           // times of recent reconnect attempts, for the cap
+    recoveries: 0,
+    lastTick: Date.now(),
+    ticking: false,
+    tune: { grace: null, mode: "keep", stallMs: STALL_MS, offMs: OFFSCREEN_GRACE_MS },   // grace/mode are test hooks (window.__liveTune); mode is chosen in docs/ui.md
     fit: null,           // the last bestGrid answer applied to the grid
     fitTimer: null,
   };
 
   const CHIP = {
     connecting: ["warn", "Connecting"],
+    reconnecting: ["warn", "Reconnecting"],
     live: ["good", "Live"],
     offline: ["off", "Offline"],
     error: ["crit", "Error"],
@@ -82,7 +102,11 @@ const Live = (() => {
 
   const $ = (id) => document.getElementById(id);
   const grid = () => $("lgrid");
-  const usable = () => view.shown && !view.hidden && view.info && view.info.enabled && view.info.alive;
+  const away = () => view.hidden || !view.shown;
+  const graceSeconds = () => (view.tune.grace !== null ? view.tune.grace
+    : view.info && Number.isFinite(view.info.hiddenGraceSeconds) ? view.info.hiddenGraceSeconds : DEFAULT_GRACE);
+  // Streams may be open: live view runs and the grace period (if away) has not run out. Being hidden alone does not close anything.
+  const usable = () => !view.freed && Date.now() >= view.holdUntil && view.info && view.info.enabled && view.info.alive;
   const chipHTML = (cls, word) => '<span class="chip ' + cls + '"><i class="dot"></i>' + esc(word) + "</span>";
 
   // ---- diagnostics ---------------------------------------------------------
@@ -142,18 +166,20 @@ const Live = (() => {
 
   // One line for pasting into a bug report. No address, no camera name. Every ms is from the start of the attempt
   // (hd: from the click that opened the modal).
-  function diagLine(diag, kind, verdict) {
-    if (!diag) return "live-diag/2 browser=" + browserFamily() + " no attempt yet";
+  function diagLine(diag, kind, verdict, policy) {
+    if (!diag) return "live-diag/3 browser=" + browserFamily() + " no attempt yet";
     const ms = (label, value) => (value === null || value === undefined ? [] : [label + "=" + value + "ms"]);
-    return ["live-diag/2", "browser=" + browserFamily(), "stream=" + kind, "http=" + (diag.http === null ? "none" : diag.http),
+    return ["live-diag/3", "browser=" + browserFamily(), "stream=" + kind, "http=" + (diag.http === null ? "none" : diag.http),
       "gather=" + diag.gather + (diag.gatherMs === null ? "" : "(" + diag.gatherMs + "ms)"), ...ms("post", diag.postMs),
       "ice=" + diag.ice, "conn=" + diag.conn, ...ms("connected", diag.connMs), ...ms("frame", diag.frameMs), ...ms("hd", diag.hdMs),
       "local=[" + summary(diag.local) + "]", "answer=[" + summary(diag.answer) + "]", diag.pair ? "pair=" + diag.pair : "pair=none",
-      "elapsed=" + seconds(diag) + "s", "verdict=" + verdict].join(" ");
+      "elapsed=" + seconds(diag) + "s", "hidden=" + hiddenSeconds() + "s", "grace=" + graceSeconds() + "s", "stall=" + policy.stalls,
+      "recoveries=" + policy.recoveries, "verdict=" + verdict].join(" ");
   }
 
-  const tileLine = (tile) => diagLine(tile.diag, tile.kind, tile.lastVerdict || tile.detail || tile.state);
-  const modalLine = (m) => diagLine(m.conn.diag, "main", m.verdict || m.hd);
+  const hiddenSeconds = () => (view.hiddenSince === null ? 0 : Math.round((Date.now() - view.hiddenSince) / 1000));
+  const tileLine = (tile) => diagLine(tile.diag, tile.kind, tile.lastVerdict || tile.detail || tile.state, tile);
+  const modalLine = (m) => diagLine(m.conn.diag, "main", m.verdict || m.hd, m);
 
   // The first decoded frame of a video element; callers guard against a connection that has moved on.
   function firstFrame(video, done) {
@@ -165,12 +191,14 @@ const Live = (() => {
   function explain(tile) {
     const d = tile.diag;
     if (tile.state === "live" || tile.state === "idle") return ["", "", false];
-    let head = tile.state === "connecting" ? "Connecting" : tile.detail || (tile.state === "offline" ? "No picture from this camera" : "Could not connect");
-    if (tile.state === "connecting" && tile.fails > 0) head = "Connecting (retry " + tile.fails + ")";
-    if (!d || (tile.state === "connecting" && seconds(d) < 3 && !tile.lastVerdict)) return [head, "", false];
+    const trying = tile.state === "connecting" || tile.state === "reconnecting";
+    const word = tile.state === "reconnecting" ? "Reconnecting" : "Connecting";
+    let head = trying ? word : tile.detail || (tile.state === "offline" ? "No picture from this camera" : "Could not connect");
+    if (trying && tile.fails > 0) head = word + " (retry " + tile.fails + ")";
+    if (!d || (trying && seconds(d) < 3 && !tile.lastVerdict)) return [head, "", false];
 
     // A retry has nothing of its own to say yet: keep showing why the last attempt failed.
-    if (tile.state === "connecting" && d.http === null && tile.lastVerdict && tile.lastDetail) {
+    if (trying && d.http === null && tile.lastVerdict && tile.lastDetail) {
       return [head, "last attempt: " + tile.lastVerdict + "\n" + tile.lastDetail, true];
     }
     const parts = [];
@@ -179,8 +207,8 @@ const Live = (() => {
     if (d.http === 201) parts.push("ICE " + d.ice + ", connection " + d.conn);
     const lines = [parts.join(" · ")];
     if (d.local) lines.push("browser offered " + summary(d.local) + (d.answer ? "; server offered " + summary(d.answer) : ""));
-    if (tile.lastVerdict && tile.state === "connecting") lines.push("last attempt: " + tile.lastVerdict);
-    if (d.answer && d.answer.length && d.conn !== "connected" && d.answer.every((c) => c.cls === "loopback") && (tile.state !== "connecting" || seconds(d) >= 5)) {
+    if (tile.lastVerdict && trying) lines.push("last attempt: " + tile.lastVerdict);
+    if (d.answer && d.answer.length && d.conn !== "connected" && d.answer.every((c) => c.cls === "loopback") && (!trying || seconds(d) >= 5)) {
       lines.push("The server offers only loopback addresses, which some browsers (Firefox) refuse. Set LiveAdvertiseHosts, see docs/ui.md.");
     }
     return [head, lines.join("\n"), true];
@@ -216,20 +244,32 @@ const Live = (() => {
 
   // ---- the list ----------------------------------------------------------
 
+  // The list is the page's only way to learn that live view came back, so it is re-read on a timer that is
+  // shorter while something is wrong and longer while hidden. A failed read keeps what was known: camui being
+  // restarted does not stop pictures that are already flowing (media does not pass through camui).
   async function refresh() {
+    clearTimeout(view.timer);
     try {
       view.info = await getJSON("api/live");
       view.error = null;
     } catch (err) {
-      view.info = null;
       view.error = err.message || String(err);
     }
     render();
+    scheduleRefresh();
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(view.timer);
+    view.timer = null;
+    if (!view.shown) return;
+    let wait = view.hidden ? REFRESH_AWAY_MS : view.error || !view.info || !view.info.alive ? REFRESH_FAST_MS : REFRESH_MS;
+    if (view.holdUntil > Date.now()) wait = Math.min(wait, view.holdUntil - Date.now() + 200);
+    view.timer = setTimeout(refresh, wait);
   }
 
   function message() {
-    if (view.error) return ["Could not read the live view status", view.error];
-    if (!view.info) return ["Loading", ""];
+    if (!view.info) return view.error ? ["Could not read the live view status", view.error] : ["Loading", ""];
     if (!view.info.enabled) {
       return ["Live view is off",
         'Set "LiveViewEnabled": true in recorder.config.json and restart the recorder. ' +
@@ -281,10 +321,12 @@ const Live = (() => {
         '<button type="button" class="lmute" aria-pressed="false" title="Sound is muted. Click to unmute.">Unmute</button></div>';
       const tile = { name: cam.name, root, video: root.querySelector("video"), pc: null, session: null, gen: 0, media: null,
         kind: "sub", state: "idle", detail: "", fails: 0, retry: null, watchdog: null, lostTimer: null, tick: null, diag: null,
-        lastVerdict: "", lastDetail: "", cam };
+        lastVerdict: "", lastDetail: "", cam, everLive: false, stalls: 0, recoveries: 0, lastFrames: -1, lastAdvance: 0,
+        inView: true, offSince: 0, parked: false, wasDown: false };
       tile.video.muted = true;
       view.tiles.set(cam.name, tile);
       grid().append(root);
+      if (view.seen) view.seen.observe(root);
       paint(tile);
     }
     fit();
@@ -330,7 +372,7 @@ const Live = (() => {
     tile.detail = detail || "";
     // While connecting, the explanation grows with the seconds.
     clearInterval(tile.tick);
-    tile.tick = state === "connecting" ? setInterval(() => paint(tile), 1000) : null;
+    tile.tick = state === "connecting" || state === "reconnecting" ? setInterval(() => paint(tile), 1000) : null;
     paint(tile);
   }
 
@@ -446,9 +488,22 @@ const Live = (() => {
     tile.retry = tile.tick = null;
     hangup(tile);
     tile.video.srcObject = null;
+    delete tile.video.dataset.hid;
   }
 
+  // The first proof that a (re)connected picture really moves: only now does the backoff start over and a recovery count.
+  function pictureMoves(tile) {
+    if (tile.fails > 0 || tile.stalled || tile.wasDown) { tile.recoveries++; view.recoveries++; }
+    tile.stalled = false;
+    tile.wasDown = false;
+    tile.fails = 0;
+    view.downFails = 0;
+  }
+
+  // A picture that was there and is not now is "reconnecting" for its first few attempts, not "offline".
   function failTile(tile, state, detail, delay) {
+    if (tile.everLive) tile.wasDown = true;
+    if (state === "offline" && tile.everLive && tile.fails < 3) state = "reconnecting";
     tile.lastVerdict = detail;
     const was = tile.state;
     tile.state = state;
@@ -460,8 +515,28 @@ const Live = (() => {
     setState(tile, state, detail);
     tile.fails++;
     const wait = delay || BACKOFF_MS[Math.min(tile.fails - 1, BACKOFF_MS.length - 1)];
-    const myGen = tile.gen;
-    tile.retry = setTimeout(() => { tile.retry = null; if (tile.gen === myGen && usable()) open(tile); }, wait + Math.random() * 500);
+    scheduleOpen(tile, wait + Math.random() * 500);
+  }
+
+  // Every automatic (re)connect goes through here: after its own delay, and no more than DIAL_CAP in DIAL_WINDOW_MS for the whole
+  // page, so six tiles against a server that keeps refusing cannot hammer camui.
+  function dialWait() {
+    const now = Date.now();
+    while (view.dials.length && now - view.dials[0] > DIAL_WINDOW_MS) view.dials.shift();
+    return view.dials.length < DIAL_CAP ? 0 : view.dials[0] + DIAL_WINDOW_MS - now + Math.random() * 500;
+  }
+
+  function scheduleOpen(tile, delay) {
+    clearTimeout(tile.retry);
+    const gen = tile.gen;
+    tile.retry = setTimeout(() => {
+      tile.retry = null;
+      if (tile.gen !== gen || !usable() || tile.parked) return;
+      const more = dialWait();
+      if (more > 0) return scheduleOpen(tile, more);
+      view.dials.push(Date.now());
+      open(tile);
+    }, delay);
   }
 
   function tileHooks(tile) {
@@ -473,13 +548,17 @@ const Live = (() => {
           if (tile.gen !== gen || !tile.diag || tile.diag.frameMs !== null) return;
           tile.diag.frameMs = elapsed(tile.diag);
           console.info("live:", tile.name, tileLine(tile));
+          pictureMoves(tile);
         });
         // The modal of this camera shows this very stream until the main stream is ready.
         const m = view.modal;
         if (m && m.opened && m.name === tile.name && m.shown === "sub") ui.vsub.srcObject = media;
+        if (view.hiddenSince !== null) { delete tile.video.dataset.hid; hideVideo(tile.video); } else pauseIfOffscreen(tile);
       },
       connected() {
-        tile.fails = 0;
+        tile.everLive = true;
+        tile.lastFrames = -1;
+        tile.lastAdvance = Date.now();
         setState(tile, "live");
       },
       changed() { paint(tile); },
@@ -491,7 +570,11 @@ const Live = (() => {
           return render();
         }
         if (status === 503) {
+          // "unavailable": live view cannot be reached. Everything stops; the list is re-read and the first new attempt waits 5 s, then 10 s ... up to 60 s.
           view.info = Object.assign({}, view.info, { alive: false });
+          view.downFails++;
+          if (tile.everLive) tile.wasDown = true;
+          view.holdUntil = Date.now() + Math.min(60000, 5000 * 2 ** (view.downFails - 1)) * (0.9 + Math.random() * 0.2);
           closeTile(tile);
           return render();
         }
@@ -506,7 +589,7 @@ const Live = (() => {
 
   function open(tile) {
     closeTile(tile);
-    setState(tile, "connecting");
+    setState(tile, tile.everLive && tile.fails > 0 ? "reconnecting" : "connecting");
     dial(tile, tileHooks(tile));
   }
 
@@ -531,7 +614,8 @@ const Live = (() => {
 
   function newModal(name) {
     return { name, conn: { name, kind: "main", gen: 0, pc: null, session: null, media: null, diag: null, watchdog: null, lostTimer: null },
-      opened: false, hd: "loading", verdict: "", muted: true, shown: "sub", openedAt: 0, hdMs: null, pushed: false, returnFocus: null, warmTimer: null };
+      opened: false, hd: "loading", verdict: "", muted: true, shown: "sub", openedAt: 0, hdMs: null, pushed: false, returnFocus: null, warmTimer: null,
+      stalls: 0, recoveries: 0, lastFrames: -1, lastAdvance: 0 };
   }
 
   // Only the picture that is shown may make sound.
@@ -702,6 +786,7 @@ const Live = (() => {
       for (const tile of view.tiles.values()) {
         if (tile.pc || tile.retry || tile.state !== "idle") {
           closeTile(tile);
+          tile.everLive = false;
           setState(tile, "idle");
         }
       }
@@ -710,12 +795,252 @@ const Live = (() => {
     }
     let slot = 0;
     for (const tile of view.tiles.values()) {
-      if (tile.pc || tile.retry) continue;
+      if (tile.pc || tile.retry || tile.parked) continue;
       tile.fails = 0;
-      clearTimeout(tile.retry);
-      tile.retry = setTimeout(() => { tile.retry = null; if (usable()) open(tile); }, slot++ * STAGGER_MS);
+      scheduleOpen(tile, slot++ * STAGGER_MS);
     }
     modalSync();
+  }
+
+  // ---- hidden window: keep, then free ------------------------------------------
+  //
+  // Hiding the window (or choosing another camui tab) does not close anything at once: a wall that is minimized for a
+  // minute and brought back should not reconnect. The streams stay up for the grace period (camui's liveHiddenGraceSeconds,
+  // 0 = free at once, -1 = never), then everything is freed. While away the pictures are not painted (see hideVideo).
+  // The grace is measured with Date.now() and checked by a 1 s interval AND on every wake-up: a hidden page's timers run
+  // late (Chrome and Edge keep a page with a live WebRTC connection at 1 s), a frozen page's do not run at all.
+
+  const savedStream = new WeakMap();
+
+  // Stops painting one video while away. Measured in Chrome and Edge (docs/ui.md): none of these lowers the browser's CPU
+  // beyond what the browser already saves for a hidden page, so the default is "keep" (untouched). The others stay as measured
+  // alternatives (window.__liveTune): pause = pause a muted element,
+  // detach = srcObject null on a muted element, disable = remote video tracks disabled. A picture that is sounding
+  // (unmuted) keeps playing except under "disable", which leaves audio alone.
+  function hideVideo(v) {
+    const mode = view.tune.mode;
+    if (mode === "keep" || v.dataset.hid || !v.srcObject) return;
+    if (mode === "disable") {
+      for (const track of v.srcObject.getVideoTracks()) track.enabled = false;
+    } else if (!v.muted) {
+      return;
+    } else if (mode === "pause") {
+      v.pause();
+    } else if (mode === "detach") {
+      savedStream.set(v, v.srcObject);
+      v.srcObject = null;
+    }
+    v.dataset.hid = mode;
+  }
+
+  function showVideo(v) {
+    const mode = v.dataset.hid;
+    if (!mode) return;
+    delete v.dataset.hid;
+    if (mode === "disable") {
+      if (v.srcObject) for (const track of v.srcObject.getVideoTracks()) track.enabled = true;
+    } else if (mode === "detach") {
+      const stream = savedStream.get(v);
+      savedStream.delete(v);
+      if (stream && !v.srcObject) v.srcObject = stream;
+    }
+    if (v.paused && v.srcObject) v.play().catch(() => {});
+  }
+
+  function allVideos() {
+    return [...[...view.tiles.values()].map((tile) => tile.video), ui.vsub, ui.vmain].filter(Boolean);
+  }
+
+  function hiddenPainting(on) {
+    for (const v of allVideos()) (on ? hideVideo : showVideo)(v);
+  }
+
+  function enterAway() {
+    view.hiddenSince = Date.now();
+    view.freed = false;
+    hiddenPainting(true);
+    clearInterval(view.watch);
+    view.watch = setInterval(checkGrace, 1000);
+    if (graceSeconds() === 0) freeNow();
+  }
+
+  function checkGrace() {
+    if (view.hiddenSince === null || view.freed) return;
+    const grace = graceSeconds();
+    if (grace >= 0 && Date.now() - view.hiddenSince >= grace * 1000) freeNow();
+  }
+
+  function freeNow() {
+    view.freed = true;
+    hiddenPainting(false);
+    sync();
+    paintAllTiles();
+  }
+
+  function leaveAway() {
+    checkGrace();                                  // a late timer may not have run yet
+    view.hiddenSince = null;
+    view.freed = false;
+    clearInterval(view.watch);
+    view.watch = null;
+    hiddenPainting(false);
+    wakeCheck();
+    if (view.shown) refresh(); else sync();       // opens whatever the grace period had freed
+  }
+
+  function updateAway() {
+    const isAway = away();
+    if (isAway && view.hiddenSince === null) enterAway();
+    else if (!isAway && view.hiddenSince !== null) leaveAway();
+  }
+
+  // The page was asleep, frozen or throttled hard: forget what "no change for N seconds" meant and look again.
+  function wake() {
+    if (away()) return;
+    wakeCheck();
+    checkGrace();
+    if (view.shown && !view.hidden) refresh();
+  }
+
+  function paintAllTiles() { for (const tile of view.tiles.values()) paint(tile); }
+
+  // ---- a picture that stopped moving --------------------------------------------
+
+  function resetStall() {
+    const now = Date.now();
+    view.lastTick = now;
+    for (const tile of view.tiles.values()) { tile.lastFrames = -1; tile.lastAdvance = now; }
+    if (view.modal) { view.modal.lastFrames = -1; view.modal.lastAdvance = now; }
+  }
+
+  // The page or the PC was suspended (a frozen page, a sleeping PC, a long hidden spell) and is looked at again. Whatever
+  // the server dropped meanwhile must not wait for the connection's own timeouts (ICE needs about 10 s, the connect
+  // watchdog 15 s): a connection that is not "connected" is rebuilt now, staggered and jittered; one that is connected must
+  // show a new frame within WAKE_CHECK_MS or it is rebuilt by the stall check.
+  function wakeCheck() {
+    const now = Date.now();
+    view.lastTick = now;
+    let slot = 0;
+    for (const tile of [...view.tiles.values()]) {
+      if (!tile.pc || tile.state !== "live") { tile.lastFrames = -1; tile.lastAdvance = now; continue; }
+      const state = tile.pc.connectionState;
+      if (state === "failed" || state === "closed" || state === "disconnected") {
+        tile.stalls++;
+        tile.stalled = true;
+        failTile(tile, "reconnecting", "Connection lost while suspended", slot++ * STAGGER_MS + 200 + Math.random() * 300);
+      } else {
+        tile.lastFrames = -1;
+        tile.lastAdvance = now - Math.max(0, view.tune.stallMs - WAKE_CHECK_MS);
+      }
+    }
+    const m = view.modal;
+    if (m) { m.lastFrames = -1; m.lastAdvance = now - Math.max(0, view.tune.stallMs - WAKE_CHECK_MS); }
+  }
+
+  // getStats() of a connection whose far end has stopped answering can take forever: never wait for it longer than 3 s,
+  // or the stall check that is meant to find that connection would hang on it.
+  async function framesOf(pc) {
+    try {
+      const stats = await Promise.race([pc.getStats(), new Promise((resolve) => setTimeout(resolve, 3000))]);
+      if (!stats) return null;
+      let frames = null;
+      stats.forEach((r) => { if (r.type === "inbound-rtp" && r.kind === "video") frames = r.framesDecoded; });
+      return frames;
+    } catch (err) { return null; }
+  }
+
+  // Every STALL_TICK_MS: a connected tile (or the modal's main picture) whose decoded frames have not advanced for stallMs is
+  // rebuilt. Not while away (a hidden page decodes at a reduced rate or not at all) and not after a gap in the ticks (the page
+  // was frozen or the PC slept): those only reset the clock.
+  async function stallTick() {
+    if (view.ticking) return;
+    view.ticking = true;
+    try {
+      const now = Date.now();
+      const gap = now - view.lastTick;
+      view.lastTick = now;
+      if (away() || view.freed) {
+        for (const tile of view.tiles.values()) { tile.lastFrames = -1; tile.lastAdvance = now; }
+        if (view.modal) { view.modal.lastFrames = -1; view.modal.lastAdvance = now; }
+        return;
+      }
+      if (gap > STALL_TICK_MS * 3) return wakeCheck();      // the ticks stopped for a long time: the page or the PC was suspended
+      await Promise.all([...view.tiles.values()].map(async (tile) => {
+        if (!tile.pc || tile.state !== "live") return;
+        const gen = tile.gen;
+        const frames = await framesOf(tile.pc);
+        if (tile.gen !== gen || !tile.pc) return;
+        if (frames === null) {
+          // Nothing could be read at all: that is the same as no new frames.
+          if (Date.now() - tile.lastAdvance >= view.tune.stallMs && !away()) { tile.stalls++; tile.stalled = true; failTile(tile, "reconnecting", "Picture stalled", 500); }
+          return;
+        }
+        if (frames !== tile.lastFrames) {
+          if (tile.lastFrames >= 0 && frames > tile.lastFrames) pictureMoves(tile);
+          tile.lastFrames = frames;
+          tile.lastAdvance = Date.now();
+          return;
+        }
+        if (Date.now() - tile.lastAdvance >= view.tune.stallMs && !away()) {
+          tile.stalls++;
+          tile.stalled = true;
+          failTile(tile, "reconnecting", "Picture stalled", 500);
+        }
+      }));
+      const m = view.modal;
+      if (m && m.opened && m.conn.pc && m.hd === "ready") {
+        const frames = await framesOf(m.conn.pc);
+        if (!m.conn.pc) return;
+        if (frames !== null && frames !== m.lastFrames) { m.lastFrames = frames; m.lastAdvance = Date.now(); }
+        else if (Date.now() - m.lastAdvance >= view.tune.stallMs && !away()) {
+          m.stalls++;
+          m.recoveries++;
+          m.lastFrames = -1;
+          m.lastAdvance = Date.now();
+          startMain(m);
+        }
+      }
+      offscreenTick();
+    } finally { view.ticking = false; }
+  }
+
+  // ---- tiles scrolled out of view (a phone stacks six full-width tiles) --------------
+
+  // A muted tile that is not in view is not painted; it keeps its connection until offscreenTick closes it.
+  function pauseIfOffscreen(tile) {
+    if (tile.inView || view.modal || away() || tile.video.dataset.hid || !tile.video.muted || !tile.video.srcObject) return;
+    tile.video.pause();
+    tile.video.dataset.hid = "off";
+  }
+
+  if (window.IntersectionObserver) {
+    view.seen = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const tile = view.tiles.get(entry.target.dataset.camera);
+        if (!tile) continue;
+        tile.inView = entry.isIntersecting;
+        if (tile.inView) {
+          tile.offSince = 0;
+          if (tile.parked) { tile.parked = false; sync(); }
+          else if (tile.video.dataset.hid === "off") showVideo(tile.video);
+        } else if (!tile.offSince) {
+          tile.offSince = Date.now();
+          pauseIfOffscreen(tile);
+        }
+      }
+    }, { threshold: 0 });
+  }
+
+  function offscreenTick() {
+    if (view.modal) return;
+    const now = Date.now();
+    for (const tile of view.tiles.values()) {
+      pauseIfOffscreen(tile);
+      if (tile.inView || !tile.offSince || tile.parked || now - tile.offSince < view.tune.offMs) continue;
+      tile.parked = true;
+      closeTile(tile);
+      setState(tile, "idle");
+    }
   }
 
   // ---- the grid fills the screen -------------------------------------------
@@ -765,22 +1090,23 @@ const Live = (() => {
     } else if (view.modal && view.modal.opened) closeModal({ fromUrl: true });
     if (shown === view.shown && !arg) return;
     view.shown = shown;
-    clearInterval(view.timer);
-    view.timer = null;
     if (shown) {
       fitSoon();
-      view.timer = setInterval(() => { if (!view.hidden) refresh(); }, REFRESH_MS);
+      updateAway();
       refresh();
     } else {
-      sync();
+      scheduleRefresh();
+      updateAway();
     }
   }
 
   document.addEventListener("visibilitychange", () => {
     view.hidden = document.hidden;
-    if (!view.hidden && view.shown) refresh();
-    else sync();
+    updateAway();
   });
+  document.addEventListener("resume", wake);       // a frozen page thawed
+  window.addEventListener("online", wake);
+  setInterval(stallTick, STALL_TICK_MS);
   // Tidy up on the way out; a bfcache restore reopens.
   window.addEventListener("pagehide", () => {
     for (const tile of view.tiles.values()) { closeTile(tile); setState(tile, "idle"); }
@@ -896,7 +1222,7 @@ const Live = (() => {
     if (!conn.pc) return;
     try {
       (await conn.pc.getStats()).forEach((r) => {
-        if (r.type === "inbound-rtp" && r.kind === "video") row.v = { framesDecoded: r.framesDecoded, framesDropped: r.framesDropped, w: r.frameWidth, h: r.frameHeight };
+        if (r.type === "inbound-rtp" && r.kind === "video") row.v = { framesDecoded: r.framesDecoded, framesDropped: r.framesDropped, w: r.frameWidth, h: r.frameHeight, bytes: r.bytesReceived };
         if (r.type === "inbound-rtp" && r.kind === "audio") row.a = { energy: r.totalAudioEnergy, packets: r.packetsReceived };
       });
     } catch (err) { row.err = String(err); }
@@ -914,6 +1240,7 @@ const Live = (() => {
         connection: tile.pc ? tile.pc.connectionState : null, vw: tile.video.videoWidth, vh: tile.video.videoHeight,
         diag: tile.diag ? { http: tile.diag.http, gather: tile.diag.gather, ice: tile.diag.ice, conn: tile.diag.conn, local: summary(tile.diag.local),
           answer: summary(tile.diag.answer), answerClasses: (tile.diag.answer || []).map((c) => c.cls), pair: tile.diag.pair, ms: timing(tile.diag), line: tileLine(tile) } : null,
+        stalls: tile.stalls, recoveries: tile.recoveries, everLive: tile.everLive, parked: tile.parked, inView: tile.inView, fails: tile.fails, hid: tile.video.dataset.hid || null,
         explain: explain(tile).slice(0, 2), rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) } };
       if (tile.pc) {
         if (tile.diag && !tile.diag.pair && tile.pc.connectionState === "connected") {
@@ -936,7 +1263,8 @@ const Live = (() => {
       await connStats(m.conn, modal);
     }
     const g = grid() ? grid().getBoundingClientRect() : null;
-    return { shown: view.shown, hidden: view.hidden, visibility: document.visibilityState, enabled: view.info ? view.info.enabled : null,
+    return { shown: view.shown, hidden: view.hidden, hiddenSince: view.hiddenSince, freed: view.freed, grace: graceSeconds(), mode: view.tune.mode, recoveries: view.recoveries,
+      dialsLastMinute: view.dials.filter((t) => Date.now() - t < DIAL_WINDOW_MS).length, listError: view.error, holdMs: Math.max(0, view.holdUntil - Date.now()), visibility: document.visibilityState, enabled: view.info ? view.info.enabled : null,
       alive: view.info ? view.info.alive : null, modal, columns, fit: view.fit, fullscreen: document.fullscreenElement ? document.fullscreenElement.id : null, fullscreenOk,
       grid: g ? { x: Math.round(g.x), y: Math.round(g.y + window.scrollY), w: Math.round(g.width), h: Math.round(g.height) } : null,
       innerWidth: window.innerWidth, innerHeight: window.innerHeight, scrollY: window.scrollY, scrollHeight: document.documentElement.scrollHeight, scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth,
@@ -944,12 +1272,14 @@ const Live = (() => {
       note: !$("lnote").classList.contains("hide") ? $("lnote").textContent : "", tiles };
   };
   window.__liveBestGrid = bestGrid;
+  // Test hook: override the grace period (seconds, null = camui's), the hidden-painting variant, the stall time and the off-screen grace (ms).
+  window.__liveTune = (options) => Object.assign(view.tune, options);
   // Synchronous and cheap: what the modal shows right now (the test samples it a frame or two after a click).
   window.__liveProbe = () => {
     const m = view.modal;
     return { open: !!(m && m.opened), dialogOpen: ui.dialog.open, shown: m ? m.shown : null, hd: m ? m.hd : null, subHas: !!ui.vsub.srcObject,
       subVw: ui.vsub.videoWidth, subPaused: ui.vsub.paused, session: !!(m && m.conn.session), http: m && m.conn.diag ? m.conn.diag.http : null, hash: location.hash,
-      fitVw: view.fit ? view.fit.vw : null, fitVh: view.fit ? view.fit.vh : null };
+      fitVw: view.fit ? view.fit.vw : null, fitVh: view.fit ? view.fit.vh : null, hiddenSince: view.hiddenSince, hiddenFor: hiddenSeconds(), freed: view.freed, grace: graceSeconds(), vis: document.visibilityState };
   };
 
   return { onTab };
