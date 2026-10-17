@@ -28,32 +28,32 @@
     "cases":  [
                   {
                       "id":  "ascii-simple",
-                      "name":  "Front Entrance",
-                      "show":  "Front Entrance",
+                      "name":  "Lobby Entrance",
+                      "show":  "Lobby Entrance",
                       "ok":  true,
-                      "safeName":  "Front_Entrance",
+                      "safeName":  "Lobby_Entrance",
                       "safeNameLength":  14,
-                      "relayPath":  "frontentrance",
+                      "relayPath":  "lobbyentrance",
                       "relayPathOk":  true
                   },
                   {
                       "id":  "ascii-underscore-dash",
-                      "name":  "Car_Garage-2",
-                      "show":  "Car_Garage-2",
+                      "name":  "Yard_Shed-2",
+                      "show":  "Yard_Shed-2",
                       "ok":  true,
-                      "safeName":  "Car_Garage-2",
-                      "safeNameLength":  12,
-                      "relayPath":  "cargarage2",
+                      "safeName":  "Yard_Shed-2",
+                      "safeNameLength":  11,
+                      "relayPath":  "yardshed2",
                       "relayPathOk":  true
                   },
                   {
                       "id":  "spaces-trim-and-collapse",
-                      "name":  "  Rear   Balcony  ",
-                      "show":  "  Rear   Balcony  ",
+                      "name":  "  Back   Porch  ",
+                      "show":  "  Back   Porch  ",
                       "ok":  true,
-                      "safeName":  "Rear_Balcony",
-                      "safeNameLength":  12,
-                      "relayPath":  "rearbalcony",
+                      "safeName":  "Back_Porch",
+                      "safeNameLength":  10,
+                      "relayPath":  "backporch",
                       "relayPathOk":  true
                   },
                   {

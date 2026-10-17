@@ -22,9 +22,9 @@ function Get-HolocronNameCorpus {
     $corpus = [ordered]@{}
     $add = { param([string]$Id, [string]$Name) $corpus[$Id] = $Name }
 
-    & $add 'ascii-simple' 'Front Entrance'
-    & $add 'ascii-underscore-dash' 'Car_Garage-2'
-    & $add 'spaces-trim-and-collapse' '  Rear   Balcony  '
+    & $add 'ascii-simple' 'Lobby Entrance'
+    & $add 'ascii-underscore-dash' 'Yard_Shed-2'
+    & $add 'spaces-trim-and-collapse' '  Back   Porch  '
     & $add 'tab-and-newline' ("A" + [char]9 + "B" + [char]10 + "C")
     & $add 'unicode-nbsp' ('A' + (& $u 0x00A0) + 'B')
     & $add 'unicode-em-space' ('A' + (& $u 0x2003) + 'B')
