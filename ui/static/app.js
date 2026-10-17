@@ -23,6 +23,18 @@ const POLL_MS = 5000;
 let viewOnly = false;
 
 const el = (id) => document.getElementById(id);
+
+// The LAN listener answers a request without a valid session with 401 and
+// X-Login-Required (the session ended, or camui was reset). Go to the sign-in page
+// and come back to this screen afterwards. The loopback listener never sends it.
+const baseFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const response = await baseFetch(...args);
+  if (response.status === 401 && response.headers.get("X-Login-Required")) {
+    location.assign("/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash));
+  }
+  return response;
+};
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const num = (value, places = 1) => (typeof value === "number" && isFinite(value) ? value.toFixed(places) : "-");
 const gb = (bytes) => (typeof bytes === "number" ? bytes / 1073741824 : null);
@@ -1265,6 +1277,26 @@ async function poll() {
 }
 
 detectViewOnly();
+
+// "Sign out" exists only where there is a login: api/auth/me says loginRequired on
+// the HTTPS LAN listener and not on loopback.
+async function setupSignOut() {
+  try {
+    const me = await getJSON("api/auth/me");
+    if (!me.loginRequired || !me.authenticated) return;
+    el("who").textContent = me.username;
+    el("who").classList.remove("hide");
+    el("signOut").classList.remove("hide");
+  } catch (err) { /* not signed in or not reachable: leave it hidden */ }
+}
+el("signOut").onclick = async () => {
+  try {
+    await fetch("api/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+  } finally {
+    location.assign("/login");
+  }
+};
+setupSignOut();
 poll();
 setInterval(poll, POLL_MS);
 document.addEventListener("visibilitychange", () => {

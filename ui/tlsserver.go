@@ -14,8 +14,9 @@ import (
 
 // ---------------------------------------------------------------------------
 // The HTTPS listener for the LAN. It is a second listener with its own handler
-// chain; the loopback listener is untouched. Here the token is mandatory and
-// outermost, so no request without it reaches any handler, static file included.
+// chain; the loopback listener is untouched. Here a login is mandatory and
+// outermost, so no request without a session reaches any handler, static file
+// included, except the login page and what it needs.
 // ---------------------------------------------------------------------------
 
 // serverTLSConfig is the TLS side: TLS 1.2 at the very least (Go negotiates 1.3
@@ -32,7 +33,7 @@ func serverTLSConfig(m *certManager) *tls.Config {
 // address and certificate names are the allowed Hosts, and the loopback
 // listener's AllowedHosts are NOT carried over.
 func tlsGuardConfig(cfg Config, names certNames) Config {
-	guard := Config{Listen: cfg.TLSListen, Token: cfg.EffectiveTLSToken()}
+	guard := Config{Listen: cfg.TLSListen}
 	for _, ip := range names.IPs {
 		guard.AllowedHosts = append(guard.AllowedHosts, ip.String())
 	}
@@ -40,14 +41,17 @@ func tlsGuardConfig(cfg Config, names certNames) Config {
 	return guard
 }
 
-// newTLSHandler assembles the LAN listener's chain: token (strict, rate limited),
-// response headers, request log, guard (https origins only), then the mux with the
-// two TLS-only routes.
-func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNames, limiter *failureLimiter) (http.Handler, error) {
+// newTLSHandler assembles the LAN listener's chain: response headers, request
+// log, the session gate (public routes pass, everything else needs a valid
+// session), the view-only gate, the guard (https origins only), then the mux with
+// the TLS-only routes. The login POST passes the guard like any other API call,
+// so a cross-site login attempt is refused before a password is looked at.
+func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNames, auth *authService) (http.Handler, error) {
 	mux, err := buildMux(cfg, log)
 	if err != nil {
 		return nil, err
 	}
+	auth.routes(mux)
 	mux.HandleFunc("GET /api/tls/ca.crt", func(w http.ResponseWriter, r *http.Request) {
 		data, err := mgr.CACertPEM()
 		if err != nil {
@@ -72,17 +76,16 @@ func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNam
 			"readOnly":            cfg.TLSReadOnlyEffective(),
 		})
 	})
-	guarded := logRequests(log, newGuardScheme(tlsGuardConfig(cfg, names), log, "https")(mux))
+	chain := newGuardScheme(tlsGuardConfig(cfg, names), log, "https")(mux)
 	if cfg.TLSReadOnlyEffective() {
-		// After the token (401 beats 403) and before the guard and any handler.
-		guarded = readOnlyGate(log, guarded)
+		// After the session check (401 beats 403) and before the guard and any handler.
+		chain = readOnlyGate(log, chain)
 	}
-	policy := tokenPolicy{Token: cfg.EffectiveTLSToken(), Strict: true, Limiter: limiter, Log: log}
-	protected := requireTokenPolicy(policy, guarded)
-	// Outermost, so the redirect after ?token= and every refusal carry it too.
+	chain = logRequests(log, auth.gate(chain))
+	// Outermost, so the redirects and every refusal carry it too.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		protected.ServeHTTP(w, r)
+		chain.ServeHTTP(w, r)
 	}), nil
 }
 
@@ -105,7 +108,9 @@ func startTLS(cfg Config, log *slog.Logger) (*http.Server, func() error, error) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("TLS certificate: %w", err)
 	}
-	handler, err := newTLSHandler(cfg, log, mgr, names, newFailureLimiter(10, time.Minute, 1024))
+	clearUnlockMarkers(cfg.AuthDir)
+	auth := newAuthService(cfg.AuthDir, newFileUserStore(cfg.AuthDir, time.Now), log, time.Now, defaultPasswordHasher)
+	handler, err := newTLSHandler(cfg, log, mgr, names, auth)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -121,7 +126,7 @@ func startTLS(cfg Config, log *slog.Logger) (*http.Server, func() error, error) 
 		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelDebug),
 	}
 	info, _ := mgr.CAInfo()
-	log.Info("camui listening (HTTPS, token required)", "address", listener.Addr().String(), "certificate", note,
+	log.Info("camui listening (HTTPS, login required)", "address", listener.Addr().String(), "certificate", note,
 		"names", len(names.IPs)+len(names.DNS), "caFingerprintSha256", info.Fingerprint)
 	return server, func() error { return server.ServeTLS(listener, "", "") }, nil
 }
@@ -137,7 +142,7 @@ func runPrintCA(cfg Config, out, errOut io.Writer) int {
 	}
 	fmt.Fprintf(out, "IPCCTV local CA\n  file:         %s\n  name:         %s\n  valid until:  %s\n  SHA-256:      %s\n\n", info.Path, info.Subject, info.NotAfter.Format("2006-01-02"), info.Fingerprint)
 	fmt.Fprintln(out, "Install it once on each device (this file is the CA CERTIFICATE only; its key stays in the same folder and must stay private):")
-	fmt.Fprintln(out, "  1. Get the file to the device: open https://<this PC's address>:<port>/api/tls/ca.crt there (after the first warning, with the token), or copy the file.")
+	fmt.Fprintln(out, "  1. Get the file to the device: open https://<this PC's address>:<port>/ there, click through the first warning, sign in, and use Settings > Connect a phone (or open /api/tls/ca.crt), or copy the file.")
 	fmt.Fprintln(out, "  2. Check the SHA-256 shown by the device against the line above before trusting it.")
 	fmt.Fprintln(out, "  3. iPhone: Settings > General > VPN & Device Management > install, then Settings > General > About > Certificate Trust Settings > enable it.")
 	fmt.Fprintln(out, "     Android: Settings > Security > Install a certificate > CA certificate. Windows: double-click > Install > Local Machine/Current User > Trusted Root Certification Authorities.")
@@ -146,7 +151,7 @@ func runPrintCA(cfg Config, out, errOut io.Writer) int {
 }
 
 // ---------------------------------------------------------------------------
-// View-only mode for the HTTPS listener. A lost or leaked LAN token must be able
+// View-only mode for the HTTPS listener. A lost phone or a guessed password must be able
 // to WATCH but not to stop recording or reconfigure anything, so the gate is an
 // allow-list: a route that is not named here is refused, including one added
 // later until someone deliberately allows it.
@@ -158,6 +163,7 @@ var (
 	readOnlyGETPaths = map[string]bool{
 		"/api/status": true, "/api/live": true, "/api/cameras": true, "/api/config": true,
 		"/api/footage": true, "/api/clip": true, "/api/tls/ca.crt": true, "/api/tls/info": true,
+		"/api/auth/me": true,
 	}
 	readOnlyWhep    = regexp.MustCompile(`^/api/live/[^/]+/whep$`)
 	readOnlySession = regexp.MustCompile(`^/api/live/session/[^/]+$`)
@@ -175,7 +181,8 @@ func readOnlyAllowed(method, path string) bool {
 		}
 		return true // the embedded page and its assets
 	case http.MethodPost:
-		return readOnlyWhep.MatchString(path)
+		// Signing in and out is not a change to the recorder.
+		return readOnlyWhep.MatchString(path) || path == "/api/auth/login" || path == "/api/auth/logout"
 	case http.MethodDelete:
 		return readOnlySession.MatchString(path)
 	}

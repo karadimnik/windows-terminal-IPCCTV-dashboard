@@ -357,3 +357,11 @@ body.viewonly #controls{display:none}
 body.viewonly .tgl{pointer-events:none;opacity:.5}
 body.viewonly [data-ack]{display:none}
 body.viewonly section[data-tab="set"]>.panel:not(#tlsPanel){opacity:.55}
+
+/* ---- sign-in and first-run pages (login.html, setup.html) ---- */
+body.authpage{display:grid;place-items:center;min-height:100vh;padding:18px}
+.authcard{width:100%;max-width:400px}
+.authcard .field{max-width:none}
+.authcard .actions .btn{width:100%;padding:10px 14px}
+.authcard .formnote{margin:0;min-height:1.4em}
+.authcard .hint{margin:0;font-size:12px;color:var(--ink-3)}

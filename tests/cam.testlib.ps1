@@ -379,8 +379,15 @@ function Start-CamTestUi {
     Remove-Item -LiteralPath $out, $err -Force -ErrorAction SilentlyContinue
 
     if ($Token) { $env:CAMUI_TOKEN = $Token } else { Remove-Item Env:\CAMUI_TOKEN -ErrorAction SilentlyContinue }
+    # A test camui never reads or writes the real per-user auth folder: it gets its own throwaway one (empty, so no user exists), unless the caller names one.
+    $authArgs = @()
+    if ($ExtraArgs -notcontains '-auth-dir') {
+        $authDir = Join-Path -Path $dir -ChildPath 'auth'
+        Remove-Item -LiteralPath $authDir -Recurse -Force -ErrorAction SilentlyContinue
+        $authArgs = @('-auth-dir', $authDir)
+    }
     $process = Start-Process -FilePath $exe `
-        -ArgumentList (@('-listen', ("127.0.0.1:{0}" -f $Port), '-status-file', $StatusFile, '-script-dir', $ScriptDir) + $ExtraArgs) `
+        -ArgumentList (@('-listen', ("127.0.0.1:{0}" -f $Port), '-status-file', $StatusFile, '-script-dir', $ScriptDir) + $authArgs + $ExtraArgs) `
         -PassThru -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err
 
     $base = "http://127.0.0.1:$Port"
@@ -405,6 +412,7 @@ function Start-CamTestUi {
         ScriptDir  = $ScriptDir
         StdOut     = $out
         StdErr     = $err
+        AuthDir    = $(if ($authArgs.Count) { $authArgs[1] } else { '' })
     }
 }
 

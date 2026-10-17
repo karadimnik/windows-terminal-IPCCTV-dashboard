@@ -21,6 +21,9 @@
     <div class="feed">
       <span id="feed"></span>
       <span class="when" id="feedWhen"></span>
+      <!-- Only on the HTTPS LAN listener (setupSignOut in app.js). -->
+      <span class="when hide" id="who"></span>
+      <button class="btn hide" id="signOut" type="button">Sign out</button>
     </div>
   </div>
 
@@ -142,7 +145,7 @@
     <div class="panel hide" id="tlsPanel" style="margin-top:16px">
       <header><h2>Connect a phone or another PC</h2></header>
       <div class="form">
-        <p class="hint">Install this PC's own certificate authority once on each device so it trusts this address, then open the same address with the token.
+        <p class="hint">Install this PC's own certificate authority once on each device so it trusts this address, then sign in again with your username and password. You must already be signed in to download it: open the page, accept the certificate warning once, sign in, download, install, then reopen the page.
           Before you trust it, check that the device shows this fingerprint:</p>
         <p><code id="tlsFingerprint" style="word-break:break-all"></code></p>
         <div class="actions"><a class="btn primary" href="api/tls/ca.crt" download="ipcctv-local-ca.crt">Download the certificate</a></div>

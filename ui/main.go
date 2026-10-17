@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"crypto/subtle"
 	"embed"
 	"errors"
 	"flag"
@@ -37,41 +36,30 @@ var applyScript string
 // version is stamped at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-// tokenCookie carries the token after a one-time ?token= bootstrap so the
-// Operator does not have to keep it in the address bar.
-const tokenCookie = "camui_token"
-
 func main() {
 	var (
 		flags      Config
 		configPath string
 		showVer    bool
 		printCA    bool
-		newTok     bool
+		setPass    string
+		unlockUser string
 	)
 	flag.StringVar(&flags.Listen, "listen", "", "host:port to bind (default "+defaultListen+"; a non-loopback address requires a token)")
 	flag.StringVar(&flags.ArchiveRoot, "archive-root", "", "recorder archive root (default: RootPath from recorder.config.json, else "+defaultArchiveRoot+")")
 	flag.StringVar(&flags.StatusFile, "status-file", "", "status.json path (default <archive-root>\\_state\\status.json)")
 	flag.StringVar(&flags.ScriptDir, "script-dir", "", "directory holding cam.ps1, cameras.json and recorder.config.json (default: the directory holding camui.exe)")
 	flag.StringVar(&configPath, "config", "", "path to a JSON config file")
-	flag.StringVar(&flags.TLSListen, "tls-listen", "", "private IPv4:port for the HTTPS LAN listener, e.g. 192.168.1.50:8443 (needs a token of at least 16 characters; off by default)")
+	flag.StringVar(&flags.TLSListen, "tls-listen", "", "private IPv4:port for the HTTPS LAN listener, e.g. 192.168.1.50:8443 (needs at least one user, see -set-password; off by default)")
 	flag.StringVar(&flags.TLSDir, "tls-dir", "", "folder for the local CA and server certificate (default %LOCALAPPDATA%\\IPCCTV\\tls)")
 	var tlsReadOnlyFlag string
-	flag.StringVar(&tlsReadOnlyFlag, "tls-readonly", "", "true (default) or false: whether the HTTPS listener is view-only; false gives its token full control")
+	flag.StringVar(&tlsReadOnlyFlag, "tls-readonly", "", "true (default) or false: whether the HTTPS listener is view-only; false gives a signed-in user full control")
+	flag.StringVar(&flags.AuthDir, "auth-dir", "", "folder for the LAN login's users.json, sessions.json and auth.log (default %LOCALAPPDATA%\\IPCCTV\\camui\\auth)")
+	flag.StringVar(&setPass, "set-password", "", "create or update this user (admin) with a password read from standard input, end that user's sessions, and exit")
+	flag.StringVar(&unlockUser, "unlock", "", "clear this username's failed-login lockout in a running camui, and exit")
 	flag.BoolVar(&printCA, "print-ca", false, "create the local CA if needed, print its file, SHA-256 fingerprint and how to install it on a device, and exit")
-	flag.BoolVar(&newTok, "new-token", false, "print a fresh 32-byte hex token for tlsToken / CAMUI_TLS_TOKEN (writes nothing) and exit")
 	flag.BoolVar(&showVer, "version", false, "print the version and exit")
 	flag.Parse()
-
-	if newTok {
-		token, err := newToken()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "no randomness:", err)
-			os.Exit(1)
-		}
-		fmt.Println(token)
-		return
-	}
 
 	if showVer {
 		fmt.Println("camui " + version)
@@ -94,10 +82,23 @@ func main() {
 	if printCA {
 		os.Exit(runPrintCA(cfg, os.Stdout, os.Stderr))
 	}
+	if setPass != "" {
+		os.Exit(runSetPassword(cfg, setPass, os.Stdin, os.Stdout, os.Stderr))
+	}
+	if unlockUser != "" {
+		os.Exit(runUnlock(cfg, unlockUser, os.Stdout, os.Stderr))
+	}
 	if err := cfg.ValidateTLS(); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		log.Error("refusing to start", "tlsListen", cfg.TLSListen, "reason", "TLS guard")
 		os.Exit(2)
+	}
+	if cfg.TLSListen != "" {
+		if err := cfg.ValidateTLSUsers(newFileUserStore(cfg.AuthDir, time.Now)); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			log.Error("refusing to start", "tlsListen", cfg.TLSListen, "reason", "no user")
+			os.Exit(2)
+		}
 	}
 	if err := cfg.Validate(); err != nil {
 		// The loopback guard. Printed to stderr as well as logged, because
@@ -121,18 +122,36 @@ func buildMux(cfg Config, log *slog.Logger) (*http.ServeMux, error) {
 	}
 	mux := http.NewServeMux()
 	NewAPI(cfg, log).Routes(mux)
-	mux.Handle("GET /", versioned(http.FileServerFS(static)))
+	mux.Handle("GET /", versioned(hideAuthPages(http.FileServerFS(static))))
 	return mux, nil
 }
 
+// authPages are embedded beside the app but served only by their own routes: the
+// login page on the LAN listener, the first-run page on loopback with no user.
+// The general file server must never hand them out.
+var authPages = map[string]bool{"/login.html": true, "/login.js": true, "/setup.html": true, "/setup.js": true}
+
+func hideAuthPages(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if authPages[r.URL.Path] {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // newHandler assembles the loopback listener's handler: the static page, the
-// API, and the middleware around them. The token check is outermost so an
-// unauthenticated request learns nothing else.
+// API, and the middleware around them. The optional legacy token check is
+// outermost so an unauthenticated request learns nothing else. There is no login
+// here; the only auth routes are the status answer and, while no user exists,
+// the first-run page. With no AuthDir configured (a bare Config) the latter is off.
 func newHandler(cfg Config, log *slog.Logger) (http.Handler, error) {
 	mux, err := buildMux(cfg, log)
 	if err != nil {
 		return nil, err
 	}
+	newLoopbackAuth(cfg.AuthDir, log).routes(mux)
 	return requireToken(cfg.Token, logRequests(log, newGuard(cfg, log)(mux))), nil
 }
 
@@ -229,28 +248,6 @@ func versioned(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-cache")
 		next.ServeHTTP(w, r)
 	})
-}
-
-// requireToken enforces the auth token on the loopback listener: accepted from
-// a cookie, from an Authorization: Bearer header, or once from a ?token= query
-// parameter, which is then moved into a cookie so it stops appearing in the
-// address bar, in history and in any Referer header. The LAN listener uses the
-// stricter requireTokenPolicy in token.go.
-func requireToken(token string, next http.Handler) http.Handler {
-	return requireTokenPolicy(tokenPolicy{Token: token}, next)
-}
-
-func bearerToken(r *http.Request) (string, bool) {
-	const prefix = "Bearer "
-	value := r.Header.Get("Authorization")
-	if len(value) > len(prefix) && value[:len(prefix)] == prefix {
-		return value[len(prefix):], true
-	}
-	return "", false
-}
-
-func tokenMatches(want, got string) bool {
-	return subtle.ConstantTimeCompare([]byte(want), []byte(got)) == 1
 }
 
 // logRequests writes one line per request to stdout, which is what a service

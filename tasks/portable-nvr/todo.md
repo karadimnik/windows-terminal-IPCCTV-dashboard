@@ -14,7 +14,7 @@ Operator's own action or decision.
 - [x] **P3** Stage 1A: dedicated live-view MediaMTX, login, on-demand sub-streams, flag off = byte-identical (`15e4bb3`).
 - [x] **P4** Stage 1B: Live tab, same-origin WHEP proxy, session caps, scoped guard exception, `Live.Cameras` in `status.json` (`b8749e3`).
 - [x] **P5** Stage 2a: tile diagnostics, `LiveAdvertiseHosts`, LAN `LiveUdpAddress`; Firefox verified on the real system (`87871d0`).
-- [x] **P6** Stage 2b: HTTPS listener, local CA with name constraints, token, limiter, `-print-ca`, `-new-token` (`97fd3fe`).
+- [x] **P6** Stage 2b: HTTPS listener, local CA with name constraints, token, limiter, `-print-ca`, `-new-token` (`97fd3fe`). The token and `-new-token` are gone on `portable-nvr-login` (P14).
 - [x] **P7** Stage 2b.1: HTTPS listener view-only by default (`1e05dd8`).
 - [x] **P8** (A) Stage 2c prep: demo `-Lan` / `-Tls`; a real phone confirmed by the Operator, 2026-10-17 (`e15dbb4`).
 - [x] **P9** (A) Live grid that fills the window, camera modal, fullscreen (`3fa1979`).
@@ -23,6 +23,9 @@ Operator's own action or decision.
 - [x] **P12** (A) Original repo, todo [92]: alert 110 floor so a healthy camera cannot trip it at a segment boundary
   (`master` `b69d06d`, in `portable-nvr` `f90b987`). Live in the running NVR after its next restart.
 - [x] **P13** (A) Docs: grace settings table, Firefox needs a non-loopback media address, phone-test steps (`docs/`).
+- [x] **P14** (B) LAN login instead of the token, on branch `portable-nvr-login` (NOT merged, not pushed): users in `users.json`, PBKDF2 passwords,
+  persistent sessions, per-address throttle and per-username lockout, `auth.log`, `-set-password` / `-unlock`, loopback `/setup` for the first user.
+  The LAN listener refuses to start without a user. Replaces the token (L4). Operator steps: docs/ui.md, "Signing in on the LAN".
 
 ## Open: finish what the stages above left unproven
 
@@ -44,7 +47,7 @@ Operator's own action or decision.
   token in an owner-only file, a firewall helper that asks for elevation, `-Status` checks all of it. Needs D10. (Op decision)
 - [ ] **P31** (L2) Detect a LAN address change, regenerate the certificate and the advertised host, alert.
 - [ ] **P32** (L3) "Connect a device" page with a QR code and per-device steps.
-- [~] **P33** (L4) REPLACED by a login page with brute-force protection (commissioned 2026-10-17, branch `portable-nvr-login`); user management, roles, device list and audit trail are built on it later.
+- [ ] **P33** (L4, the login of P14 replaced the shared token) User management on top of it: add and remove users, roles enforced, password change in the UI, a per-device session list with revoke and last seen.
 - [ ] **P34** (L5, D9) Control from the LAN with a separate credential and re-authentication, or stay view-only. (Op decision)
 - [ ] **P35** (L7) Alerts to the phone (webhook or push), shared with OS5.
 - [ ] **P36** (L9, D8) Hide camera addresses from LAN devices. (Op decision)
