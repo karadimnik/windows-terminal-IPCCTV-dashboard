@@ -1,0 +1,13 @@
+{
+    "Schema":  1,
+    "SupervisorPid":  0,
+    "State":  "stopped",
+    "StopKind":  "window-closed",
+    "LastWindowClose":  {
+                            "At":  "2026-10-17T12:31:00.1234567+03:00",
+                            "Reason":  "the NVR window was closed",
+                            "WindowTitle":  "cam.nvr",
+                            "DetectedBy":  "nvr warden"
+                        },
+    "UpdatedAt":  "2026-10-17T12:31:00.1234567+03:00"
+}

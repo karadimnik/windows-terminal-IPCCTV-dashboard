@@ -13,3 +13,6 @@
 
 # The committed screenshot is binary and must never be touched.
 *.png  binary
+
+# Golden files are compared byte for byte against PowerShell output: never normalise their line endings.
+testdata/golden/** -text

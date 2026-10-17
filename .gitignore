@@ -55,3 +55,6 @@ tls/
 
 /holocron.exe
 /holocron
+
+# Status documents produced by tests/holocron/status-conformance.ps1 (real clock and pid; validated, never committed)
+testdata/golden/status/generated/
