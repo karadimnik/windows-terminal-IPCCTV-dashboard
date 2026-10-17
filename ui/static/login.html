@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Sign in - IPCCTV control</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="authpage">
+<main class="authcard panel">
+  <header><h2>Sign in</h2><span class="muted">IPCCTV / control</span></header>
+  <form id="form" class="form" method="post" action="/login" novalidate>
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" required autofocus>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required>
+    </div>
+    <p id="msg" class="formnote bad" role="alert" aria-live="polite" hidden></p>
+    <div class="actions"><button id="go" class="btn primary" type="submit">Sign in</button></div>
+  </form>
+</main>
+<script src="login.js"></script>
+</body>
+</html>

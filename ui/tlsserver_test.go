@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,31 +12,37 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 const (
-	tlsTestToken = "lan-token-0123456789abcdef-0123456789abcdef"
 	lanIP        = "192.168.1.50"
 	lanListen    = "192.168.1.50:8443"
 	lanHost      = "192.168.1.50:8443"
+	testUser     = "anna"
+	testPassword = "correct horse battery staple"
 )
 
 type tlsRig struct {
 	handler http.Handler
 	logs    *bytes.Buffer
 	mgr     *certManager
-	limiter *failureLimiter
 	cfg     Config
+	auth    *authService
+	clock   *fakeClock
+	users   *fileUserStore
 }
 
+// newTLSRig builds the LAN listener's real handler chain over a throwaway auth
+// folder holding one user (anna), with a cheap hasher and an injected clock.
 func newTLSRig(t *testing.T, mutate func(*Config)) *tlsRig {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := Config{Listen: "127.0.0.1:8787", ArchiveRoot: dir, StatusFile: dir + "/_state/status.json", ScriptDir: dir,
-		TLSListen: lanListen, TLSToken: tlsTestToken, TLSDir: dir + "/tls"}
+		TLSListen: lanListen, TLSDir: dir + "/tls", AuthDir: dir + "/auth"}
 	if mutate != nil {
 		mutate(&cfg)
 	}
@@ -53,12 +60,19 @@ func newTLSRig(t *testing.T, mutate func(*Config)) *tlsRig {
 	if _, err := mgr.Prepare(names); err != nil {
 		t.Fatal(err)
 	}
-	limiter := newFailureLimiter(10, time.Minute, 1024)
-	h, err := newTLSHandler(cfg, log, mgr, names, limiter)
+	clock := newFakeClock()
+	users := newFileUserStore(cfg.AuthDir, clock.now)
+	hasher := fastHasher()
+	hash, _ := hasher.Hash(testPassword)
+	if err := users.Put(User{ID: "u-anna", Username: testUser, Hash: hash, Role: roleAdmin, CreatedAt: clock.now()}); err != nil {
+		t.Fatal(err)
+	}
+	auth := newAuthService(cfg.AuthDir, users, log, clock.now, hasher)
+	h, err := newTLSHandler(cfg, log, mgr, names, auth)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &tlsRig{handler: h, logs: logs, mgr: mgr, limiter: limiter, cfg: cfg}
+	return &tlsRig{handler: h, logs: logs, mgr: mgr, cfg: cfg, auth: auth, clock: clock, users: users}
 }
 
 var tlsReqCounter int
@@ -68,7 +82,7 @@ type tlsReq struct {
 	host         string
 	remote       string
 	headers      map[string]string
-	cookie       string
+	cookie       string // value of the session cookie
 	body         string
 }
 
@@ -94,11 +108,32 @@ func (rig *tlsRig) do(q tlsReq) *httptest.ResponseRecorder {
 		req.Header.Set(k, v)
 	}
 	if q.cookie != "" {
-		req.AddCookie(&http.Cookie{Name: tokenCookie, Value: q.cookie})
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: q.cookie})
 	}
 	rec := httptest.NewRecorder()
 	rig.handler.ServeHTTP(rec, req)
 	return rec
+}
+
+// login signs testUser in from a fresh address and returns the session cookie value.
+func (rig *tlsRig) login(t *testing.T) string {
+	t.Helper()
+	rec := rig.do(tlsReq{method: "POST", path: "/api/auth/login", headers: jsonHdr, body: loginBody(testUser, testPassword)})
+	if rec.Code != 200 {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			return c.Value
+		}
+	}
+	t.Fatal("login set no session cookie")
+	return ""
+}
+
+func loginBody(user, password string) string {
+	b, _ := json.Marshal(map[string]string{"username": user, "password": password})
+	return string(b)
 }
 
 // every route the LAN listener serves, plus unknown ones: all must be behind the token.
@@ -118,64 +153,6 @@ var tlsRoutes = []tlsReq{
 	{method: "GET", path: "/api/nothing"}, {method: "GET", path: "/nothing"}, {method: "POST", path: "/nothing", headers: map[string]string{"Content-Type": "application/json"}, body: "{}"},
 }
 
-func TestTLSTokenMatrixOnEveryRoute(t *testing.T) {
-	rig := newTLSRig(t, nil)
-	valid := cookieValue(tlsTestToken)
-	states := []struct {
-		name   string
-		apply  func(q tlsReq) tlsReq
-		want   func(code int) bool
-		expect string
-	}{
-		{"no token", func(q tlsReq) tlsReq { return q }, func(c int) bool { return c == 401 }, "401"},
-		{"wrong ?token=", func(q tlsReq) tlsReq { q.path += sep(q.path) + "token=nope"; return q }, func(c int) bool { return c == 401 }, "401"},
-		{"empty ?token=", func(q tlsReq) tlsReq { q.path += sep(q.path) + "token="; return q }, func(c int) bool { return c == 401 }, "401"},
-		{"wrong bearer", func(q tlsReq) tlsReq { q.headers = merge(q.headers, "Authorization", "Bearer nope"); return q }, func(c int) bool { return c == 401 }, "401"},
-		{"bearer with the cookie value", func(q tlsReq) tlsReq { q.headers = merge(q.headers, "Authorization", "Bearer "+valid); return q }, func(c int) bool { return c == 401 }, "401"},
-		{"wrong cookie", func(q tlsReq) tlsReq { q.cookie = "nope"; return q }, func(c int) bool { return c == 401 }, "401"},
-		{"the RAW token as a cookie", func(q tlsReq) tlsReq { q.cookie = tlsTestToken; return q }, func(c int) bool { return c == 401 }, "401"},
-		{"basic auth", func(q tlsReq) tlsReq { q.headers = merge(q.headers, "Authorization", "Basic "+tlsTestToken); return q }, func(c int) bool { return c == 401 }, "401"},
-		{"the loopback token", func(q tlsReq) tlsReq {
-			q.headers = merge(q.headers, "Authorization", "Bearer "+"loopback-token-x")
-			return q
-		}, func(c int) bool { return c == 401 }, "401"},
-		{"valid cookie", func(q tlsReq) tlsReq { q.cookie = valid; return q }, func(c int) bool { return c != 401 && c != 429 }, "served"},
-		{"valid bearer", func(q tlsReq) tlsReq { q.headers = merge(q.headers, "Authorization", "Bearer "+tlsTestToken); return q }, func(c int) bool { return c != 401 && c != 429 }, "served"},
-		{"valid ?token=", func(q tlsReq) tlsReq { q.path += sep(q.path) + "token=" + tlsTestToken; return q }, func(c int) bool { return c == 303 }, "303"},
-	}
-	for _, route := range tlsRoutes {
-		for _, s := range states {
-			rec := rig.do(s.apply(route))
-			if !s.want(rec.Code) {
-				t.Errorf("%s %s with %s: got %d, want %s", route.method, route.path, s.name, rec.Code, s.expect)
-			}
-			if strings.Contains(rec.Body.String(), tlsTestToken) || strings.Contains(fmt.Sprint(rec.Header()), tlsTestToken) && s.name != "valid ?token=" {
-				t.Errorf("%s %s with %s: the token appears in the response", route.method, route.path, s.name)
-			}
-		}
-	}
-	// Spot-check that "served" really reaches the handler: the page and the CA file.
-	if rec := rig.do(tlsReq{path: "/", cookie: valid}); rec.Code != 200 || !strings.Contains(rec.Body.String(), "<html") {
-		t.Errorf("GET / with a valid cookie: %d", rec.Code)
-	}
-	if rec := rig.do(tlsReq{path: "/api/live", cookie: valid}); rec.Code != 200 {
-		t.Errorf("GET /api/live with a valid cookie: %d", rec.Code)
-	}
-	// Positive control: with the token requirement removed the same routes ARE served, so the 401s above mean something.
-	open := newTLSRig(t, nil)
-	open.handler, _ = newTLSHandlerWithoutToken(t, open)
-	if rec := open.do(tlsReq{path: "/api/live"}); rec.Code != 200 {
-		t.Errorf("control: without the token layer /api/live gave %d", rec.Code)
-	}
-}
-
-func sep(path string) string {
-	if strings.Contains(path, "?") {
-		return "&"
-	}
-	return "?"
-}
-
 func merge(h map[string]string, k, v string) map[string]string {
 	out := map[string]string{}
 	for key, value := range h {
@@ -185,150 +162,9 @@ func merge(h map[string]string, k, v string) map[string]string {
 	return out
 }
 
-func newTLSHandlerWithoutToken(t *testing.T, rig *tlsRig) (http.Handler, error) {
-	t.Helper()
-	mux, err := buildMux(rig.cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	return mux, err
-}
-
-func TestTLSCookieAndRedirect(t *testing.T) {
-	rig := newTLSRig(t, nil)
-	rec := rig.do(tlsReq{path: "/?token=" + tlsTestToken + "&x=1"})
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("got %d", rec.Code)
-	}
-	loc := rec.Header().Get("Location")
-	if loc != "/?x=1" || strings.Contains(loc, "token") || strings.Contains(loc, tlsTestToken) {
-		t.Errorf("Location %q still carries the token", loc)
-	}
-	cookies := rec.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("%d cookies", len(cookies))
-	}
-	c := cookies[0]
-	if !c.Secure || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.MaxAge <= 0 {
-		t.Errorf("cookie flags: Secure=%v HttpOnly=%v SameSite=%v Path=%q MaxAge=%d", c.Secure, c.HttpOnly, c.SameSite, c.Path, c.MaxAge)
-	}
-	if c.Value == tlsTestToken || strings.Contains(c.Value, tlsTestToken) || c.Value != cookieValue(tlsTestToken) {
-		t.Errorf("the cookie holds %q: it must be the derived value, not the token", c.Value)
-	}
-	if rec.Header().Get("Referrer-Policy") != "no-referrer" {
-		t.Error("no Referrer-Policy")
-	}
-	// The cookie then opens the page, and survives a restart (same token -> same value).
-	if again := rig.do(tlsReq{path: "/", cookie: c.Value}); again.Code != 200 {
-		t.Errorf("the cookie did not open the page: %d", again.Code)
-	}
-	if cookieValue(tlsTestToken) != cookieValue(tlsTestToken) || cookieValue(tlsTestToken) == cookieValue(tlsTestToken+"x") {
-		t.Error("cookie derivation is not a stable function of the token")
-	}
-	// The loopback listener's cookie is exactly what it was: the raw token, no Secure.
-	plain := requireToken(goodToken, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	lrec := httptest.NewRecorder()
-	plain.ServeHTTP(lrec, httptest.NewRequest("GET", "/?token="+goodToken, nil))
-	lc := lrec.Result().Cookies()
-	if len(lc) != 1 || lc[0].Value != goodToken || lc[0].Secure {
-		t.Errorf("the loopback cookie changed: %+v", lc)
-	}
-}
-
-func TestTLSLogsNeverHoldTheToken(t *testing.T) {
-	rig := newTLSRig(t, nil)
-	for _, q := range []tlsReq{
-		{path: "/api/status?token=" + tlsTestToken + "x"}, {path: "/api/status", headers: map[string]string{"Authorization": "Bearer " + tlsTestToken + "y"}},
-		{path: "/api/status", cookie: tlsTestToken}, {path: "/api/status"}, {path: "/?token=" + tlsTestToken},
-	} {
-		rig.do(q)
-	}
-	logs := rig.logs.String()
-	if strings.Contains(logs, tlsTestToken) || strings.Contains(logs, cookieValue(tlsTestToken)) {
-		t.Errorf("the token or its cookie value reached the log:\n%s", logs)
-	}
-	if strings.Count(logs, "token refused") != 4 || !strings.Contains(logs, "wrong token") || !strings.Contains(logs, "no token") {
-		t.Errorf("failures not logged as expected:\n%s", logs)
-	}
-	// Positive control: the scan fails on a log that does hold the token.
-	if !strings.Contains("x token="+tlsTestToken, tlsTestToken) {
-		t.Error("control")
-	}
-}
-
-func TestFailureLimiter(t *testing.T) {
-	now := time.Now()
-	l := newFailureLimiter(10, time.Minute, 1024)
-	l.now = func() time.Time { return now }
-	for i := 0; i < 9; i++ {
-		l.fail("1.1.1.1")
-	}
-	if _, blocked := l.blocked("1.1.1.1"); blocked {
-		t.Error("blocked after 9 failures")
-	}
-	l.fail("1.1.1.1")
-	retry, blocked := l.blocked("1.1.1.1")
-	if !blocked || retry <= 0 || retry > time.Minute {
-		t.Errorf("after 10 failures: blocked=%v retry=%v", blocked, retry)
-	}
-	if _, blocked := l.blocked("2.2.2.2"); blocked {
-		t.Error("another source is blocked")
-	}
-	now = now.Add(61 * time.Second)
-	if _, blocked := l.blocked("1.1.1.1"); blocked {
-		t.Error("still blocked after the window")
-	}
-	l.fail("1.1.1.1")
-	if _, blocked := l.blocked("1.1.1.1"); blocked {
-		t.Error("the window did not restart at 1 failure")
-	}
-	// Bounded memory: thousands of sources never exceed the table size.
-	small := newFailureLimiter(3, time.Minute, 50)
-	small.now = func() time.Time { return now }
-	for i := 0; i < 5000; i++ {
-		small.fail(fmt.Sprintf("10.%d.%d.%d", i/65536, (i/256)%256, i%256))
-	}
-	if small.size() > 51 {
-		t.Errorf("table grew to %d entries, cap 50 (+1 overflow bucket)", small.size())
-	}
-	// Expired entries are purged to make room.
-	now = now.Add(2 * time.Minute)
-	small.fail("9.9.9.9")
-	if small.size() > 2 {
-		t.Errorf("expired entries were not purged: %d", small.size())
-	}
-}
-
-func TestTLSLimiterOverHTTP(t *testing.T) {
-	rig := newTLSRig(t, nil)
-	src := "192.168.1.99:5555"
-	// Requests with no credential at all are first visits, not guesses: they are never counted.
-	for i := 0; i < 30; i++ {
-		if rec := rig.do(tlsReq{path: "/api/status", remote: src}); rec.Code != 401 {
-			t.Fatalf("no-credential request %d: %d", i, rec.Code)
-		}
-	}
-	for i := 0; i < 10; i++ {
-		if rec := rig.do(tlsReq{path: "/api/status", remote: src, headers: map[string]string{"Authorization": "Bearer wrong"}}); rec.Code != 401 {
-			t.Fatalf("attempt %d: %d", i, rec.Code)
-		}
-	}
-	rec := rig.do(tlsReq{path: "/api/status", remote: src})
-	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
-		t.Errorf("11th attempt: %d Retry-After %q", rec.Code, rec.Header().Get("Retry-After"))
-	}
-	// Even the right token is held back while blocked; another address is not.
-	if rec := rig.do(tlsReq{path: "/api/status", remote: src, cookie: cookieValue(tlsTestToken)}); rec.Code != http.StatusTooManyRequests {
-		t.Errorf("a valid cookie while blocked: %d", rec.Code)
-	}
-	if rec := rig.do(tlsReq{path: "/api/status", remote: "192.168.1.98:1", cookie: cookieValue(tlsTestToken)}); rec.Code == 401 || rec.Code == 429 {
-		t.Errorf("another source: %d", rec.Code)
-	}
-	if strings.Contains(rec.Body.String(), tlsTestToken) {
-		t.Error("the 429 echoes the token")
-	}
-}
-
 func TestTLSGuard(t *testing.T) {
 	rig := newTLSRig(t, nil)
-	ok := cookieValue(tlsTestToken)
+	ok := rig.login(t)
 	cases := []struct {
 		name    string
 		host    string
@@ -379,7 +215,7 @@ func TestLoopbackHandlerIsUnchanged(t *testing.T) {
 
 func TestTLSRoutesServeOnlyTheCertificate(t *testing.T) {
 	rig := newTLSRig(t, nil)
-	valid := cookieValue(tlsTestToken)
+	valid := rig.login(t)
 	rec := rig.do(tlsReq{path: "/api/tls/ca.crt", cookie: valid})
 	if rec.Code != 200 || rec.Header().Get("Content-Type") != "application/x-x509-ca-cert" ||
 		!strings.Contains(rec.Header().Get("Content-Disposition"), "attachment") || !strings.Contains(rec.Header().Get("Content-Disposition"), "ipcctv-local-ca.crt") {
@@ -425,19 +261,49 @@ func TestRealTLSListener(t *testing.T) {
 	}
 	resp.Body.Close()
 	if resp.StatusCode != 401 {
-		t.Errorf("no token over real TLS: %d", resp.StatusCode)
+		t.Errorf("no session over real TLS: %d", resp.StatusCode)
 	}
 	if resp.TLS == nil || resp.TLS.Version != tls.VersionTLS13 {
 		t.Errorf("TLS state %+v", resp.TLS)
 	}
-	req.Header.Set("Authorization", "Bearer "+tlsTestToken)
+	// A browser navigation is sent to the login page.
+	nav, _ := http.NewRequest("GET", "https://"+addr+"/", nil)
+	nav.Header.Set("Accept", "text/html,application/xhtml+xml")
+	resp, err = client.Do(nav)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/login?next=%2F" {
+		t.Errorf("navigation without a session: %d %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+	// Sign in over the wire (the guard's host check needs the listener's own name).
+	login, _ := http.NewRequest("POST", "https://"+addr+"/api/auth/login", strings.NewReader(loginBody(testUser, testPassword)))
+	login.Header.Set("Content-Type", "application/json")
+	login.Host = lanHost
+	resp, err = client.Do(login)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	var cookie *http.Cookie
+	for _, c := range resp.Cookies() {
+		if c.Name == sessionCookie {
+			cookie = c
+		}
+	}
+	if resp.StatusCode != 200 || cookie == nil {
+		t.Fatalf("login over real TLS: %d", resp.StatusCode)
+	}
+	req.AddCookie(cookie)
+	req.Host = lanHost
 	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
-		t.Errorf("with the token over real TLS: %d", resp.StatusCode)
+		t.Errorf("signed in over real TLS: %d", resp.StatusCode)
 	}
 	leaf := resp.TLS.PeerCertificates[0]
 	if !leaf.IPAddresses[0].Equal(net.ParseIP(lanIP)) || len(leaf.DNSNames) == 0 || leaf.IsCA {
@@ -455,7 +321,7 @@ func TestRealTLSListener(t *testing.T) {
 	}
 	defer plain.Close()
 	plain.SetDeadline(time.Now().Add(3 * time.Second))
-	fmt.Fprintf(plain, "GET /api/live HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\n\r\n", addr, tlsTestToken)
+	fmt.Fprintf(plain, "GET /api/live HTTP/1.1\r\nHost: %s\r\nCookie: %s=%s\r\n\r\n", addr, sessionCookie, cookie.Value)
 	reply, _ := io.ReadAll(plain)
 	text := string(reply)
 	if strings.Contains(text, `"enabled"`) || strings.Contains(text, "<html") || (text != "" && !strings.Contains(text, "400")) {
@@ -464,7 +330,6 @@ func TestRealTLSListener(t *testing.T) {
 }
 
 func TestValidateTLS(t *testing.T) {
-	short := "short-token"
 	cases := []struct {
 		name string
 		cfg  Config
@@ -472,19 +337,15 @@ func TestValidateTLS(t *testing.T) {
 		msg  string
 	}{
 		{"off", Config{}, true, ""},
-		{"valid TLSToken, no loopback token", Config{TLSListen: lanListen, TLSToken: tlsTestToken}, true, ""},
-		{"falls back to Token", Config{TLSListen: lanListen, Token: tlsTestToken}, true, ""},
-		{"no token at all", Config{TLSListen: lanListen}, false, "no token"},
-		{"short TLSToken", Config{TLSListen: lanListen, TLSToken: short}, false, "shorter than the 16"},
-		{"short TLSToken beats a long loopback token only when TLSToken is set", Config{TLSListen: lanListen, TLSToken: short, Token: tlsTestToken}, false, "shorter"},
-		{"0.0.0.0", Config{TLSListen: "0.0.0.0:8443", TLSToken: tlsTestToken}, false, "private IPv4"},
-		{"public", Config{TLSListen: "8.8.8.8:8443", TLSToken: tlsTestToken}, false, "private IPv4"},
-		{"hostname", Config{TLSListen: "nvr.lan:8443", TLSToken: tlsTestToken}, false, "private IPv4"},
-		{"ipv6", Config{TLSListen: "[fd00::1]:8443", TLSToken: tlsTestToken}, false, "private IPv4"},
-		{"loopback", Config{TLSListen: "127.0.0.1:8443", TLSToken: tlsTestToken}, false, "private IPv4"},
-		{"no port", Config{TLSListen: lanIP, TLSToken: tlsTestToken}, false, "host:port"},
-		{"bad extra host", Config{TLSListen: lanListen, TLSToken: tlsTestToken, TLSHosts: []string{"example.com"}}, false, "TLSHosts"},
-		{"good extra hosts", Config{TLSListen: lanListen, TLSToken: tlsTestToken, TLSHosts: []string{"nvr.lan", "10.0.0.5"}}, true, ""},
+		{"valid", Config{TLSListen: lanListen}, true, ""},
+		{"0.0.0.0", Config{TLSListen: "0.0.0.0:8443"}, false, "private IPv4"},
+		{"public", Config{TLSListen: "8.8.8.8:8443"}, false, "private IPv4"},
+		{"hostname", Config{TLSListen: "nvr.lan:8443"}, false, "private IPv4"},
+		{"ipv6", Config{TLSListen: "[fd00::1]:8443"}, false, "private IPv4"},
+		{"loopback", Config{TLSListen: "127.0.0.1:8443"}, false, "private IPv4"},
+		{"no port", Config{TLSListen: lanIP}, false, "host:port"},
+		{"bad extra host", Config{TLSListen: lanListen, TLSHosts: []string{"example.com"}}, false, "TLSHosts"},
+		{"good extra hosts", Config{TLSListen: lanListen, TLSHosts: []string{"nvr.lan", "10.0.0.5"}}, true, ""},
 	}
 	for _, c := range cases {
 		err := c.cfg.ValidateTLS()
@@ -494,35 +355,58 @@ func TestValidateTLS(t *testing.T) {
 		if !c.ok && (err == nil || !strings.Contains(err.Error(), c.msg)) {
 			t.Errorf("%s: got %v, want an error containing %q", c.name, err, c.msg)
 		}
-		if err != nil && strings.Contains(err.Error(), tlsTestToken) {
-			t.Errorf("%s: the error echoes the token", c.name)
-		}
 	}
-	// The loopback guard is independent: it still accepts a tokenless loopback listener when TLS is on.
-	if err := (Config{Listen: "127.0.0.1:8787", TLSListen: lanListen, TLSToken: tlsTestToken}).Validate(); err != nil {
+	// The loopback guard is independent: a tokenless loopback listener is fine when TLS is on.
+	if err := (Config{Listen: "127.0.0.1:8787", TLSListen: lanListen}).Validate(); err != nil {
 		t.Errorf("loopback validation changed: %v", err)
 	}
 }
 
+// The LAN listener refuses to start without a user, in the style of the old token refusal.
+func TestValidateTLSUsersRefusesWithoutAUser(t *testing.T) {
+	dir := t.TempDir()
+	store := newFileUserStore(dir, time.Now)
+	cfg := Config{TLSListen: lanListen, AuthDir: dir}
+	err := cfg.ValidateTLSUsers(store)
+	if err == nil || !strings.Contains(err.Error(), "refusing to start") || !strings.Contains(err.Error(), "-set-password") || !strings.Contains(err.Error(), "/setup") {
+		t.Fatalf("no user: %v", err)
+	}
+	if err := (Config{}).ValidateTLSUsers(store); err != nil {
+		t.Errorf("TLS off must not need a user: %v", err)
+	}
+	_ = store.Put(User{ID: "1", Username: "anna", Hash: "h", Role: roleAdmin})
+	if err := cfg.ValidateTLSUsers(store); err != nil {
+		t.Errorf("with a user: %v", err)
+	}
+	// An unreadable user file also refuses: fail closed.
+	bad := t.TempDir()
+	_ = os.WriteFile(bad+"/users.json", []byte("{{"), 0o600)
+	if err := cfg.ValidateTLSUsers(newFileUserStore(bad, time.Now)); err == nil {
+		t.Error("a corrupt users.json did not refuse")
+	}
+}
+
 func TestLoadConfigTLS(t *testing.T) {
-	t.Setenv("CAMUI_TLS_TOKEN", tlsTestToken)
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	t.Setenv("CAMUI_TOKEN", "")
 	cfg, err := LoadConfig("", Config{ScriptDir: t.TempDir(), TLSListen: lanListen})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.TLSToken != tlsTestToken || cfg.Token != "" || cfg.TLSListen != lanListen || !strings.HasSuffix(cfg.TLSDir, "tls") || cfg.RequiresToken() {
+	if cfg.Token != "" || cfg.TLSListen != lanListen || !strings.HasSuffix(cfg.TLSDir, "tls") || cfg.RequiresToken() {
 		t.Errorf("config: %+v", cfg)
+	}
+	want := filepath.Join(os.Getenv("LOCALAPPDATA"), "IPCCTV", "camui", "auth")
+	if cfg.AuthDir != want {
+		t.Errorf("default auth folder %q, want %q", cfg.AuthDir, want)
+	}
+	explicit, _ := LoadConfig("", Config{ScriptDir: t.TempDir(), AuthDir: "X:/elsewhere"})
+	if explicit.AuthDir != "X:/elsewhere" {
+		t.Errorf("-auth-dir ignored: %q", explicit.AuthDir)
 	}
 }
 
-func TestNewTokenAndPrintCA(t *testing.T) {
-	a, _ := newToken()
-	b, _ := newToken()
-	if len(a) != 64 || a == b || strings.Trim(a, "0123456789abcdef") != "" {
-		t.Errorf("tokens %q %q", a, b)
-	}
+func TestPrintCA(t *testing.T) {
 	dir := t.TempDir() + "/tls"
 	var out, errOut bytes.Buffer
 	if code := runPrintCA(Config{TLSDir: dir}, &out, &errOut); code != 0 {
@@ -533,6 +417,9 @@ func TestNewTokenAndPrintCA(t *testing.T) {
 	text := out.String()
 	if !strings.Contains(text, fingerprint(ca)) || !strings.Contains(text, dir) || strings.Contains(text, "PRIVATE KEY") || strings.Contains(text, "BEGIN") {
 		t.Errorf("print-ca output:\n%s", text)
+	}
+	if strings.Contains(strings.ToLower(text), "token") {
+		t.Errorf("print-ca still talks about a token:\n%s", text)
 	}
 	if _, err := os.Stat(dir + "/leaf.crt"); err == nil {
 		t.Error("-print-ca created a server certificate")

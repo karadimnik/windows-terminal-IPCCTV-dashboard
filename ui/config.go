@@ -73,15 +73,15 @@ type Config struct {
 	// Default %LOCALAPPDATA%\IPCCTV\tls. Never inside the repository.
 	TLSDir string `json:"tlsDir"`
 
-	// TLSToken is the token the LAN listener requires (at least minTokenLength
-	// characters). Falls back to Token. It is separate so that switching the
-	// LAN listener on does not force a token onto the loopback listener.
-	TLSToken string `json:"tlsToken"`
+	// AuthDir holds the LAN listener's users.json, sessions.json and auth.log,
+	// owner-only. Default %LOCALAPPDATA%\IPCCTV\camui\auth. Never inside the
+	// repository. Config file or -auth-dir only.
+	AuthDir string `json:"authDir"`
 
 	// TLSReadOnly makes the HTTPS listener view-only: it serves the Live and
 	// Footage screens and the read-only API, and refuses everything that
 	// changes state (start/stop, settings, record toggles, acknowledgements).
-	// Absent means true. Only `false` gives a token full control. It never
+	// Absent means true. Only `false` gives a signed-in user full control. It never
 	// affects the loopback listener.
 	TLSReadOnly *bool `json:"tlsReadOnly"`
 
@@ -184,11 +184,11 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 	if flags.TLSDir != "" {
 		cfg.TLSDir = flags.TLSDir
 	}
+	if flags.AuthDir != "" {
+		cfg.AuthDir = flags.AuthDir
+	}
 	if env := strings.TrimSpace(os.Getenv("CAMUI_TOKEN")); env != "" {
 		cfg.Token = env
-	}
-	if env := strings.TrimSpace(os.Getenv("CAMUI_TLS_TOKEN")); env != "" {
-		cfg.TLSToken = env
 	}
 	if flags.TLSReadOnly != nil {
 		cfg.TLSReadOnly = flags.TLSReadOnly
@@ -228,10 +228,12 @@ func LoadConfig(configPath string, flags Config) (Config, error) {
 		cfg.StatusFile = filepath.Join(cfg.ArchiveRoot, "_state", "status.json")
 	}
 	cfg.Token = strings.TrimSpace(cfg.Token)
-	cfg.TLSToken = strings.TrimSpace(cfg.TLSToken)
 	cfg.TLSListen = strings.TrimSpace(cfg.TLSListen)
 	if cfg.TLSDir == "" {
 		cfg.TLSDir = defaultTLSDir()
+	}
+	if cfg.AuthDir == "" {
+		cfg.AuthDir = defaultAuthDir()
 	}
 
 	return cfg, nil
@@ -292,17 +294,19 @@ func defaultTLSDir() string {
 	return filepath.Join(".", "tls")
 }
 
-// EffectiveTLSToken is the token the TLS listener requires.
-func (c Config) EffectiveTLSToken() string {
-	if c.TLSToken != "" {
-		return c.TLSToken
+// defaultAuthDir is %LOCALAPPDATA%\IPCCTV\camui\auth: a per-user local folder.
+func defaultAuthDir() string {
+	if local := os.Getenv("LOCALAPPDATA"); local != "" {
+		return filepath.Join(local, "IPCCTV", "camui", "auth")
 	}
-	return c.Token
+	if dir, err := os.UserCacheDir(); err == nil {
+		return filepath.Join(dir, "IPCCTV", "camui", "auth")
+	}
+	return filepath.Join(".", "auth")
 }
 
 // ValidateTLS checks the LAN listener's settings. With TLSListen empty there is
-// nothing to check. The token is mandatory and independent of the loopback
-// listener: no token, or one that is too short, refuses to start.
+// nothing to check.
 func (c Config) ValidateTLS() error {
 	if c.TLSListen == "" {
 		return nil
@@ -311,20 +315,26 @@ func (c Config) ValidateTLS() error {
 	if err != nil {
 		return err
 	}
-	if _, err := buildCertNames(ip, c.TLSHosts); err != nil {
-		return err
-	}
-	token := c.EffectiveTLSToken()
-	if len(token) >= minTokenLength {
+	_, err = buildCertNames(ip, c.TLSHosts)
+	return err
+}
+
+// ValidateTLSUsers refuses to start the LAN listener until someone can sign in
+// to it: at least one user must exist. An unreadable user file refuses too.
+func (c Config) ValidateTLSUsers(store UserStore) error {
+	if c.TLSListen == "" {
 		return nil
 	}
-	detail := "no token is configured for it"
-	if token != "" {
-		detail = fmt.Sprintf("its token is %d characters, shorter than the %d required", len(token), minTokenLength)
+	users, err := store.List()
+	if err != nil {
+		return fmt.Errorf("refusing to start: the TLS listener %q is on the LAN and the user file cannot be read: %v", c.TLSListen, err)
 	}
-	return fmt.Errorf("refusing to start: the TLS listener %q is on the LAN and %s.\n"+
-		"  Set a token of at least %d characters (CAMUI_TLS_TOKEN in the environment, or \"tlsToken\" in the config file;\n"+
-		"  `camui.exe -new-token` prints a fresh one) or remove tlsListen", c.TLSListen, detail, minTokenLength)
+	if len(users) > 0 {
+		return nil
+	}
+	return fmt.Errorf("refusing to start: the TLS listener %q is on the LAN and no user exists to sign in with (looked in %s).\n"+
+		"  Create one: `camui.exe -set-password <username>` (reads the password from standard input),\n"+
+		"  or start camui without tlsListen and open http://127.0.0.1:8787/setup on this PC; or remove tlsListen", c.TLSListen, c.AuthDir)
 }
 
 // RequiresToken reports whether requests must carry the token.

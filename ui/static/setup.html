@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Create the first user - IPCCTV control</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="authpage">
+<main class="authcard panel">
+  <header><h2>Create the first user</h2><span class="muted">IPCCTV / control</span></header>
+  <form id="form" class="form" method="post" action="/setup" novalidate>
+    <p class="hint">This page exists only on this PC, and only until a user exists. The user signs in to the HTTPS address on your network.</p>
+    <div class="field">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" required autofocus>
+      <span class="hint">Letters, digits, dot, underscore and dash; up to 64.</span>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="new-password" maxlength="128" required>
+      <span class="hint">12 to 128 characters. A phrase of a few words is fine.</span>
+    </div>
+    <div class="field">
+      <label for="again">Password again</label>
+      <input id="again" name="again" type="password" autocomplete="new-password" maxlength="128" required>
+    </div>
+    <p id="msg" class="formnote bad" role="alert" aria-live="polite" hidden></p>
+    <div class="actions"><button id="go" class="btn primary" type="submit">Create user</button></div>
+  </form>
+</main>
+<script src="setup.js"></script>
+</body>
+</html>

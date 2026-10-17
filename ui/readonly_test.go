@@ -27,6 +27,12 @@ var roRoutes = []roRoute{
 	{"GET", "/api/status", nil, "", true}, {"GET", "/api/live", nil, "", true}, {"GET", "/api/cameras", nil, "", true},
 	{"GET", "/api/config", nil, "", true}, {"GET", "/api/footage", nil, "", true}, {"GET", "/api/clip?camera=x&segment=y", nil, "", true},
 	{"GET", "/api/tls/ca.crt", nil, "", true}, {"GET", "/api/tls/info", nil, "", true},
+	{"GET", "/login", nil, "", true}, {"GET", "/login.js", nil, "", true},
+	{"POST", "/api/auth/login", jsonHdr, `{"username":"nobody","password":"nothing nothing"}`, true},
+	{"POST", "/api/auth/logout", jsonHdr, `{}`, true}, {"GET", "/api/auth/me", nil, "", true},
+	// loopback-only routes: never served on this listener
+	{"GET", "/setup", nil, "", true}, {"GET", "/setup.js", nil, "", true},
+	{"POST", "/api/auth/setup", jsonHdr, `{"username":"mallory","password":"a long enough password"}`, false},
 	{"POST", "/api/live/Cam%201/whep?stream=sub", map[string]string{"Content-Type": "application/sdp"}, "v=0\r\n", true},
 	{"DELETE", "/api/live/session/00000000000000000000000000000000", nil, "", true},
 	// refused when view-only
@@ -45,7 +51,7 @@ var roRoutes = []roRoute{
 
 func isReadOnlyRefusal(body string) bool { return strings.Contains(body, readOnlyMessage) }
 
-func TestReadOnlyRouteMethodTokenMatrix(t *testing.T) {
+func TestReadOnlyRouteMethodSessionMatrix(t *testing.T) {
 	cases := []struct {
 		name     string
 		readOnly *bool
@@ -53,20 +59,22 @@ func TestReadOnlyRouteMethodTokenMatrix(t *testing.T) {
 	for _, mode := range cases {
 		rig := newTLSRig(t, func(c *Config) { c.TLSReadOnly = mode.readOnly })
 		view := mode.readOnly == nil || *mode.readOnly
-		valid := cookieValue(tlsTestToken)
+		valid := rig.login(t)
 		for _, route := range roRoutes {
+			pathOnly, _, _ := strings.Cut(route.path, "?")
 			base := tlsReq{method: route.method, path: route.path, headers: route.headers, body: route.body}
-			// 401 beats 403: without a token the read-only gate is never reached, so it cannot be probed.
-			for _, st := range []struct {
-				name  string
-				apply func(tlsReq) tlsReq
-			}{
-				{"no token", func(q tlsReq) tlsReq { return q }},
-				{"wrong bearer", func(q tlsReq) tlsReq { q.headers = merge(q.headers, "Authorization", "Bearer nope"); return q }},
-			} {
-				rec := rig.do(st.apply(base))
-				if rec.Code != 401 || isReadOnlyRefusal(rec.Body.String()) {
-					t.Errorf("[%s] %s %s with %s: %d %q, want a plain 401", mode.name, route.method, route.path, st.name, rec.Code, rec.Body.String())
+			// 401 beats 403: without a session the read-only gate is never reached, so it cannot be probed.
+			if !publicRoutes[route.method+" "+pathOnly] {
+				for _, st := range []struct {
+					name   string
+					cookie string
+				}{{"no session", ""}, {"wrong cookie", "nope"}} {
+					q := base
+					q.cookie = st.cookie
+					rec := rig.do(q)
+					if rec.Code != 401 || isReadOnlyRefusal(rec.Body.String()) {
+						t.Errorf("[%s] %s %s with %s: %d %q, want a plain 401", mode.name, route.method, route.path, st.name, rec.Code, rec.Body.String())
+					}
 				}
 			}
 			q := base
@@ -75,11 +83,11 @@ func TestReadOnlyRouteMethodTokenMatrix(t *testing.T) {
 			refused := rec.Code == http.StatusForbidden && isReadOnlyRefusal(rec.Body.String())
 			switch {
 			case view && !route.allowed && !refused:
-				t.Errorf("[%s] %s %s with the right token: got %d, want the read-only 403", mode.name, route.method, route.path, rec.Code)
+				t.Errorf("[%s] %s %s signed in: got %d, want the read-only 403", mode.name, route.method, route.path, rec.Code)
 			case view && route.allowed && refused:
-				t.Errorf("[%s] %s %s with the right token: refused as read-only but it must be allowed", mode.name, route.method, route.path)
+				t.Errorf("[%s] %s %s signed in: refused as read-only but it must be allowed", mode.name, route.method, route.path)
 			case !view && refused:
-				t.Errorf("[%s] %s %s with the right token: read-only refusal although tlsReadOnly is false", mode.name, route.method, route.path)
+				t.Errorf("[%s] %s %s signed in: read-only refusal although tlsReadOnly is false", mode.name, route.method, route.path)
 			}
 			if refused {
 				var body map[string]any
@@ -96,7 +104,7 @@ func boolPtr(b bool) *bool { return &b }
 func TestReadOnlyRefusalHappensBeforeAnyHandler(t *testing.T) {
 	rig := newTLSRig(t, nil)
 	ack := filepath.Join(filepath.Dir(rig.cfg.StatusFile), acknowledgedFileName)
-	valid := cookieValue(tlsTestToken)
+	valid := rig.login(t)
 	for _, q := range []tlsReq{
 		{method: "POST", path: "/api/acknowledge", headers: jsonHdr, body: `{"key":"stopNotice","at":"2026-01-01T00:00:00Z"}`},
 		{method: "POST", path: "/api/control", headers: jsonHdr, body: `{"scope":"all","action":"stop"}`},
@@ -115,6 +123,7 @@ func TestReadOnlyRefusalHappensBeforeAnyHandler(t *testing.T) {
 	}
 	// The off switch really lets the same acknowledgement reach its handler.
 	open := newTLSRig(t, func(c *Config) { c.TLSReadOnly = boolPtr(false) })
+	valid = open.login(t)
 	ack2 := filepath.Join(filepath.Dir(open.cfg.StatusFile), acknowledgedFileName)
 	rec := open.do(tlsReq{method: "POST", path: "/api/acknowledge", headers: map[string]string{"Content-Type": "application/json", "Origin": "https://" + lanHost}, body: `{"key":"stopNotice","at":"2026-01-01T00:00:00Z"}`, cookie: valid})
 	if isReadOnlyRefusal(rec.Body.String()) {
@@ -191,7 +200,7 @@ func TestReadOnlyKeepsWatchingWorking(t *testing.T) {
 	writeTestJSON(t, filepath.Join(dir, "status.json"), map[string]any{"State": "running", "SupervisorPid": os.Getpid(), "UpdatedAt": timeNowRFC(), "Cameras": recCams,
 		"Live": map[string]any{"Enabled": true, "Alive": true, "Cameras": liveCams}})
 	rig := newTLSRig(t, func(c *Config) { c.ScriptDir = dir; c.StatusFile = filepath.Join(dir, "status.json") })
-	valid := cookieValue(tlsTestToken)
+	valid := rig.login(t)
 	rec := rig.do(tlsReq{method: "POST", path: "/api/live/Cam%20One/whep?stream=sub", headers: map[string]string{"Content-Type": "application/sdp", "Origin": "https://" + lanHost, "Sec-Fetch-Site": "same-origin"}, body: testOffer, cookie: valid})
 	if rec.Code != 201 || rec.Header().Get("Content-Type") != "application/sdp" {
 		t.Fatalf("WHEP while view-only: %d %s", rec.Code, rec.Body.String())
@@ -210,13 +219,12 @@ func TestReadOnlyKeepsWatchingWorking(t *testing.T) {
 }
 
 func TestReadOnlyFlagIsExposedOnlyOnTheTLSListener(t *testing.T) {
-	valid := cookieValue(tlsTestToken)
 	for _, c := range []struct {
 		mode *bool
 		want bool
 	}{{nil, true}, {boolPtr(true), true}, {boolPtr(false), false}} {
 		rig := newTLSRig(t, func(cfg *Config) { cfg.TLSReadOnly = c.mode })
-		rec := rig.do(tlsReq{path: "/api/tls/info", cookie: valid})
+		rec := rig.do(tlsReq{path: "/api/tls/info", cookie: rig.login(t)})
 		var body map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["readOnly"] != c.want {
 			t.Errorf("mode %v: %s (%v)", c.mode, rec.Body.String(), err)
