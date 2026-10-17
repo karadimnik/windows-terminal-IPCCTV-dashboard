@@ -128,6 +128,7 @@ func main() {
 	dur := fl.Duration("for", 10*time.Second, "run time")
 	retries := fl.Int("retries", 0, "rename retries after the first attempt")
 	retryDelay := fl.Duration("retrydelay", 100*time.Millisecond, "delay between retries")
+	renameMode := fl.String("rename", "mfe", "mfe|posix|replacefile")
 	selfread := fl.Bool("selfread", false, "also run a tight reader goroutine in the writer process")
 	open := fl.String("open", "go", "go|sd")
 	hold := fl.Duration("hold", 0, "reader keeps the file open this long per read")
@@ -153,7 +154,7 @@ func main() {
 			}
 			var err error
 			for try := 0; try <= *retries; try++ {
-				if err = os.Rename(tmp, *path); err == nil {
+				if err = renameOver(tmp, *path, *renameMode); err == nil {
 					if try > 0 {
 						retried++
 					}

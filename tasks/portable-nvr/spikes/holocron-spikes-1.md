@@ -151,3 +151,48 @@ Not tested: reconnect behaviour of the concat wrapper over a long run (a long-li
 **What it changes.** HLD decision 1 stands with two amendments: ordering is mtime-then-name, and the recency window belongs to the watchdog/alert consumers only (the pruner always protects the newest strict-pattern file). Drop `Get-CamLiveFileLength` from the port (IR 10 item 3). The strict pattern is matched case-sensitively here; the PowerShell code is case-insensitive (IR 2.3), so on Windows (case-insensitive filesystem) match case-insensitively, on Linux decide explicitly (recommendation: case-sensitive, ffmpeg writes the prefix exactly as configured).
 
 **Limits and confidence.** High for the recording / hard-kill / restart / age-out behaviour (two filesystems, one run each, consistent). The system clock was not changed; clock steps and the DST fall-back were simulated only by setting file mtimes and names, which proves the rule's arithmetic and ordering, not ffmpeg's behaviour during a real step (ffmpeg's `-segment_atclocktime` clock reading across a step is untested). Not tested: segment length 900 s (65 s window run only at 5 s and 30 s for the growth), `E:` volume, a real camera drop (simulated by killing and restarting ffmpeg), exFAT/network/overlay filesystems.
+
+## SP6 - atomic replace of the status file with a concurrent reader (Windows)
+
+**Question.** Writing `status.json` by temp file + rename while readers poll: does Go's Windows file open allow the writer's rename-over (FILE_SHARE_DELETE)? What flags and retries do the Go reader and writer need (IS 1.1 "Go reader")? What happens on a `\\wsl.localhost` path?
+
+**Method.** `spikes/sp6` (Go, cross-compiled `GOOS=windows`, run from WSL interop with the scratch folder `C:\Windows\Temp\holocron-sp\sp6`). Writer: an 8 KB indented JSON document (`Seq`, timestamp, padding) written to `status.json.tmp` and renamed over `status.json` every 100 ms for 10-12 s; counts rename failures by Win32 error. Reader: tight loop (about 10 000 reads/s) or open-hold-close with a 2 s hold; counts good reads, invalid/partial JSON, sequence regressions and errors. Readers: Go goroutine in the writer process; a second Go process (`-open go` = plain `os.Open`, `-open sd` = `CreateFile` with `FILE_SHARE_READ|WRITE|DELETE`); Windows PowerShell 5.1 `Get-Content -Raw`, `[IO.File]::OpenRead` (FileShare.Read), `FileStream` with `FileShare.ReadWrite` and with `ReadWrite|Delete` (`tests/holocron/sp6-reader.ps1`). Three rename implementations in the writer: `mfe` = Go's `os.Rename` (MoveFileEx with REPLACE_EXISTING, read from `internal/syscall/windows/syscall_windows.go:357`), `posix` = `SetFileInformationByHandle(FileRenameInfoEx, REPLACE_IF_EXISTS | POSIX_SEMANTICS)`, `replacefile` = `ReplaceFileW`. Matrices: `tests/holocron/sp6-run.sh`, `sp6-run2.sh`, `sp6-run3.sh`. The Go toolchain's source shows `os.Open` on Windows uses share mode `FILE_SHARE_READ|FILE_SHARE_WRITE` only (`syscall/syscall_windows.go:395`).
+
+**Raw results** (rename failures / writer cycles; reader errors; 0 partial or invalid reads and 0 sequence regressions in every run except the ReplaceFileW PowerShell run):
+
+| Writer | Reader | Writer failed | Reader problems |
+|---|---|---|---|
+| mfe | Go goroutine, tight, `os.Open` | 42/65 ACCESS_DENIED | 19 NOT_FOUND, 56 SHARING_VIOLATION of 16 683 reads |
+| mfe | Go process, tight, `os.Open` | 30/74 ACCESS_DENIED | 4 SHARING_VIOLATION |
+| mfe | Go process, tight, **FILE_SHARE_DELETE** | **28/73 ACCESS_DENIED** | none |
+| mfe | PS `Get-Content` tight / `OpenRead` tight / FileStream RW tight / FileStream RW+Delete tight | 5/105, 21/89, 22/91, 21/90 | none for RW+Delete; 14, 38, 18 IOException for the others |
+| mfe | Go hold 2 s (`os.Open` or share-delete), PS RW hold 2 s, PS RW+Delete hold 2 s, PS `OpenRead` hold 2 s | 48/67, 48/68, 47/70, 47/71, 44/71 | none |
+| mfe with 10 or 30 retries of 100 ms | Go hold 2 s | 89 and 94 failed attempts; a cycle succeeds only when the reader has let go | none |
+| mfe, no reader | - | 0/96 | - |
+| **posix** | Go tight / hold 2 s, **share-delete** | **0/78, 0/94** | **none, no NOT_FOUND** (9 943 reads) |
+| posix | PS FileStream RW+Delete hold 2 s | 0/94 | none |
+| posix | Go tight / hold 2 s, plain `os.Open` | 28/61, 44/60 SHARING_VIOLATION | 10 SHARING_VIOLATION |
+| posix | PS `Get-Content` tight (RW, no Delete) | 9/81 SHARING_VIOLATION | 2 IOException |
+| posix, no reader | - | 0/80 | - |
+| ReplaceFileW | Go tight share-delete | 0/64 | **155 NOT_FOUND + 562 SHARING_VIOLATION**: not atomic for readers |
+| ReplaceFileW | PS `Get-Content` tight | 4/71 | 310 IOException and 25 invalid/empty reads |
+| mfe, writer only, `\\wsl.localhost\Ubuntu-20.04\...` (9P) | - | 0/41 | - |
+| mfe on the 9P share with a tight Go reader / with a 2 s holder | - | 12/39, 24/35 ACCESS_DENIED | 13 SHARING_VIOLATION |
+| posix on the 9P share | share-delete Go reader | 17/17 `ERROR_INVALID_PARAMETER` (87) | none |
+| ReplaceFileW on the 9P share | share-delete Go reader | 18/18 `ERROR_NOT_SUPPORTED` (50) | none |
+
+**Conclusion.**
+1. **Go's `os.Open` does not allow the writer to rename over the file, and neither does opening with FILE_SHARE_DELETE if the writer uses Go's `os.Rename`.** `os.Rename` on Windows is `MoveFileEx(REPLACE_EXISTING)`; any open handle on the target makes it fail with `ACCESS_DENIED` (5) whatever the reader's share flags (rows "mfe + share-delete"). The IS 1.1 UNVERIFIED about `FILE_SHARE_DELETE` is answered: the flag alone is not enough.
+2. **What works: a rename with POSIX semantics** (`FileRenameInfoEx`, flags `REPLACE_IF_EXISTS|POSIX_SEMANTICS`, Windows 10 1607+; this machine is 22621) **together with readers that open with `FILE_SHARE_DELETE`.** 0 failures in 250 cycles against tight and 2 s-holding readers, and no reader ever saw a missing or partial file. A reader without FILE_SHARE_DELETE (Go `os.Open`, PowerShell `Get-Content`, `[IO.File]::OpenRead`) blocks even this writer with SHARING_VIOLATION (32).
+3. Temp file + rename never produced a partial or invalid read, with any writer implementation except ReplaceFileW (which opens a gap in which the file is missing: do not use it).
+4. `\\wsl.localhost` (9P): plain `os.Rename` works when nobody has the target open (0/41) and fails the same way as on NTFS when a reader has it open; the POSIX-semantics rename and ReplaceFileW are not supported there (errors 87 and 50). So the writer must fall back to `os.Rename` on those two errors, as the PowerShell code already does for the same reason.
+5. A reader holding the file for 2 s costs the writer every cycle that falls inside the hold (47/70). Retries of 10 x 100 ms (the PowerShell policy) rescue almost none of them against a 2 s holder. The status writer must therefore treat a failed replace as "skip this cycle" (the next one is 5 s later), never block, and count consecutive failures.
+
+**Rules for `internal/status` on Windows.**
+- Reader: open with `syscall.CreateFile(GENERIC_READ, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, OPEN_EXISTING)` and wrap with `os.NewFile` (as `spikes/sp6/open_windows.go`); read fully, close at once (never hold across a poll). On `SHARING_VIOLATION`/`NOT_FOUND` retry 5 x 80 ms as today (cheap insurance for the PowerShell producer, which still replaces with MoveFileEx). Strip a UTF-8 BOM. `camui`'s `os.ReadFile` must change to this open, otherwise it blocks the Go writer.
+- Writer: temp file in the same directory, write, `Sync`, close; then replace with `FileRenameInfoEx(REPLACE_IF_EXISTS|POSIX_SEMANTICS)` via `SetFileInformationByHandle` on a handle opened with `DELETE` access and full sharing (`spikes/sp6/rename_windows.go:renamePosix` is a working 40-line implementation, standard library only); on error 87 or 50 (9P, some network shares) or an API-not-available error fall back to `os.Rename`; on SHARING_VIOLATION/ACCESS_DENIED retry a few times quickly, then give up for this cycle and log at debug. On Linux and macOS plain `os.Rename` is atomic and readers need nothing.
+- During the strangler migration the PowerShell reader (already `FileShare.ReadWrite|Delete`) is compatible with the POSIX-semantics writer (0/94 failures against it), and the PowerShell writer (MoveFileEx) is compatible with the Go reader opened as above only while the Go reader does not hold the file (a polling reader at 1-5 Hz holds it for microseconds).
+
+**What it changes.** LLD 2.5: replace "readers open with share-delete where available and retry 5 x 80 ms as today" by the exact rules above; add "writer uses POSIX-semantics rename with MoveFileEx fallback" to `osx` (one Windows file, one portable `os.Rename` file). HLD decision 2 is settled as: share-delete readers plus POSIX-semantics rename, with skip-on-failure. The single-instance lock file is unaffected.
+
+**Confidence.** High for the failure/success pattern (each cell is a 7-12 s run of 60-100 cycles, one run per cell; the pattern is binary and consistent across ten cells). Untested: Windows versions older than 10 1607, a reader on another machine over SMB, antivirus filter drivers, FAT/exFAT volumes, `E:` (not written to), a long soak.
