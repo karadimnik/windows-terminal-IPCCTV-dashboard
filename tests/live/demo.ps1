@@ -22,9 +22,10 @@
     new path is needed; the demo itself never creates a firewall rule. camui (the page) stays on loopback.
 
     -Tls (implies -Lan) also serves the whole page over HTTPS on the LAN address, for a phone: camui gets an HTTPS listener
-    (-TlsPort, default 18443) with a fresh random token that is passed ONLY through the environment variable CAMUI_TLS_TOKEN
-    and printed once to this console, view-only, with a throwaway certificate authority in the demo's own temp folder (NOT
-    %LOCALAPPDATA%\IPCCTV\tls). It prints the https URL with ?token=, the CA file and SHA-256 fingerprint, short phone steps
+    (-TlsPort, default 18443) behind a login, view-only, with a throwaway certificate authority and a throwaway auth folder in
+    the demo's own temp folder (NOT %LOCALAPPDATA%\IPCCTV\tls or ...\camui\auth). It creates the user "demo" with a fresh random
+    strong password, handed to camui.exe -set-password on standard input (never on a command line), and prints the user name
+    and the password once to this console. It prints the https URL, the CA file and SHA-256 fingerprint, short phone steps
     and the exact ELEVATED firewall commands (Private profile, LocalSubnet); it never applies them. To keep those rules stable
     camui runs from a FIXED path, %LOCALAPPDATA%\IPCCTV\demo\camui.exe (-ProgramPath), which is left in place afterwards.
     A temp-path program has no allow rule, and Windows would prompt (a dismissed prompt can create a block rule), so the demo
@@ -118,7 +119,7 @@ try {
     }
 
 
-    $tlsToken = ''
+    $demoPassword = ''
     $fwTcp = "New-NetFirewallRule -DisplayName 'IPCCTV demo camui HTTPS (TCP $TlsPort)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort $TlsPort -Program '$ProgramPath' -Profile Private -RemoteAddress LocalSubnet"
     $fwUdp = "New-NetFirewallRule -DisplayName 'IPCCTV demo live media (UDP $mediaPort)' -Direction Inbound -Action Allow -Protocol UDP -LocalPort $mediaPort -Program '$mediaProgram' -Profile Private -RemoteAddress LocalSubnet"
     $fwRemove = "Remove-NetFirewallRule -DisplayName 'IPCCTV demo camui HTTPS (TCP $TlsPort)', 'IPCCTV demo live media (UDP $mediaPort)'"
@@ -165,8 +166,6 @@ try {
         # The fixed program path keeps the firewall rule stable; the exe copy holds no key and is left in place.
         [void](New-Item -ItemType Directory -Path (Split-Path -Parent $ProgramPath) -Force)
         Copy-Item -LiteralPath $exe -Destination $ProgramPath -Force
-        $tlsToken = (@(& $ProgramPath '-new-token') -join '').Trim()
-        if ($tlsToken -notmatch '^[0-9a-f]{64}$') { throw 'camui -new-token did not print a token.' }
         $tlsDir = Join-Path -Path $env:TEMP -ChildPath 'cam-tests\livedemo\tls'
         $tlsExtra = @('-tls-listen', ('{0}:{1}' -f $pick.Address, $TlsPort), '-tls-dir', $tlsDir)
     }
@@ -182,29 +181,35 @@ try {
         $caText = @(& $ProgramPath '-print-ca' '-tls-dir' $tlsDir)
         $caFile = ([regex]::Match(($caText -join "`n"), 'file:\s+(\S.*)')).Groups[1].Value.Trim()
         $caFp = ([regex]::Match(($caText -join "`n"), 'SHA-256:\s+([0-9A-F:]{95})')).Groups[1].Value
-        $env:CAMUI_TLS_TOKEN = $tlsToken
+        # The throwaway user. The password is random (24 characters from a 57-character alphabet, about 140 bits, from the system generator, without modulo bias) and goes to camui on standard input.
+        $authDir = Join-Path -Path $rig.Dir -ChildPath 'auth'
+        $alphabet = [char[]]'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789'
+        $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $demoPassword = -join (1..24 | ForEach-Object { $b = New-Object byte[] 1; do { $rng.GetBytes($b) } while ($b[0] -ge (256 - (256 % $alphabet.Count))); $alphabet[$b[0] % $alphabet.Count] })
+        $made = @($demoPassword | & $ProgramPath '-set-password' 'demo' '-auth-dir' $authDir 2>&1)
+        if (($made -join ' ') -notmatch 'created user demo') { throw ('could not create the demo user: ' + ($made -join ' ')) }
+        $tlsExtra += @('-auth-dir', $authDir)
     }
-    try {
-        $ui = Start-CamTestLiveCamui -Rig $rig -Port $Port -Name 'camui-livedemo' -ExtraArgs $tlsExtra -RunExe $(if ($Tls) { $ProgramPath } else { '' })
-    }
-    finally { Remove-Item Env:\CAMUI_TLS_TOKEN -ErrorAction SilentlyContinue }
+    $ui = Start-CamTestLiveCamui -Rig $rig -Port $Port -Name 'camui-livedemo' -ExtraArgs $tlsExtra -RunExe $(if ($Tls) { $ProgramPath } else { '' })
     if (-not $ui.Started) { throw ('camui did not start: ' + $ui.Reason) }
 
     Write-Host ''
     Write-Host ("  Live screen:  http://127.0.0.1:{0}/#live" -f $Port) -ForegroundColor Green
     Write-Host ("  One camera:   http://127.0.0.1:{0}/#live/Front%20Entrance" -f $Port)
-    Write-Host '  Token:        none (loopback only)'
+    Write-Host '  Sign-in:      none (loopback only)'
     if ($liveConfig.Count -and -not $Tls) { Write-Host '  Media:        loopback and the LAN address above. The page itself is still loopback only: other devices cannot open it yet.' }
     if ($Tls) {
         $up = $false
         for ($i = 0; $i -lt 40 -and -not $up; $i++) { $tcp = New-Object System.Net.Sockets.TcpClient; try { $tcp.Connect($pick.Address, $TlsPort); $up = $true } catch { Start-Sleep -Milliseconds 250 } finally { $tcp.Close() } }
         if (-not $up) { throw 'the HTTPS listener did not come up.' }
         Write-Host '  ---- HTTPS for a phone or another PC on this Wi-Fi (view-only, fake cameras) ----' -ForegroundColor Green
-        Write-Host ("  Open:         https://{0}:{1}/?token={2}#live" -f $pick.Address, $TlsPort, $tlsToken) -ForegroundColor Green
-        Write-Host '                (the token is shown once, here only; it is not in any command line or file)'
+        Write-Host ("  Open:         https://{0}:{1}/#live" -f $pick.Address, $TlsPort) -ForegroundColor Green
+        Write-Host '  User name:    demo' -ForegroundColor Green
+        Write-Host ("  Password:     {0}" -f $demoPassword) -ForegroundColor Green
+        Write-Host '                (shown once, here only; it is not in any command line or file, and the demo user is deleted with the demo)'
         Write-Host ("  CA file:      {0}  (this throwaway CA is deleted when the demo ends)" -f $caFile)
         Write-Host ("  Fingerprint:  {0}" -f $caFp)
-        Write-Host '  On the phone: 1) be on this PC''s Wi-Fi (a Private network). 2) Open the link; the first certificate warning is expected: continue.'
+        Write-Host '  On the phone: 1) be on this PC''s Wi-Fi (a Private network). 2) Open the link; the first certificate warning is expected: continue, then sign in.'
         Write-Host '                3) Settings tab > Connect a phone: compare the fingerprint, download the certificate, install it (iPhone: Settings > General > VPN & Device'
         Write-Host '                Management, then About > Certificate Trust Settings; Android: Settings > Security > Install a certificate > CA certificate), reopen the link.'
         Write-Host '  Firewall rules this needs (ELEVATED PowerShell; NOT applied by the demo):'
@@ -233,7 +238,6 @@ finally {
         if ($path -and (Test-Path -LiteralPath $path)) { try { Remove-CamTestTree -Path $path } catch { Write-Host "  could not remove $path" -ForegroundColor Yellow } }
     }
     $env:CAMUI_TEST_EXE = $savedExe
-    $env:CAMUI_TLS_TOKEN = $null
     if ($Tls -and -not $refused) {
         $left = @(Get-CimInstance Win32_Process -Filter "Name = 'camui.exe' or Name = 'mediamtx.exe' or Name = 'ffmpeg.exe'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*livedemo*' })
         Write-Host ("remaining: demo processes {0}; demo TLS folder (CA and keys) present: {1}; left in place on purpose: {2} (a copy of camui, no key)" -f $left.Count, $(if ($tlsDir) { Test-Path -LiteralPath $tlsDir } else { $false }), $ProgramPath)

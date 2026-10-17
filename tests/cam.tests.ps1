@@ -854,6 +854,8 @@ function Invoke-CamCheckUiLeak {
             }
         }
         catch { $footageNote = 'the footage index could not be read: ' + $_.Exception.Message }
+        # The sign-in answers and the first-run page (a fresh throwaway auth folder holds no user, so /setup is open) are scanned like everything else.
+        $extra += @('/api/auth/me', '/setup', '/setup.js')
 
         $result = Invoke-CamUiCredentialLeakScan -BaseUrl $ui.BaseUrl -ExtraPaths $extra
         $ok = $result.Ok
@@ -9522,7 +9524,8 @@ function Invoke-CamCheckLiveTls {
         # The LAN listener refuses to start without a user.
         $emptyAuth = Join-Path -Path $rig.Dir -ChildPath 'auth-empty'
         $refuseErr = Join-Path -Path $rig.Dir -ChildPath 'refuse.err'
-        $refuse = Start-Process -FilePath $allowed -ArgumentList @('-listen', '127.0.0.1:18790', '-tls-listen', ('{0}:{1}' -f $lan, $tlsPort), '-tls-dir', $tlsDir, '-auth-dir', $emptyAuth) -PassThru -WindowStyle Hidden -RedirectStandardError $refuseErr
+        $refuse = Start-Process -FilePath $allowed -ArgumentList @('-listen', '127.0.0.1:18790', '-tls-listen', ('{0}:{1}' -f $lan, $tlsPort), '-tls-dir', $tlsDir, '-auth-dir', $emptyAuth) -PassThru -WindowStyle Hidden -RedirectStandardError $refuseErr -RedirectStandardOutput (Join-Path -Path $rig.Dir -ChildPath 'refuse.out')
+        $null = $refuse.Handle
         if (-not $refuse.WaitForExit(15000)) { try { $refuse.Kill() } catch { }; & $fail 'camui with a TLS listener and no user did not refuse to start' }
         else {
             $refuseText = (@(Get-Content -LiteralPath $refuseErr -ErrorAction SilentlyContinue) -join ' ')
@@ -9779,7 +9782,7 @@ function Invoke-CamCheckLiveTls {
                     $until = {
                         param([string]$js, [int]$sec = 25)
                         $stop = [DateTime]::UtcNow.AddSeconds($sec)
-                        while ([DateTime]::UtcNow -lt $stop) { try { if (Invoke-CamTestCdpEval -Cdp $cdp -Expression $js) { return $true } } catch { }; Start-Sleep -Milliseconds 300 }
+                        while ([DateTime]::UtcNow -lt $stop) { try { if (Invoke-CamTestCdpEval -Cdp $cdp -Expression $js -Await) { return $true } } catch { }; Start-Sleep -Milliseconds 300 }
                         return $false
                     }
                     $submit = {
