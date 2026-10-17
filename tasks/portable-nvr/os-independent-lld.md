@@ -291,6 +291,24 @@ Gates for the Operator: after W0 (contract committed), after W3 (pruner proven),
 
 Open decision for the Operator: **D19** Should the Go system reproduce the documented intent where the PowerShell code differs (F1: `LastWindowClose` carried across a restart; V6: no immediate alert 110 for a late-enabled camera)? Recommendation: yes, with each difference listed in the release notes.
 
+## 11. Decisions taken from the spike results (2026-10-17)
+
+Source: `spikes/holocron-spikes-1.md` (SP1, SP1b, SP4, SP6, SP7). These amend the sections named in the left column.
+
+| Amends | Decision | Evidence |
+|---|---|---|
+| 2.3 `ffmpeg` | **Minimum ffmpeg 5.0**, checked at start and by `holocron doctor`; below that refuse with a clear message. The `-timeout` option (microseconds) exists only from 5.0; on 4.2.x the same flag turns the RTSP demuxer into a server and fails at once, and 4.x's `-stimeout` is rejected by 8.x | SP1 (V13) |
+| 2.3 `ffmpeg` | **Remove `TZ` from the ffmpeg child's environment on Windows** (the Windows build honours POSIX-style `TZ` but produces a wrong offset silently for IANA names); leave it inherited on Linux, where ffmpeg honours it | SP1 (V8) |
+| 2.3 `ffmpeg`, IR U2 | `-segment_atclocktime` cuts on multiples of N seconds counted from LOCAL midnight (for 7 s it is neither UTC nor epoch multiples); names and `%z` are identical on Windows and Linux; ffmpeg writes nothing to stdout in segment mode | SP1 (U2, U7) |
+| 2.3 direct input (todo [90]) | Relay-only stays the default. The direct-input fallback may use an **ffconcat list file** (`ffconcat version 1.0`, `file 'rtsp://...'`, `option rtsp_transport tcp`, `option timeout N`; `-f concat -safe 0 -protocol_whitelist file,rtsp,tcp,rtp,udp -i list`): the password is absent from the process command line on Windows and Linux. The list file is created owner-only and deleted after the child exits; the redactor stays on the stderr path because ffmpeg prints the URL in errors. Not working: `-/i` file, environment, `.netrc`, stdin | SP1b |
+| 2.2 `Scan` | **The open segment is ordered by mtime with name as the tie-break** (name order is wrong across a DST fall-back). `Scan` returns `Newest` (always protected by the pruner) and `Recent` (mtime within `SegmentSeconds + 60 s`, used only by the stall watchdog and the down alert). A future mtime counts as recent and raises a clock anomaly flag. NTFS directory size and mtime tracked `os.Stat` exactly, so there is no port of `Get-CamLiveFileLength` | SP4 |
+| 2.2 names | Extension and pattern matching is **case-insensitive on Windows, case-sensitive on Linux and macOS** (platform flag, tested both ways) | SP4 |
+| 2.5 `status` | **Reader:** `CreateFile` with `FILE_SHARE_READ|WRITE|DELETE`, read fully, close. **Writer:** temp file, flush, then a rename with POSIX semantics (`SetFileInformationByHandle`, `FileRenameInfoEx`, replace-if-exists and POSIX flags), falling back to `os.Rename` on errors 87 and 50 (the `\\wsl.localhost` 9P case); never `ReplaceFileW`. A failed replace skips the cycle and never blocks. The web app's own status read gets the same share-delete open, otherwise it blocks the Go writer | SP6 |
+| 6 item 3 differential harness | Confirmed workable with new files only: `Invoke-CamPrune -DryRun` over a sandbox tree, decisions captured from its return hashtable, log lines and a file-manifest diff. Commit the PowerShell-generated decision JSON as goldens so Linux CI needs no PowerShell. Expected differences recorded up front: creation time versus mtime for the open segment, and case folding on Linux | SP7 |
+| IR 1.4, U1 to U7, V8, V13 | Close U2, U7, V8, V13 as answered above; U1 (rationale of `+genpts+discardcorrupt`) stays unknown and the flags are kept byte for byte | SP1 |
+
+Incidents worth knowing (SP report): a throwaway MediaMTX was briefly bound to the PC's LAN address on a spike port, and its default MoQ listener on 8892/8893 (outside the allowed range) was up for about three minutes before it was killed by pid. Future briefs must require `moq: no`, `webrtc: no` and every other listener off in throwaway MediaMTX configs, bound to 127.0.0.1.
+
 ## 10. Definition of done for the OS-independent track
 
 0. Rules R1 and R2 hold: every action in the web app and in this list is a `holocron` subcommand, installing and uninstalling autostart included, and no second executable or script is needed; the action-coverage tests pass.
