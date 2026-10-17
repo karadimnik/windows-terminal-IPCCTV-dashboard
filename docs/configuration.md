@@ -41,7 +41,7 @@ Every key here is a tuning constant rather than a setting: the defaults are the 
 | `BackoffStartSeconds` / `BackoffMaxSeconds` * | `3` / `60` | Restart backoff for a failing child. |
 | `HealthyResetSeconds` * | `300` | How long a child must stay up before its backoff resets. |
 | `StallFactor` * | `2.5` | Multiplied by `SegmentSeconds` for the stall watchdog. |
-| `CameraDownAlertMinutes` * | `15` | How long a camera may make no file progress before it raises an alert (id 110), at least `SegmentSeconds + 2 x ArchiveScanSeconds + StatusIntervalSeconds + 30` seconds - 1055 s (17.6 min) with the defaults - because a healthy camera is a whole segment past its last progress at every boundary. A lower value is raised to that and logged once at start. |
+| `CameraDownAlertMinutes` * | `15` | How long a camera may make no file progress before it raises an alert (id 110), at least `SegmentSeconds + StatusIntervalSeconds + 30` seconds - 935 s (15.6 min) with the defaults - because a healthy camera is a whole segment past its last progress at every boundary, plus the keyframe wait and a status tick. A lower value is raised to that and logged once at start. |
 | `CameraDownRepeatHours` * | `12` | How long before the same camera alerts again while still down. |
 | `LogMaxBytes` * | `2 MB` | Log rotation threshold. |
 | `LogRepeatSuppressSeconds` * | `60` | Collapses a repeating log line. |

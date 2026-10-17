@@ -8,7 +8,7 @@ An unexpected stop alerts on three channels, and an orderly `cam.ps1 -Stop` rais
 | `101` | Warning | it is recording again |
 | `102` | Error | it stopped and the restart budget is spent, so it is staying down |
 | `103` | Warning | the NVR window was closed, so nothing is recording and nothing will restart it |
-| `110` | Warning | one camera has made no file progress for max(`CameraDownAlertMinutes`, one segment + two scan intervals + 35 s): 17.6 minutes with the defaults, whatever `CameraDownAlertMinutes` says below that. The floor is `SegmentSeconds + 2 x ArchiveScanSeconds + StatusIntervalSeconds + 30` seconds; a shorter limit would fire on a healthy camera at every segment boundary. The supervisor logs the effective value once at start when the floor raised it |
+| `110` | Warning | one camera has made no file progress for max(`CameraDownAlertMinutes`, one segment + one status tick + 30 s): 15.6 minutes (935 s) with the defaults, whatever `CameraDownAlertMinutes` says below that. The floor is `SegmentSeconds + StatusIntervalSeconds + 30` seconds; a shorter limit would fire on a healthy camera at segment boundaries, where it waits for the next segment's first keyframe and the next status tick. The supervisor logs the effective value once at start when the floor raised it |
 | `120` | Error | pruning is disabled: `RootPath` is unsafe or not the recorder's own archive, so the disk will fill |
 | `121` | Error | pruning is blocked: free space is below `ReserveGB` and nothing deletable is left, so the disk is filling. Once per episode; recording continues |
 | `122` | Error | the age rule's circuit breaker held a run that would have deleted more than `MaxAgePruneFraction` of the archive. Once per episode; the free-space rule still runs |

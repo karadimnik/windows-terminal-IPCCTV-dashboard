@@ -5307,10 +5307,11 @@ function Invoke-CamCheckDownAlert {
 
         A healthy camera is a full segment past its last progress marker when
         the boundary comes, plus the keyframe wait and a status tick, before the
-        next scan sees the new file. With CameraDownAlertMinutes equal to
+        next status tick's directory scan sees the new file. With CameraDownAlertMinutes equal to
         SegmentSeconds - the default - that window raised a false alert, so the
-        threshold has a floor: one segment + two scan intervals + the status
-        interval + 30 s. The expected values below are literals, not the formula.
+        threshold has a floor: one segment + the status interval + 30 s. The
+        archive scan interval plays no part (one row guards that). The expected
+        values below are literals, not the formula.
     #>
     param($Run)
 
@@ -5332,15 +5333,15 @@ function Invoke-CamCheckDownAlert {
     $older = @{ NewestClosedWrite = $t0.AddHours(-2); CurrentCreated = $t0.AddHours(-2) }
     $rows = @(
         @{ Label = 'defaults, stale scan at the boundary'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 901; Want = $false },
-        @{ Label = 'defaults, stale scan one minute late'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 960; Want = $false },
-        @{ Label = 'defaults, exactly the effective limit'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 1055; Want = $false },
-        @{ Label = 'defaults, one second past the limit'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 1056; Want = $true },
+        @{ Label = 'defaults, stale scan at the keyframe wait'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 930; Want = $false },
+        @{ Label = 'defaults, exactly the effective limit'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 935; Want = $false },
+        @{ Label = 'defaults, one second past the limit'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 936; Want = $true },
         @{ Label = 'defaults, camera dark for 20 minutes'; Config = $defaults; Scan = $fresh; Started = $t0.AddHours(-3); After = 1200; Want = $true },
         @{ Label = 'no progress ever, supervisor start is the floor'; Config = $defaults; Scan = $null; Started = $t0; After = 901; Want = $false },
-        @{ Label = 'no progress ever, past the limit'; Config = $defaults; Scan = $null; Started = $t0; After = 1056; Want = $true },
-        @{ Label = 'empty directory scan, past the limit'; Config = $defaults; Scan = @{ NewestClosedWrite = $null; CurrentCreated = $null }; Started = $t0; After = 1056; Want = $true },
+        @{ Label = 'no progress ever, past the limit'; Config = $defaults; Scan = $null; Started = $t0; After = 936; Want = $true },
+        @{ Label = 'empty directory scan, past the limit'; Config = $defaults; Scan = @{ NewestClosedWrite = $null; CurrentCreated = $null }; Started = $t0; After = 936; Want = $true },
         @{ Label = 'progress older than the supervisor start'; Config = $defaults; Scan = $older; Started = $t0; After = 901; Want = $false },
-        @{ Label = 'progress older than the supervisor start, past limit'; Config = $defaults; Scan = $older; Started = $t0; After = 1056; Want = $true })
+        @{ Label = 'progress older than the supervisor start, past limit'; Config = $defaults; Scan = $older; Started = $t0; After = 936; Want = $true })
     foreach ($row in $rows) {
         $verdict = Get-CamTestDownVerdict -Config $row.Config -Scan $row.Scan -Started $row.Started -Now $t0.AddSeconds($row.After)
         $good = ($verdict.Alert -eq $row.Want)
@@ -5359,10 +5360,10 @@ function Invoke-CamCheckDownAlert {
 
     # The documented effective limit: literals, in seconds.
     $table = @(
-        @{ Seg = 900; Min = 5; Scan = 60; Status = 5; Want = 1055 }, @{ Seg = 900; Min = 15; Scan = 60; Status = 5; Want = 1055 }, @{ Seg = 900; Min = 60; Scan = 60; Status = 5; Want = 3600 },
-        @{ Seg = 1800; Min = 5; Scan = 60; Status = 5; Want = 1955 }, @{ Seg = 1800; Min = 15; Scan = 60; Status = 5; Want = 1955 }, @{ Seg = 1800; Min = 60; Scan = 60; Status = 5; Want = 3600 },
+        @{ Seg = 900; Min = 5; Scan = 60; Status = 5; Want = 935 }, @{ Seg = 900; Min = 15; Scan = 60; Status = 5; Want = 935 }, @{ Seg = 900; Min = 60; Scan = 60; Status = 5; Want = 3600 },
+        @{ Seg = 1800; Min = 5; Scan = 60; Status = 5; Want = 1835 }, @{ Seg = 1800; Min = 15; Scan = 60; Status = 5; Want = 1835 }, @{ Seg = 1800; Min = 60; Scan = 60; Status = 5; Want = 3600 },
         @{ Seg = 60; Min = 5; Scan = 60; Status = 5; Want = 300 }, @{ Seg = 60; Min = 15; Scan = 60; Status = 5; Want = 900 }, @{ Seg = 60; Min = 60; Scan = 60; Status = 5; Want = 3600 },
-        @{ Seg = 900; Min = 15; Scan = 300; Status = 5; Want = 1535 }, @{ Seg = 900; Min = 15; Scan = 60; Status = 30; Want = 1080 })
+        @{ Seg = 900; Min = 15; Scan = 300; Status = 5; Want = 935 }, @{ Seg = 900; Min = 15; Scan = 5; Status = 5; Want = 935 }, @{ Seg = 900; Min = 15; Scan = 60; Status = 30; Want = 960 })
     foreach ($case in $table) {
         $config = Get-CamConfigDefault
         $config.SegmentSeconds = $case.Seg; $config.CameraDownAlertMinutes = $case.Min; $config.ArchiveScanSeconds = $case.Scan; $config.StatusIntervalSeconds = $case.Status
@@ -5376,7 +5377,7 @@ function Invoke-CamCheckDownAlert {
     }
 
     Add-CamTestResult -Run $Run -Check 'downalert' -Status $(if ($ok) { 'PASS' } else { 'FAIL' }) -Evidence $evidence `
-        -Message ("alert 110 waits for max(CameraDownAlertMinutes, segment + 2 x scan + status + 30 s) without progress: {0} rows, {1} configurations, a stale scan at a segment boundary never alerts" -f $rows.Count, $table.Count)
+        -Message ("alert 110 waits for max(CameraDownAlertMinutes, segment + status + 30 s) without progress: {0} rows, {1} configurations, a stale scan at a segment boundary never alerts" -f $rows.Count, $table.Count)
 }
 
 
@@ -5384,8 +5385,7 @@ function Invoke-CamCheckDownAlertRun {
     <#
         [92] alert 110 against the real supervisor and a synthetic camera.
 
-        SegmentSeconds 20, so the effective limit is 20 + 2 x 3 + 1 + 30 =
-        57 s, with CameraDownAlertMinutes set to the 20 s segment so that the
+        SegmentSeconds 20, so the effective limit is 20 + 1 + 30 = 51 s, with CameraDownAlertMinutes set to the 20 s segment so that the
         pre-fix rule alerts whenever a status tick lands in the wait for the
         next segment. Segments cut at the first keyframe after a 20 s clock
         boundary (-segment_atclocktime), and the camera sends one every 11 s,
@@ -5405,7 +5405,7 @@ function Invoke-CamCheckDownAlertRun {
     $port = 18559
     $name = 'synth1'
     $segment = 20
-    $limit = 57
+    $limit = 51
     $sandbox = New-CamTestSynthSandbox -Name 'downalertrun' -CameraName $name -Port $port `
         -Config @{ SegmentSeconds = $segment; StatusIntervalSeconds = 1; ArchiveScanSeconds = 3; ReconcileSeconds = 2; BackoffStartSeconds = 1; CameraDownAlertMinutes = ($segment / 60.0) }
     $camDir = Join-Path -Path $sandbox.Root -ChildPath $name
