@@ -16,6 +16,7 @@ param([switch]$Verify)
 $ErrorActionPreference = 'Stop'
 . (Join-Path -Path $PSScriptRoot -ChildPath 'holocron-lib.ps1')
 . (Join-Path -Path $PSScriptRoot -ChildPath 'status-docs.ps1')
+foreach ($group in @('golden-ffmpeg.ps1')) { . (Join-Path -Path $PSScriptRoot -ChildPath $group) }
 
 Assert-HolocronEnvironment
 
@@ -38,6 +39,9 @@ try {
     if ($observed.F1BeforeHadLastWindowClose -ne $true -or $observed.F1AfterHasLastWindowClose -ne $false) { throw 'F1 is no longer observed: update KNOWN-DIFFERENCES.md and the schema tests' }
     if ($observed.WindowClosedRejectedByWriter -ne $true) { throw 'the writer now accepts window-closed: update KNOWN-DIFFERENCES.md' }
     New-HolocronNegativeStatusDocuments -SourceDir $statusDir -OutDir (Join-Path $statusDir 'negative')
+
+    # ---- group: ffmpeg argument vectors
+    New-HolocronFfmpegGoldens -OutDir $target
 
     # ---- compare, in -Verify mode
     if ($Verify) {
