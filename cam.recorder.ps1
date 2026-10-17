@@ -1815,6 +1815,29 @@ function Read-CamChildOutput {
 }
 
 
+function Get-CamDownAlertSeconds {
+    <#
+        How long a camera may make no file progress before alert 110:
+        max(CameraDownAlertMinutes, SegmentSeconds + 2 x ArchiveScanSeconds +
+        StatusIntervalSeconds + 30) seconds. With the defaults that is 1055 s.
+
+        A healthy camera is a whole segment past its newest progress marker at
+        every boundary, and then waits for the keyframe the next segment cuts
+        at (a camera's GOP) and for the status tick whose directory scan sees
+        the new file. A limit at or below the segment length therefore fires on
+        a healthy camera - the default CameraDownAlertMinutes of 15 equals the
+        default 900 s segment. The scan intervals are extra slack so a slower
+        scan cadence cannot reopen the window; 30 s covers the keyframe wait.
+        The configured value only ever raises the limit, never lowers it.
+    #>
+    param([Parameter(Mandatory = $true)]$Config)
+
+    $configured = [double]$Config.CameraDownAlertMinutes * 60
+    $floor = [double]$Config.SegmentSeconds + 2 * [double]$Config.ArchiveScanSeconds + [double]$Config.StatusIntervalSeconds + 30
+    return [math]::Max($configured, $floor)
+}
+
+
 function Measure-CamCameraDown {
     <#
         How long a camera has written nothing, for alert 110: seconds from its
@@ -3445,7 +3468,12 @@ function Invoke-CamSupervisor {
     try { $staggerMs = [int]$Config.StartStaggerMs } catch { }
     if ($staggerMs -lt 0) { $staggerMs = 0 }
     $downAlertSeconds = 900
-    try { $downAlertSeconds = [double]$Config.CameraDownAlertMinutes * 60 } catch { }
+    $downConfiguredSeconds = 900
+    try {
+        $downConfiguredSeconds = [double]$Config.CameraDownAlertMinutes * 60
+        $downAlertSeconds = Get-CamDownAlertSeconds -Config $Config
+    }
+    catch { }
     $downRepeatHours = 12
     try { $downRepeatHours = [double]$Config.CameraDownRepeatHours } catch { }
 
@@ -3528,6 +3556,11 @@ function Invoke-CamSupervisor {
             $PID, $Config.Container, $Config.SegmentSeconds, $Config.RootPath, $Config.ReconcileSeconds, $reserveText) -MaxBytes $maxBytes
     Write-CamHost -Message ("pid {0} | root {1} | reconcile {2}s | reserve {3} GB | stop with Ctrl+C or -Stop" -f `
             $PID, $Config.RootPath, $Config.ReconcileSeconds, $reserveText)
+    if ($downAlertSeconds -gt $downConfiguredSeconds) {
+        Write-CamLog -Path $supervisorLog -Message ("camera-down alert 110: configured {0} min, effective {1} min ({2} s) - a healthy camera is up to one segment ({3} s) plus the scan intervals, status interval and keyframe wait past its newest file, so a lower limit would alert on it" -f `
+                (Format-CamNumber -Value ($downConfiguredSeconds / 60) -Format '0.#'), (Format-CamNumber -Value ($downAlertSeconds / 60) -Format '0.0'), `
+                (Format-CamNumber -Value $downAlertSeconds -Format '0'), $Config.SegmentSeconds) -MaxBytes $maxBytes
+    }
 
     try {
         while ($true) {
