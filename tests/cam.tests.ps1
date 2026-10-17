@@ -9893,6 +9893,27 @@ function Invoke-CamCheckLiveTls {
                     & $note ("  after restarting camui: the same browser session still opens the app without a new login: {0}" -f $stays)
                     if (-not $stays) { & $fail "$browser : the session did not survive a camui restart" }
 
+                    # 7b. the session ends behind the page's back (here: signed out from another client): the open page notices on its next poll and goes to /login, then returns here after a new sign-in
+                    $gone = & $tls @{ Method = 'POST'; Path = '/api/auth/logout'; Headers = @{ Cookie = "camui_session=$($cookie.value)"; 'Content-Type' = 'application/json'; Origin = "https://$hostPort" }; Body = '{}' }
+                    $bounced = & $until 'location.pathname === "/login"' 20
+                    $nextKept = & $ev 'decodeURIComponent(location.search)'
+                    & $note ("  session ended elsewhere (HTTP {0}): the open page goes to /login by itself: {1}; address {2}" -f $gone.Status, $bounced, $nextKept)
+                    if ($gone.Status -ne 200 -or -not $bounced -or $nextKept -notmatch 'next=/') { & $fail "$browser : an ended session did not send the open page to /login" }
+                    else {
+                        $again2 = $false
+                        for ($k = 0; $k -lt 6 -and -not $again2; $k++) {
+                            & $submit $browser $password
+                            Start-Sleep -Milliseconds 1500
+                            $where2 = try { [string](& $ev 'location.pathname') } catch { '' }
+                            $again2 = ($where2 -eq '/')
+                            if (-not $again2) { Start-Sleep -Seconds 4 }
+                        }
+                        if (-not $again2) { & $fail "$browser : could not sign in again after the session ended" }
+                        $stays2 = & $until '!!document.getElementById("signOut") && !document.getElementById("signOut").classList.contains("hide")' 20
+                        $cookie = @((Invoke-CamTestCdp -Cdp $cdp -Method 'Network.getCookies' -Params @{ urls = @("https://$hostPort/") }).cookies | Where-Object { $_.name -eq 'camui_session' })[0]
+                        & $note ("  signed in again: back in the app with Sign out visible: {0}" -f $stays2)
+                    }
+
                     # 8. Sign out returns to /login and the session is over
                     [void](& $ev '(async () => { document.getElementById("signOut").click(); return true; })()')
                     $out = & $until 'location.pathname === "/login"' 15
