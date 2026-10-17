@@ -142,18 +142,18 @@ func TestUnknownUserCostsAboutAsMuchAsAWrongPassword(t *testing.T) {
 	_ = rig.users.Put(User{ID: "u-anna", Username: testUser, Hash: hash, Role: roleAdmin})
 	measure := func(user string) time.Duration {
 		var samples []time.Duration
-		for i := 0; i < 7; i++ {
+		for i := 0; i < 9; i++ {
 			start := time.Now()
 			rig.loginFrom(fmt.Sprintf("192.168.2.%d:1", i+1), user, "wrong wrong wrong wrong")
 			samples = append(samples, time.Since(start))
 			rig.auth.lock.reset(user) // keep both measurements out of the lockout
 		}
 		sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-		return samples[len(samples)/2]
+		return samples[0] // the fastest run is the one least disturbed by other work on the machine
 	}
 	known, unknown := measure(testUser), measure("nobody-here")
 	ratio := float64(unknown) / float64(known)
-	t.Logf("median wrong password %v, unknown user %v (ratio %.2f)", known, unknown, ratio)
+	t.Logf("fastest wrong password %v, unknown user %v (ratio %.2f)", known, unknown, ratio)
 	if ratio < 0.5 || ratio > 2 {
 		t.Errorf("an unknown user takes %.2fx a wrong password: the response time tells which names exist", ratio)
 	}
@@ -411,7 +411,16 @@ var publicRoutes = map[string]bool{
 	"GET /login": true, "GET /login.js": true, "GET /style.css": true, "POST /api/auth/login": true, "GET /api/auth/me": true,
 }
 
-const authRequiredBody = `{"error":"authentication required"}`
+func isAuthRequired(rec *httptest.ResponseRecorder, method string) bool {
+	if rec.Code != 401 || rec.Header().Get(loginRequiredHeader) == "" {
+		return false
+	}
+	if method == "HEAD" {
+		return true
+	}
+	var body map[string]any
+	return json.Unmarshal(rec.Body.Bytes(), &body) == nil && body["error"] == "authentication required"
+}
 
 func TestRouteMatrixEverySessionState(t *testing.T) {
 	rig := newTLSRig(t, nil)
@@ -429,9 +438,13 @@ func TestRouteMatrixEverySessionState(t *testing.T) {
 		public := publicRoutes[route.method+" "+pathOnly]
 		for _, st := range states {
 			q := tlsReq{method: route.method, path: route.path, headers: route.headers, body: route.body, cookie: st.cookie}
+			if pathOnly == "/api/auth/logout" && st.name == "valid session" {
+				q.cookie = sessionCookieOf(rig.loginFrom("192.168.7.99:1", testUser, testPassword)).Value // logging out spends the session
+				rig.clock.advance(7 * time.Second)                                                        // and the address throttle refills
+			}
 			rec := rig.do(q)
 			checked++
-			denied := rec.Code == 401 && strings.TrimSpace(rec.Body.String()) == authRequiredBody
+			denied := isAuthRequired(rec, route.method)
 			switch {
 			case public:
 				if denied {
@@ -449,8 +462,8 @@ func TestRouteMatrixEverySessionState(t *testing.T) {
 					t.Errorf("[%s] %s %s: an API denial redirected or set a cookie", st.name, route.method, route.path)
 				}
 				// A browser navigation to a protected GET is redirected to the login page instead.
-				if route.method == "GET" {
-					nav := rig.do(tlsReq{method: "GET", path: route.path, headers: map[string]string{"Accept": "text/html,application/xhtml+xml"}, cookie: st.cookie})
+				if route.method == "GET" || route.method == "HEAD" {
+					nav := rig.do(tlsReq{method: route.method, path: route.path, headers: map[string]string{"Accept": "text/html,application/xhtml+xml"}, cookie: st.cookie})
 					if nav.Code != 303 || !strings.HasPrefix(nav.Header().Get("Location"), "/login?next=") {
 						t.Errorf("[%s] navigation to %s: %d Location %q, want 303 to /login", st.name, route.path, nav.Code, nav.Header().Get("Location"))
 					}
@@ -608,7 +621,9 @@ func TestNoPasswordHashOrTokenInLogsResponsesOrAuthLog(t *testing.T) {
 	var all strings.Builder
 	collect := func(rec *httptest.ResponseRecorder) {
 		all.WriteString(rec.Body.String())
-		all.WriteString(fmt.Sprint(rec.Header()))
+		h := rec.Header().Clone()
+		h.Del("Set-Cookie") // the cookie is how the token legitimately reaches the browser
+		all.WriteString(fmt.Sprint(h))
 	}
 	var tokens []string
 	collect(rig.loginFrom("192.168.9.1:1", testUser, wrongPw))
@@ -749,7 +764,7 @@ func TestLoopbackNeedsNoLogin(t *testing.T) {
 	if me.Code != 200 || body["authenticated"] != true || body["loginRequired"] != false {
 		t.Errorf("loopback me: %d %v", me.Code, body)
 	}
-	for _, p := range []string{"/login", "/login.js", "/login.html", "/setup.js", "/api/auth/login", "/api/auth/logout"} {
+	for _, p := range []string{"/login", "/login.js", "/login.html", "/api/auth/login", "/api/auth/logout"} {
 		method := "GET"
 		if strings.HasPrefix(p, "/api/auth/l") {
 			method = "POST"

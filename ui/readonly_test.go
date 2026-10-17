@@ -79,6 +79,9 @@ func TestReadOnlyRouteMethodSessionMatrix(t *testing.T) {
 			}
 			q := base
 			q.cookie = valid
+			if pathOnly == "/api/auth/logout" {
+				q.cookie = rig.login(t) // logging out spends the session
+			}
 			rec := rig.do(q)
 			refused := rec.Code == http.StatusForbidden && isReadOnlyRefusal(rec.Body.String())
 			switch {
