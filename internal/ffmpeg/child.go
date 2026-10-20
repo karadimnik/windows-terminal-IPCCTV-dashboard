@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -57,9 +58,10 @@ type ExitInfo struct {
 	Err       error         // a failure of waiting (not a non-zero exit)
 }
 
-// Message is the LastError text of the PowerShell product: "ffmpeg exited with code N after Ns".
+// Message is the LastError text of the PowerShell product: "ffmpeg exited with code N after Ns",
+// N rounded like PowerShell's [int] cast (half to even).
 func (e ExitInfo) Message() string {
-	return fmt.Sprintf("ffmpeg exited with code %d after %ds", e.Code, int(e.RanFor.Seconds()))
+	return fmt.Sprintf("ffmpeg exited with code %d after %ds", e.Code, int64(math.RoundToEven(e.RanFor.Seconds())))
 }
 
 // Child is one running ffmpeg. All methods are safe for concurrent use.

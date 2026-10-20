@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -85,7 +86,7 @@ func TestRealProcessExitCodeAndRedaction(t *testing.T) {
 	if !strings.Contains(sink.String(), "rtsp://***:***@192.0.2.11/stream1") {
 		t.Errorf("log lacks the redacted line: %s", sink.String())
 	}
-	if want := fmt.Sprintf("ffmpeg exited with code 7 after %ds", int(info.RanFor.Seconds())); info.Message() != want {
+	if want := fmt.Sprintf("ffmpeg exited with code 7 after %ds", int64(math.RoundToEven(info.RanFor.Seconds()))); info.Message() != want {
 		t.Errorf("message %q want %q", info.Message(), want)
 	}
 }
@@ -272,7 +273,7 @@ func TestFakeStarterLinesSplitRedactAndTime(t *testing.T) {
 	if info.Code != 3 || info.RanFor != 12*time.Second+900*time.Millisecond {
 		t.Fatalf("%+v", info)
 	}
-	if info.Message() != "ffmpeg exited with code 3 after 12s" {
+	if info.Message() != "ffmpeg exited with code 3 after 13s" { // 12.9 s rounds like [int]
 		t.Fatal(info.Message())
 	}
 }
@@ -310,5 +311,20 @@ func TestExitCodeSignedLikeDotNet(t *testing.T) {
 	}
 	if info := c.Wait(); info.Code != want {
 		t.Fatalf("code %d want %d", info.Code, want)
+	}
+}
+
+func TestExitMessageRoundsHalfToEven(t *testing.T) {
+	for _, c := range []struct {
+		ran  time.Duration
+		want string
+	}{
+		{2500 * time.Millisecond, "after 2s"}, {3500 * time.Millisecond, "after 4s"}, {12400 * time.Millisecond, "after 12s"},
+		{12900 * time.Millisecond, "after 13s"}, {0, "after 0s"}, {499 * time.Millisecond, "after 0s"},
+	} {
+		got := ExitInfo{Code: 1, RanFor: c.ran}.Message()
+		if want := "ffmpeg exited with code 1 " + c.want; got != want {
+			t.Errorf("%v: %q want %q", c.ran, got, want)
+		}
 	}
 }

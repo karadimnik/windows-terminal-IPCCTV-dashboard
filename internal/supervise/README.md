@@ -1,4 +1,115 @@
-# internal/supervise (W7a: the child lifecycle manager)
+# internal/supervise
+
+Two layers: the **Manager** (W7a, below the supervisor section), a deterministic per-camera state machine, and the
+**Supervisor** (W7b), the goroutines that drive it, run the relay and live-view MediaMTX, write `status.json`,
+schedule the pruner and stop in order. Port of `cam.recorder.ps1 -Run` (R:3708-4197) with the relay and live ticks,
+`Write-CamStatusFile` and the teardown.
+
+## Supervisor (W7b)
+
+```go
+func NewSupervisor(SupervisorDeps) *Supervisor
+func (*Supervisor) Run(ctx) (StopReport, error) // returns after the ordered stop; ctx cancel = interrupted
+func (*Supervisor) Stop(kind string) StopReport // requested | interrupted | unexpected; waits for the stop
+func (*Supervisor) Done() <-chan struct{}
+type StopReport struct{ Kind, Reason string; Survivors []int; Final bool }
+func ExitCode(err error) int                    // 0 clean, 20 ErrAnotherSupervisor, 21 *ConfigFault, 1 else (ErrUnexpectedStop)
+type AnotherSupervisorError struct{ Owner string } // errors.Is(err, ErrAnotherSupervisor); the message names the owner
+type ConfigFault struct{ Err error }
+
+type SupervisorDeps struct {                    // injected; nil fields get the production default
+    Source ConfigSource; Lock InstanceLock      // required
+    Status *status.Writer; StatusPath string; ReadPrevious func() (*status.Document, error); Processes status.ProcessInspector
+    Clock clock.Clock; Platform osx.Platform; Starter ffmpeg.Starter; Scope ProcessScope
+    Scanner RootScanner; Pruner Pruner; Alerts Alerts
+    Credentials relay.CredentialSource; APILogin, LiveLogin func() (relay.Login, error); NewRelayAPI func(config.Config, relay.Login) RelayAPI
+    Logs LogSource; ChildLog func(component, path string) *slog.Logger; Redactor *logx.Redactor; Redactors []Registrar; Events *EventRing
+    Pid int64; Location *time.Location
+}
+type ConfigSource interface{ Config() (config.Config, error); Cameras() ([]config.Camera, error) } // FileSource{ConfigPath, CamerasPath, Platform}
+type RelayAPI interface{ Ready(ctx) (relay.ReadySet, error); WaitStarted(ctx, relay.ReadinessPolicy, <-chan struct{}) (relay.ReadySet, bool) } // *relay.API
+type RootScanner interface{ Scanner; ScanRoot(root string, now time.Time) (ArchiveScan, error) } // ArchiveScanner
+type Pruner interface{ Claim(now) (archive.ClaimResult, error); Run(now, *prune.State) (prune.Result, error) } // ArchivePruner
+type InstanceLock interface{ Acquire() (release func(), owner string, err error) } // MemoryLock until the OS lock (W8)
+type ProcessScope interface{ Open(ffmpeg.Starter) (ffmpeg.Starter, error); Close() error } // NoScope until W8
+type EventRing  // logx.Sink: wire it into the process logger; NewEventRing(); Newest(n) []status.Event
+func FileChildLogs(maxBytes int64, red *logx.Redactor) func(component, path string) *slog.Logger
+```
+
+### Goroutines and channels
+
+```
+ Run (caller)            supervise: starts everything, waits for ONE of: ctx.Done (interrupted), reqCh (Stop, stop.request:
+   |                     requested), faultCh (a recovered panic anywhere: unexpected); then teardown
+   |
+   +-- heartbeat ------- status.Heartbeater on clockTicker: every StatusIntervalSeconds document() -> status.Writer
+   |                     document() reads ONLY state published under s.mu (+ DiskFree, Events ring): never waits on work
+   |
+   +-- loop (owns the Manager) every 1 s: stop.request? -> reqCh
+   |      |  reconcile every ReconcileSeconds (cameras.json; config change noticed), relay Ready ONCE -> LoginWatch
+   |      |  (alert 130) -> RelayView, status tick: Refresh + Down (alert 110), archive scan every ArchiveScanSeconds,
+   |      |  Plan -> Start / Kill, publish rows
+   |      |<-- startCh <-- start goroutine per Start: sleep Delay (stagger), ffmpeg.Start via the scope's Starter
+   |      |<-- exitCh  <-- waiter goroutine per child: Child.Wait (cleanup: input list, RemoveEmptySegment)
+   |
+   +-- relay mtxChild --- wait for the first camera list, render+write config, SourceEnv, start, WaitStarted
+   |                      (blocks only itself), watch: exit -> backoff 3..60 s (reset after 300 s); stale login -> rewrite + restart
+   +-- live mtxChild ---- only while the relay process is alive; same restart policy; Live section only when enabled
+   +-- pruner ----------- Claim at start, Run at start and every PruneIntervalSeconds; alerts 120/121/122 -> Alerts
+
+ teardown: stopping=true, close(stopCh), loop ends -> Manager.Shutdown -> kill cameras (hard), wait <= 10 s
+           -> kill live, wait -> kill relay, wait (all within StopTimeoutSeconds) -> survivors = children not reaped
+           -> heartbeat stops -> final document (stopped, StopKind, LastUnexpectedStop for unexpected) -> remove
+           stop.request -> Run releases the lock and closes the scope
+```
+
+### Rules -> source -> tests (supervisor)
+
+| Rule | Source | Test |
+|---|---|---|
+| Six cameras on the relay, 300 ms stagger, after the relay; held at a cold start while the relay starts | R:3909-4045 | `TestSupervisorStartsSixWithStagger` |
+| Exit backoff 3, 6, 12, 24 s visible in the rows (count, LastError, NextStartAt) | R:3941-3961 | `TestSupervisorBackoffVisibleInRows` |
+| Stall kill after SegmentSeconds x StallFactor, counted; a writing child never killed | R:3981-4010 | `TestSupervisorStalledChildKilled` |
+| Hold 15 s, direct through the list file (no password in argv), move to the relay uncounted | R:3963-4036, SP1b | `TestSupervisorDirectThenRelay` |
+| Alert 110 once per episode, recovery line, second episode | R:4074-4099 | `TestSupervisorDownAlertEpisode` |
+| Heartbeat independent of a 20 s relay start (readiness wait or process start) | IS 1.1 | `TestSupervisorHeartbeatNotBlockedByRelayStart` |
+| Pruner at start and every PruneIntervalSeconds; alerts from the result | R:4117-4121 | `TestSupervisorPrunerSchedule` |
+| Refused root: no claim, nothing deleted, 120 once; clean root claimed and pruned; outside the sandbox refused | R:3786-3801, IR 5.2 | `TestSupervisorPruner*` |
+| Alert 130 once per episode; unavailable does not end it; denied stays on the relay | R:2055-2085 | `TestSupervisorLoginAlertOncePerEpisode` |
+| stop.request: requested, removed; a leftover one cleared at start | R:3761-3764, R:3838-3843 | `TestSupervisorStopRequestFile`, `TestSupervisorClearsLeftoverStopRequest` |
+| Ordered stop cameras, live, relay; final document; nothing left; lock released | R:4133-4191, G6 | `TestSupervisorOrderedStop` |
+| Survivor reported (pid, DID NOT STOP line), the rest still stopped | G7 | `TestSupervisorReportsSurvivor` |
+| Panic anywhere: unexpected + LastUnexpectedStop{DetectedBy: supervisor}, ErrUnexpectedStop | R:4126-4154, G6 | `TestSupervisorPanicIsUnexpected` |
+| Exit 20 (lock or live heartbeat, owner named), 21, lock released on every path | G8, IS 1.5 | `TestSupervisorLockPaths` |
+| D19: LastUnexpectedStop (At byte for byte) and LastWindowClose carried across runs | IS 1.6 F1 | `TestSupervisorCarryForwardAcrossRuns` |
+| Key sets equal the golden PowerShell documents (live off = master's; live on; stopped; unexpected) | IS 1.2, `livecfg` | `TestSupervisorLiveOffKeySetEqualsMaster`, `TestSupervisorOrderedStop`, `TestSupervisorPanicIsUnexpected` |
+| Events: own INFO+ records, newest first, StatusEventCount, log stamp, redacted; whole document redacted | IS 1.3, 1.1 | `TestEventRingParsesRecords`, `TestSupervisorEventsAndRedaction` |
+| Every document built and the file on disk validate against `status.schema.json` | W4 | every scenario (`validateAll`) |
+| Real ffmpeg + throwaway MediaMTX: record, drop, restart with backoff, recover, ordered stop | brief | `TestSupervisorRealIntegration` (`HOLOCRON_IT=1`) |
+
+Negative controls (code mutations, each made and reverted): the relay start holding `s.mu` (heartbeat sharing the
+start's wait) gives 1 beat in 19 s instead of >= 4; relay stopped before live; no carry-forward; survivors not
+collected; no cold-start hold (10 starts, cameras went direct first) - each fails its test.
+
+The tests run the real goroutines on a fake clock; `settle` steps the clock only when every goroutine of the test binary
+is blocked (goroutine dump), so a woken goroutine acts at the virtual time it was woken.
+
+### Decisions (supervisor)
+
+- The relay config is rendered from `cameras.json` and written (temp + rename, only when it changed) at every relay
+  start, like the live config in PowerShell; PowerShell rewrote the relay file only when its login block was stale.
+  While running, a config whose login block no longer matches is rewritten and the relay restarted (not counted).
+- The ready set is fetched once per 1 s tick (PowerShell: on a status tick or when a start is due) and shared.
+- At a cold start the cameras are held (as if the relay were young) until the relay's first start attempt ends.
+- `holocron.config.json` is re-read every ReconcileSeconds only to log a change once; the running values stay (PowerShell
+  reads it once). A `cameras.json` that cannot be read keeps the current set (any error, including a wrong type).
+- Exit codes follow the brief: an unexpected stop is 1 (`ErrUnexpectedStop`), 21 is a configuration fault (PowerShell
+  used 21 for "the loop threw").
+- The final rows keep LastPid and the counters (PowerShell keeps the entries); NextStartAt is null after the stop.
+- Not done here: the ffmpeg version check (it spawns a process outside the starter), `cli` Actions for start and stop
+  (W9, with the control API), the OS lock and process scope (W8). `relay.ExitMessage` still truncates the seconds.
+
+# Manager (W7a: the child lifecycle manager)
 
 A deterministic, clock-injected state machine that decides, call by call, when each recording camera's ffmpeg is
 started, killed or left alone, and produces the `Cameras[]` rows and alert 110. It starts no process, runs no loop and
@@ -87,4 +198,4 @@ hold, stagger, repeat, blind gap, 300 s reset, [int] rounding, denied) each fail
   enumerates the folder).
 - **Restarts** are a ring (last hour, at most 4096); PowerShell keeps every stamp for the process life.
 - **Reconcile stops** are handed out as Kill and the replacing entry of the same folder waits for the old child to exit.
-- `LastError` rounds the run time like PowerShell's `[int]` (half to even); `ffmpeg.ExitInfo.Message` truncates.
+- `LastError` rounds the run time like PowerShell's `[int]` (half to even), as `ffmpeg.ExitInfo.Message` now does.

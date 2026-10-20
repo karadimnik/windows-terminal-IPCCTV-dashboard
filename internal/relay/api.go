@@ -51,6 +51,24 @@ type ReadySet struct {
 	paths map[string]struct{}
 }
 
+// NewReadySet is an OK answer serving exactly the given paths (for callers and tests that build a
+// set without a request).
+func NewReadySet(paths []string) ReadySet {
+	set := ReadySet{State: OK, paths: map[string]struct{}{}}
+	for _, p := range paths {
+		if p != "" {
+			set.paths[p] = struct{}{}
+		}
+	}
+	return set
+}
+
+// DeniedReadySet is the answer of a relay that refused the login: every path counts as ready.
+func DeniedReadySet() ReadySet { return ReadySet{State: Denied} }
+
+// UnavailableReadySet is the answer of a relay that did not answer: nothing is ready.
+func UnavailableReadySet() ReadySet { return ReadySet{State: Unavailable} }
+
 // Has reports whether a consumer may use the relay for this path.
 func (r ReadySet) Has(path string) bool {
 	if r.State == Denied {
