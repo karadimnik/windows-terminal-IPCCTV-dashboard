@@ -353,7 +353,7 @@ func (c Config) ValidateTLSUsers(store UserStore) error {
 		return nil
 	}
 	return fmt.Errorf("refusing to start: the TLS listener %q is on the LAN and no user exists to sign in with (looked in %s).\n"+
-		"  Create one: `camui.exe -set-password <username>` (reads the password from standard input),\n"+
+		"  Create one: `holocron user add <name>` or `camui.exe -set-password <username>` (the password is read from standard input),\n"+
 		"  or start camui without tlsListen and open http://127.0.0.1:8787/setup on this PC; or remove tlsListen", c.TLSListen, c.AuthDir)
 }
 
