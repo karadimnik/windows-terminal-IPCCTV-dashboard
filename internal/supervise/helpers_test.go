@@ -84,3 +84,11 @@ func cam(name string, record bool) config.Camera {
 func (r *rig) dir(safe string) string { return filepath.Join(r.s.RootPath, safe) }
 
 type cameraT = config.Camera
+
+func newRigAt(t *testing.T, s Settings, start time.Time) *rig {
+	t.Helper()
+	r := newRig(t, s)
+	r.clk = clock.NewFake(start)
+	r.m = New(s, Deps{Clock: r.clk, Scanner: r.scan, Alerts: r.alerts, Log: r.m.log})
+	return r
+}
