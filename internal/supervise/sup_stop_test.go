@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,6 +15,8 @@ import (
 
 	"holocron/internal/archive"
 	"holocron/internal/config"
+	"holocron/internal/ffmpeg"
+	"holocron/internal/osx"
 	"holocron/internal/prune"
 	"holocron/internal/status"
 )
@@ -354,4 +357,91 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+type errLock struct{ err error }
+
+func (l errLock) Acquire() (func(), string, error) { return nil, "unknown", l.err }
+
+// A lock that is held is exit 20 (do not restart); a lock that cannot be taken for any other reason
+// (I/O, permission) is exit 1, which the host restarts within its budget.
+func TestSupervisorLockErrorExitCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"held (osx)", &osx.HeldError{Path: "x", Owner: osx.LockOwner{Pid: 4242}}, ExitAnotherSupervisor},
+		{"held (memory)", ErrLockHeld, ExitAnotherSupervisor},
+		{"permission", fmt.Errorf("open supervisor.lock: %w", os.ErrPermission), ExitFailure},
+		{"io", errors.New("lock: input/output error"), ExitFailure},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newSRig(t, oneCamera("Front"), nil)
+			r.deps.Lock = errLock{c.err}
+			r.build()
+			_, err := r.sup.Run(context.Background())
+			if got := ExitCode(err); got != c.code {
+				t.Fatalf("exit %d, want %d (%v)", got, c.code, err)
+			}
+			if c.code == ExitFailure && (errors.Is(err, ErrAnotherSupervisor) || !errors.Is(err, c.err)) {
+				t.Errorf("a lock fault reads as another supervisor or loses its cause: %v", err)
+			}
+			if len(r.st.started("")) != 0 {
+				t.Error("children started")
+			}
+		})
+	}
+}
+
+// The ffmpeg version check runs at start, before the lock and before any child: below 5.0 or not
+// found is a configuration fault (exit 21) carrying the ffmpeg package's message.
+func TestSupervisorFfmpegVersionCheck(t *testing.T) {
+	old, oldErr := ffmpeg.ParseVersion("ffmpeg version 4.2.7-0ubuntu0.1 Copyright (c) 2000-2022 the FFmpeg developers\n")
+	if oldErr == nil {
+		t.Fatalf("4.2.7 accepted: %+v", old)
+	}
+	for _, c := range []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"ok", nil, ExitOK},
+		{"too old", oldErr, ExitConfigFault},
+		{"not found", fmt.Errorf("ffmpeg: cannot run %q -version: %w", "/nope/ffmpeg", exec.ErrNotFound), ExitConfigFault},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newSRig(t, oneCamera("Front"), func(cfg *config.Config) { cfg.FfmpegPath = "/opt/ff/ffmpeg" })
+			var asked []string
+			r.deps.CheckFfmpeg = func(p string) (ffmpeg.Version, error) {
+				asked = append(asked, p)
+				return ffmpeg.Version{Major: 7}, c.err
+			}
+			if c.err == nil {
+				r.start()
+				r.step(2 * time.Second)
+				if len(r.st.started("")) == 0 {
+					t.Error("nothing started after a good check")
+				}
+				r.stop(StopRequested)
+			} else {
+				r.build()
+				_, err := r.sup.Run(context.Background())
+				var cf *ConfigFault
+				if !errors.As(err, &cf) || ExitCode(err) != c.code || !strings.Contains(err.Error(), c.err.Error()) {
+					t.Fatalf("exit %d: %v", ExitCode(err), err)
+				}
+				if a, _ := r.lock.Counts(); a != 0 || len(r.st.started("")) != 0 {
+					t.Errorf("lock taken %d times, %d children started", a, len(r.st.started("")))
+				}
+				if !strings.Contains(r.logs.String(), "ffmpeg check failed") {
+					t.Errorf("not logged:\n%s", r.logs.String())
+				}
+			}
+			if len(asked) != 1 || asked[0] != "/opt/ff/ffmpeg" {
+				t.Errorf("checked %v", asked)
+			}
+		})
+	}
 }

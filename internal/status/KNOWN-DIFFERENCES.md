@@ -21,6 +21,13 @@ fails the day it changes (the signal to update this file).
 - Confirmation: CONFIRMED by reading the code, and by calling `Write-CamStatusFile -StopKind 'window-closed'` in the sandbox: it throws `Cannot validate argument on parameter 'StopKind'. The argument "window-closed" does not belong to the set ",requested,interrupted,unexpected"`.
 - Test: `TestKnownDifferenceWriterValidateSetLacksWindowClosed`.
 
+## G2 - `LastWindowClose.DetectedBy` has a second value
+
+- PowerShell: only the warden patch writes `LastWindowClose`, always with `DetectedBy: "nvr warden"`.
+- Go: there is no warden process (LLD 11.1); the host records the close itself. The schema accepts `"nvr warden"` and
+  `"nvr host"` (enum), so a reader must accept both. Every other value is still a violation.
+- Test: `TestLastWindowCloseDetectedByHostOrWarden` (the golden fixtures are unchanged; the variants are made in memory).
+
 ## Where the schema follows the code instead of the draft in IS 1.8
 
 | Item | IS 1.8 draft | Code (the schema) |

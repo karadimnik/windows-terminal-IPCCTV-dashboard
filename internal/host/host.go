@@ -342,10 +342,9 @@ func (h *Host) Run(ctx context.Context) (Result, error) {
 			res.Outcome, res.Reason = OutcomeConfigFault, cls.reason
 			h.log.Error("the supervisor refused to start: its configuration cannot run (exit 21). Restarting would not help, so the NVR host is done.",
 				logx.Action("host.stop"), logx.Actor("host"), logx.Target("supervisor"), logx.Result(logx.ResultRefused), logx.PID(pid))
-			if res.Lives > 1 { // alert 100 promised a restart: say it is not coming back
-				h.raise(Event{ID: AlertBudgetSpent, Severity: "Error", Title: "the NVR has stopped and is NOT coming back", Key: "102",
-					Message: fmt.Sprintf("the restarted supervisor (pid %d) refused its configuration (exit 21), so it is not being restarted again. Nothing is recording.", pid)})
-			}
+			// always, first life included: nothing is recording and nothing will restart it
+			h.raise(Event{ID: AlertBudgetSpent, Severity: "Error", Title: "the NVR has stopped and is NOT coming back", Key: "102",
+				Message: fmt.Sprintf("configuration fault: the supervisor cannot start (pid %d exited 21), so it stays down until the configuration is fixed. Nothing is recording.", pid)})
 			return res, nil
 		}
 

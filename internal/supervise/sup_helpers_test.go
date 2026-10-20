@@ -462,6 +462,9 @@ func newSRig(t *testing.T, cams []config.Camera, mod func(*config.Config)) *srig
 		Logs:        lg, ChildLog: func(string, string) *slog.Logger { return discardLogger() },
 		Redactor: lg.Redactor(), Events: r.ring, Pid: 4242, Location: time.UTC,
 		Processes: status.FakeProcesses{},
+		CheckFfmpeg: func(string) (ffmpeg.Version, error) {
+			return ffmpeg.Version{Raw: "7.1.1", Major: 7, Minor: 1, Patch: 1}, nil
+		},
 	}
 	return r
 }

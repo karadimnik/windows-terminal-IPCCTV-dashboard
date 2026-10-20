@@ -55,7 +55,7 @@
         "At": { "$ref": "#/$defs/timestamp" },
         "Reason": { "type": "string" },
         "WindowTitle": { "type": "string" },
-        "DetectedBy": { "const": "nvr warden" }
+        "DetectedBy": { "enum": ["nvr warden", "nvr host"] }
       }
     },
     "disk": {

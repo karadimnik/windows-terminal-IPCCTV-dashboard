@@ -45,6 +45,7 @@ func (s *Supervisor) heartbeat(ctx context.Context, done chan<- struct{}) {
 		OnError: func(err error) {
 			s.log.Warn("status write failed: "+err.Error(), logx.Action("status.write"), logx.Result(logx.ResultFail), logx.Err(err))
 		},
+		Written:   func() { s.firstWriteOnce.Do(func() { close(s.firstWrite) }) },
 		NewTicker: func(d time.Duration) (<-chan time.Time, func()) { return clockTicker(s.clk, d) },
 	}
 	h.Run(ctx)

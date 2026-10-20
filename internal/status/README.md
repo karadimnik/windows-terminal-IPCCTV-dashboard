@@ -28,7 +28,7 @@ type OSProcesses struct{}                         // real: /proc (Linux), Win32 
 type FakeProcesses map[int64]time.Time
 type VerdictConfig struct{ StatusIntervalSeconds float64; StartTolerance time.Duration }
 // heartbeat
-type Heartbeater struct{ Writer *Writer; Snapshot func() *Document; Interval time.Duration; OnError func(error); NewTicker func(time.Duration) (<-chan time.Time, func()) }
+type Heartbeater struct{ Writer *Writer; Snapshot func() *Document; Interval time.Duration; OnError func(error); Written func(); NewTicker func(time.Duration) (<-chan time.Time, func()) }
 func (h *Heartbeater) Run(ctx context.Context)
 ```
 

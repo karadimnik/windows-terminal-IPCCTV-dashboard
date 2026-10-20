@@ -12,8 +12,11 @@ func NewSupervisor(SupervisorDeps) *Supervisor
 func (*Supervisor) Run(ctx) (StopReport, error) // returns after the ordered stop; ctx cancel = interrupted
 func (*Supervisor) Stop(kind string) StopReport // requested | interrupted | unexpected; waits for the stop
 func (*Supervisor) Done() <-chan struct{}
+func (*Supervisor) Snapshot() *status.Document      // the running document now; nil before Run / while stopping (W9a, ctlapi GET /v1/state)
+func (*Supervisor) Reload(ctx) error                // re-read config + cameras.json now; LiveViewEnabled applied at once; ErrNotRunning
+type Control interface{ Start() error; Stop() }     // the control endpoint (ctlapi.Server): Start after the first status write, Stop first in the teardown
 type StopReport struct{ Kind, Reason string; Survivors []int; Final bool }
-func ExitCode(err error) int                    // 0 clean, 20 ErrAnotherSupervisor, 21 *ConfigFault, 1 else (ErrUnexpectedStop)
+func ExitCode(err error) int                    // 0 clean, 20 ErrAnotherSupervisor (lock held), 21 *ConfigFault, 1 else (ErrUnexpectedStop, a lock I/O or permission fault)
 type AnotherSupervisorError struct{ Owner string } // errors.Is(err, ErrAnotherSupervisor); the message names the owner
 type ConfigFault struct{ Err error }
 
@@ -23,6 +26,8 @@ type SupervisorDeps struct {                    // injected; nil fields get the 
     Clock clock.Clock; Platform osx.Platform; Starter ffmpeg.Starter; Scope ProcessScope
     Scanner RootScanner; Pruner Pruner; Alerts Alerts
     Credentials relay.CredentialSource; APILogin, LiveLogin func() (relay.Login, error); NewRelayAPI func(config.Config, relay.Login) RelayAPI
+    CheckFfmpeg func(path string) (ffmpeg.Version, error) // default ffmpeg.CheckVersion
+    Control Control                                       // nil: no control endpoint
     Logs LogSource; ChildLog func(component, path string) *slog.Logger; Redactor *logx.Redactor; Redactors []Registrar; Events *EventRing
     Pid int64; Location *time.Location
 }
@@ -85,6 +90,10 @@ func FileChildLogs(maxBytes int64, red *logx.Redactor) func(component, path stri
 | Survivor reported (pid, DID NOT STOP line), the rest still stopped | G7 | `TestSupervisorReportsSurvivor` |
 | Panic anywhere: unexpected + LastUnexpectedStop{DetectedBy: supervisor}, ErrUnexpectedStop | R:4126-4154, G6 | `TestSupervisorPanicIsUnexpected` |
 | Exit 20 (lock or live heartbeat, owner named), 21, lock released on every path | G8, IS 1.5 | `TestSupervisorLockPaths` |
+| Control endpoint started after the first status write, stopped before the children; a failed start is not fatal | W9a | `TestSupervisorControlStartsAfterFirstWriteStopsFirst`, `TestSupervisorControlStartFailureIsNotFatal` |
+| Reload reconciles at once; LiveViewEnabled switches the live MediaMTX on and off at run time | W9a | `TestSupervisorReloadReconcilesNow`, `TestSupervisorReloadSwitchesLiveView` |
+| ffmpeg below 5.0 or not found: exit 21 with the ffmpeg message, no lock, no child | LLD 11 | `TestSupervisorFfmpegVersionCheck` |
+| A lock fault that is not `ErrHeld` (I/O, permission) is exit 1 (restartable), `ErrHeld` stays 20 | W9a | `TestSupervisorLockErrorExitCodes` |
 | D19: LastUnexpectedStop (At byte for byte) and LastWindowClose carried across runs | IS 1.6 F1 | `TestSupervisorCarryForwardAcrossRuns` |
 | Key sets equal the golden PowerShell documents (live off = master's; live on; stopped; unexpected) | IS 1.2, `livecfg` | `TestSupervisorLiveOffKeySetEqualsMaster`, `TestSupervisorOrderedStop`, `TestSupervisorPanicIsUnexpected` |
 | Events: own INFO+ records, newest first, StatusEventCount, log stamp, redacted; whole document redacted | IS 1.3, 1.1 | `TestEventRingParsesRecords`, `TestSupervisorEventsAndRedaction` |
@@ -106,12 +115,15 @@ is blocked (goroutine dump), so a woken goroutine acts at the virtual time it wa
 - The ready set is fetched once per 1 s tick (PowerShell: on a status tick or when a start is due) and shared.
 - At a cold start the cameras are held (as if the relay were young) until the relay's first start attempt ends.
 - `holocron.config.json` is re-read every ReconcileSeconds only to log a change once; the running values stay (PowerShell
-  reads it once). A `cameras.json` that cannot be read keeps the current set (any error, including a wrong type).
+  reads it once). The one exception is `LiveViewEnabled`, which `Reload` (the control API's `POST /v1/reload` and
+  `POST /v1/live`) applies at once: the live MediaMTX starts or stops; its other `Live*` values are the ones the supervisor
+  started with. A `cameras.json` that cannot be read keeps the current set (any error, including a wrong type).
 - Exit codes follow the brief: an unexpected stop is 1 (`ErrUnexpectedStop`), 21 is a configuration fault (PowerShell
   used 21 for "the loop threw").
 - The final rows keep LastPid and the counters (PowerShell keeps the entries); NextStartAt is null after the stop.
-- Not done here: the ffmpeg version check (it spawns a process outside the starter), `cli` Actions for start and stop
-  (W9, with the control API). The OS lock and process scope are wired by `NewProduction` (W8). `relay.ExitMessage` still truncates the seconds.
+- The ffmpeg version check (`CheckFfmpeg`, default `ffmpeg.CheckVersion` on `FfmpegPath`) runs after the configuration
+  is read and before the lock and any child: below 5.0 or not runnable is a `ConfigFault` (exit 21) with the ffmpeg
+  package's message; a development build's warning is logged. It runs outside the process scope (a short `-version`). The OS lock and process scope are wired by `NewProduction` (W8).
 
 # Manager (W7a: the child lifecycle manager)
 

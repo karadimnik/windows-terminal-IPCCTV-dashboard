@@ -59,6 +59,7 @@ func (s *Supervisor) teardown(req stopRequest, loopQuit chan struct{}, loopDone,
 	s.mu.Lock()
 	s.stopping = true
 	s.mu.Unlock()
+	s.stopControl()
 	close(s.stopCh)
 	s.cancel()
 	close(loopQuit)
@@ -108,7 +109,12 @@ func (s *Supervisor) teardown(req stopRequest, loopQuit chan struct{}, loopDone,
 	s.waitCameras(phase(), managerOK)
 
 	// 2. live view (its main paths read the relay), 3. the relay
-	for _, m := range []*mtxChild{s.liveM, s.relayM} {
+	s.liveMu.Lock() // a run-time switch finishes first; none starts after this
+	s.mu.Lock()
+	liveM := s.liveM
+	s.mu.Unlock()
+	s.liveMu.Unlock()
+	for _, m := range []*mtxChild{liveM, s.relayM} {
 		if m == nil {
 			continue
 		}
@@ -129,7 +135,7 @@ func (s *Supervisor) teardown(req stopRequest, loopQuit chan struct{}, loopDone,
 			survivors = append(survivors, c.Pid())
 		}
 	}
-	for _, m := range []*mtxChild{s.liveM, s.relayM} {
+	for _, m := range []*mtxChild{liveM, s.relayM} {
 		if m != nil && m.child != nil && !isDone(m.child) {
 			survivors = append(survivors, m.child.Pid())
 		}

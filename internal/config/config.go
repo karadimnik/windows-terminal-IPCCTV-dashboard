@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 
+	"holocron/internal/alerts"
 	"holocron/internal/osx"
 )
 
@@ -65,6 +66,10 @@ type Config struct {
 
 	// Logging (new in holocron; LLD 2.13)
 	Logging Logging
+	// Alerts is the "alerts" object (internal/alerts/README.md).
+	Alerts alerts.Config
+	// Secrets is the "secrets" object.
+	Secrets Secrets
 }
 
 // Logging is the "logging" object: the default level and per-component levels.
@@ -146,6 +151,10 @@ func Defaults(p osx.Platform) Config {
 		LiveAdvertiseHosts:    []string{},
 		LiveSubStream:         "stream2",
 		LiveCloseAfterSeconds: 10,
+
+		Logging: Logging{Level: "info", Levels: map[string]string{}},
+		Alerts:  defaultAlerts(),
+		Secrets: Secrets{Backend: "auto"},
 	}
 	if p.Name() == "windows" {
 		c.FfmpegPath = `C:\ffmpeg\bin\ffmpeg.exe`
