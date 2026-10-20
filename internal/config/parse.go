@@ -514,6 +514,9 @@ func (d *decoder) crossChecks(c *Config) {
 	if _, ok := d.raw["RootPath"]; ok && strings.TrimSpace(c.RootPath) == "" {
 		d.problem("RootPath", "must not be empty")
 	}
+	if strings.Contains(c.RootPath, "%") {
+		d.problem("RootPath", "must not contain '%%': ffmpeg's -strftime 1 expands '%%' in the folder part of the output path too (a folder 'Cam%%Y' would be written as 'Cam2026')")
+	}
 	if _, ok := d.raw["RtspTransport"]; ok && !transports[c.RtspTransport] {
 		d.problem("RtspTransport", "must be one of tcp, udp, udp_multicast, http, https, got %q", c.RtspTransport)
 	}
@@ -529,7 +532,7 @@ func (d *decoder) crossChecks(c *Config) {
 	}
 	for _, k := range []string{"RelayBase", "RelayApiBase"} {
 		if v := c.value(k); strings.TrimSpace(v) != "" {
-			if _, err := relayHostPort(v); err != nil {
+			if _, err := HostPort(v); err != nil {
 				d.problem(k, "%v", err)
 			}
 		}
@@ -554,8 +557,9 @@ func (c Config) value(k string) string {
 
 var schemeRE = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.\-]*://`)
 
-// relayHostPort strips a URL down to host:port (Get-CamRelayHostPort).
-func relayHostPort(url string) (string, error) {
+// HostPort strips a URL down to host:port, the form MediaMTX and the live address check expect: the
+// scheme and trailing slashes are removed (Get-CamRelayHostPort). It fails when nothing is left.
+func HostPort(url string) (string, error) {
 	text := strings.TrimRight(schemeRE.ReplaceAllString(url, ""), "/")
 	if strings.TrimSpace(text) == "" {
 		return "", fmt.Errorf("'%s' has no host:port", url)

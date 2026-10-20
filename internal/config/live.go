@@ -126,7 +126,7 @@ func (d *decoder) live(c *Config) {
 		if k.url == "" {
 			continue
 		}
-		if hp, err := relayHostPort(k.url); err == nil && hp == c.LiveWhepAddress {
+		if hp, err := HostPort(k.url); err == nil && hp == c.LiveWhepAddress {
 			d.problem("LiveWhepAddress", "'%s' is the address of the recording relay (%s)", c.LiveWhepAddress, k.key)
 		}
 	}
