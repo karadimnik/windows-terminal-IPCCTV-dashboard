@@ -27,7 +27,7 @@ case_ "E7b writer + PS OpenRead (FileShare.Read) holding 2 s" "" $PS -Path "$f" 
 case_ "E8 writer with 10 x 100 ms retries + Go reader holding 2 s (os.Open)" "-retries 10 -retrydelay 100ms" "$exe" read -path "$f" -for 9s -open go -hold 2s
 case_ "E8b writer with 30 x 100 ms retries + Go reader holding 2 s (os.Open)" "-retries 30 -retrydelay 100ms" "$exe" read -path "$f" -for 9s -open go -hold 2s
 echo "### E9 writer on the 9P share $unc"
-mkdir -p "/tmp/claude-1000/-home-nikolas/2d5e9350-273d-42c1-aa11-bbbff02c8dbc/scratchpad/sp6share"
+mkdir -p "${TMPDIR:-/tmp}/sp6share"
 u="$unc\\status.json"
 "$exe" write -path "$u" -for 8s > /tmp/sp6.w.out 2>&1 &
 w=$!; sleep 1.5; "$exe" read -path "$u" -for 6s -open go 2>&1 | tr -d '\r'; wait $w; tr -d '\r' < /tmp/sp6.w.out
