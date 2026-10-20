@@ -103,8 +103,16 @@ func (a *API) handleGetCameras(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CamerasResponse{Ok: true, Path: path, Cameras: cameras})
 }
 
+// goSettingsMessage: the settings writer is the PowerShell script; the Go system's files are edited
+// by the commands (the web write path arrives with a later task).
+const goSettingsMessage = "settings cannot be written from the web app in the Go system yet: use holocron cam add|set|remove and holocron config set"
+
 func (a *API) handlePutCameras(w http.ResponseWriter, r *http.Request) {
 	setTarget(r, "cameras")
+	if a.goSystem {
+		writeAPIError(w, http.StatusNotImplemented, goSettingsMessage)
+		return
+	}
 	var request CamerasRequest
 	if !decodeJSONBody(w, r, &request) {
 		return
@@ -160,6 +168,10 @@ func (a *API) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	setTarget(r, "config")
+	if a.goSystem {
+		writeAPIError(w, http.StatusNotImplemented, goSettingsMessage)
+		return
+	}
 	var request ConfigRequest
 	if !decodeJSONBody(w, r, &request) {
 		return

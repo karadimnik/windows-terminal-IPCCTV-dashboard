@@ -119,6 +119,8 @@ type APIController struct {
 	Stopped bool
 
 	mu      sync.Mutex
+	seenAt  time.Time // the last answer of the endpoint, reused by TaskStates for 2 s
+	seen    ControllerState
 	tasksAt time.Time
 	tasks   map[string]TaskInfo
 }
@@ -149,7 +151,11 @@ func (c *APIController) Status(ctx context.Context) (ControllerState, error) {
 	if err != nil {
 		return ControllerState{Detail: err.Error()}, err
 	}
-	return ControllerState{Running: st.Running, Pid: st.Pid, Detail: fmt.Sprintf("%d camera(s)", len(st.Cameras))}, nil
+	state := ControllerState{Running: st.Running, Pid: st.Pid, Detail: fmt.Sprintf("%d camera(s)", len(st.Cameras))}
+	c.mu.Lock()
+	c.seen, c.seenAt = state, time.Now()
+	c.mu.Unlock()
+	return state, nil
 }
 
 func conflict(command, msg string) ActionResult {
@@ -264,9 +270,17 @@ func (c *APIController) TaskStates() map[string]TaskInfo {
 		return c.tasks
 	}
 	rec := TaskInfo{Name: "holocron supervisor", Exists: true, Status: "Stopped", Enabled: "Enabled"}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if st, err := c.Status(ctx); err == nil && st.Running {
+	st, fresh := c.seen, time.Since(c.seenAt) < 2*time.Second
+	if !fresh {
+		c.mu.Unlock() // Status takes the lock
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		var err error
+		st, err = c.Status(ctx)
+		cancel()
+		c.mu.Lock()
+		fresh = err == nil
+	}
+	if fresh && st.Running {
 		rec.Status = "Running"
 	}
 	c.tasks = map[string]TaskInfo{

@@ -68,6 +68,8 @@ func runHTTPCall(ctx context.Context, in cli.Input) (cli.Output, error) {
 	c.done = true
 	out := cli.Output{Target: c.target}
 	switch s := c.w.status; {
+	case s == http.StatusNotImplemented || s == http.StatusServiceUnavailable: // a refusal: nothing was attempted
+		return out, cli.Refuse("answered %d %s", s, http.StatusText(s))
 	case s >= 500:
 		return out, fmt.Errorf("answered %d %s", s, http.StatusText(s))
 	case s >= 400:
