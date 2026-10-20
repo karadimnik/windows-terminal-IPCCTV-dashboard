@@ -57,6 +57,7 @@ type fakeProc struct {
 	ignoreKill bool
 	exit       chan int
 	once       sync.Once
+	gone       atomic.Bool
 	st         *fakeStarter
 }
 
@@ -74,17 +75,14 @@ func (p *fakeProc) Kill() error {
 	}
 	return nil
 }
-func (p *fakeProc) finish(code int) { p.once.Do(func() { p.exit <- code }) }
-
-func (p *fakeProc) exited() bool {
-	select {
-	case code := <-p.exit:
+func (p *fakeProc) finish(code int) {
+	p.once.Do(func() {
+		p.gone.Store(true)
 		p.exit <- code
-		return true
-	default:
-		return false
-	}
+	})
 }
+
+func (p *fakeProc) exited() bool { return p.gone.Load() }
 
 type fakeStarter struct {
 	clk    *clock.Fake
@@ -254,9 +252,9 @@ func (f *fakeSource) setCameras(c []config.Camera) {
 // ---- fake scanner (per-camera and archive-wide) ----
 
 type syncScanner struct {
-	mu    sync.Mutex
-	scans map[string]archive.DirScan // by safe name
-	calls int
+	mu      sync.Mutex
+	scans   map[string]archive.DirScan // by safe name
+	calls   int
 	panicAt int // panic on this call number (0: never)
 }
 
@@ -457,7 +455,9 @@ func newSRig(t *testing.T, cams []config.Camera, mod func(*config.Config)) *srig
 		Source: r.src, Lock: r.lock, Clock: clk, Platform: plat, Starter: r.st, Scanner: r.sc, Pruner: r.pr, Alerts: r.al,
 		Credentials: fixedCreds{},
 		APILogin:    func() (relay.Login, error) { return relay.Login{User: relay.APIUser, Secret: fakeAPIPass}, nil },
-		LiveLogin:   func() (relay.Login, error) { return relay.Login{User: relay.LiveUser, Secret: strings.Repeat("ef", 32)}, nil },
+		LiveLogin: func() (relay.Login, error) {
+			return relay.Login{User: relay.LiveUser, Secret: strings.Repeat("ef", 32)}, nil
+		},
 		NewRelayAPI: func(config.Config, relay.Login) RelayAPI { return r.api },
 		Logs:        lg, ChildLog: func(string, string) *slog.Logger { return discardLogger() },
 		Redactor: lg.Redactor(), Events: r.ring, Pid: 4242, Location: time.UTC,
@@ -630,12 +630,14 @@ func (r *srig) validateAll() {
 
 func (r *srig) logText() string { return r.logs.String() }
 
+// docNow builds the document from the state published right now (the heartbeat's view).
+func (r *srig) docNow() *status.Document {
+	return r.sup.document(status.StateRunning, status.StopKindNone, nil)
+}
+
 func (r *srig) row(name string) status.Camera {
 	r.t.Helper()
-	d := r.lastDoc()
-	if d == nil {
-		r.t.Fatal("no document")
-	}
+	d := r.docNow()
 	for _, c := range d.Cameras {
 		if c.Name == name {
 			return c
