@@ -12,6 +12,8 @@ import (
 // Secrets is the "secrets" object: which store holds the camera credentials.
 type Secrets struct {
 	Backend string `json:"backend"` // auto | keyring | file | env
+	File    string `json:"file"`    // the encrypted store of the file backend; "" = <auth dir>/secrets.enc
+	KeyFile string `json:"keyFile"` // its owner-only key file; "" = <auth dir>/secrets.key
 }
 
 // SecretBackends are the accepted values of secrets.backend.
@@ -221,22 +223,39 @@ func (d *decoder) secrets(c *Config) {
 	}
 	for _, k := range keys {
 		v, p := fields[k], "secrets."+k
-		if strings.ToLower(k) != "backend" {
-			d.warn(p, "unknown key, ignored")
-			continue
-		}
-		var s string
-		d.subStr(p, v, &s)
-		if !d.lastProblemOn(p) {
-			found := false
-			for _, b := range SecretBackends {
-				found = found || s == b
+		switch strings.ToLower(k) {
+		case "backend":
+			var s string
+			d.subStr(p, v, &s)
+			if !d.lastProblemOn(p) {
+				found := false
+				for _, b := range SecretBackends {
+					found = found || s == b
+				}
+				if !found {
+					d.problem(p, "must be one of %s, got %q", strings.Join(SecretBackends, ", "), s)
+					continue
+				}
+				c.Secrets.Backend = s
 			}
-			if !found {
-				d.problem(p, "must be one of %s, got %q", strings.Join(SecretBackends, ", "), s)
+		case "file", "keyfile":
+			var s string
+			d.subStr(p, v, &s)
+			if d.lastProblemOn(p) {
 				continue
 			}
-			c.Secrets.Backend = s
+			s = strings.TrimSpace(s)
+			if strings.HasPrefix(s, `\\`) || strings.ContainsAny(s, "\x00\n\r") {
+				d.problem(p, "must be a local file path (no network share, no control characters)")
+				continue
+			}
+			if strings.ToLower(k) == "file" {
+				c.Secrets.File = s
+			} else {
+				c.Secrets.KeyFile = s
+			}
+		default:
+			d.warn(p, "unknown key, ignored")
 		}
 	}
 }

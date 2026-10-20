@@ -56,6 +56,7 @@ Types are strict: a JSON string is never accepted for a boolean or a number (Pow
 | alerts.desktop.enabled | true | JSON boolean | NEW: desktop notification | yes |
 | alerts.eventlog.enabled | true | JSON boolean | NEW: Windows event log / syslog | yes |
 | secrets.backend | `auto` | one of auto, keyring, file, env | NEW: camera credential store (internal/secrets) | yes |
+| secrets.file, secrets.keyFile | `` | strings; local paths (not starting with `\\`, no control characters); empty = `secrets.enc` / `secrets.key` in the auth folder | NEW: the file backend's encrypted store and its owner-only key file (the key may come from `HOLOCRON_SECRET_KEY` instead) | no |
 | web.enabled | true | JSON boolean | NEW: `holocron up` starts the web role (false: recorder only) | yes |
 | web.listen | `127.0.0.1:8787` | host:port, port 1-65535; the web app's loopback guard decides at start (a non-loopback address needs CAMUI_TOKEN of 16+ characters) | NEW: the web app's listener | no |
 | web.tlsListen | `` | empty (off) or IPv4:port, port 1-65535; the web app requires a private address and at least one user | NEW: the LAN HTTPS listener (login) | no |

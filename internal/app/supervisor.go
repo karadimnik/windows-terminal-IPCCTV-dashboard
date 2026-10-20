@@ -67,7 +67,7 @@ func NewSupervisor(o Options) (*SupervisorRole, error) {
 	for _, w := range warns {
 		sl.Warn("configuration: "+w.String(), logx.Action("config.load"))
 	}
-	creds, err := CredentialsFor(cfg, o.Getenv)
+	creds, err := CredentialsWith(cfg, o.Platform, o.Getenv, lg.Redactor())
 	if err == nil {
 		err = CheckCredentials(creds)
 	}
