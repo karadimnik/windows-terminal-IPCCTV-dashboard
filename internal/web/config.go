@@ -168,7 +168,13 @@ func (c Config) AcknowledgedFile() string {
 // the recorder is the authority on where it writes, and a UI pointed at the
 // wrong root does not fail - it shows an empty archive and says nothing.
 func LoadConfig(configPath string, flags Config) (Config, error) {
-	cfg := Config{}
+	return LoadConfigOver(Config{}, configPath, flags)
+}
+
+// LoadConfigOver is LoadConfig starting from base instead of the empty configuration: the config
+// file overrides base, the flags override both, the defaults fill what is still empty.
+func LoadConfigOver(base Config, configPath string, flags Config) (Config, error) {
+	cfg := base
 
 	if configPath != "" {
 		raw, err := os.ReadFile(configPath)

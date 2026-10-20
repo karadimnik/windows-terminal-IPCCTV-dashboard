@@ -70,7 +70,9 @@ type Options struct {
 
 // ParseFlags reads camui's command line and configuration (the -config file, CAMUI_TOKEN and the
 // other environment variables, the defaults). A configuration or flag problem is a *UsageError.
-func ParseFlags(args []string) (Options, error) { return parseFlags(args, io.Discard) }
+func ParseFlags(args []string) (Options, error) {
+	return ParseFlagsTo(args, io.Discard, Config{})
+}
 
 // UsageError is a command line or configuration refusal; camui exits 2 on it.
 type UsageError struct {
@@ -81,7 +83,10 @@ type UsageError struct {
 func (e *UsageError) Error() string { return e.Err.Error() }
 func (e *UsageError) Unwrap() error { return e.Err }
 
-func parseFlags(args []string, output io.Writer) (Options, error) {
+// ParseFlagsTo is ParseFlags with the flag package's usage and error text going to output and a
+// base Config under the -config file and the flags (the holocron web role passes its own
+// holocron.config.json defaults there; precedence: flags, the camui config file, base, defaults).
+func ParseFlagsTo(args []string, output io.Writer, base Config) (Options, error) {
 	var (
 		o            Options
 		flags        Config
@@ -103,13 +108,14 @@ func parseFlags(args []string, output io.Writer) (Options, error) {
 	fs.StringVar(&o.Unlock, "unlock", "", "clear this username's failed-login lockout in a running camui, and exit")
 	fs.BoolVar(&o.PrintCA, "print-ca", false, "create the local CA if needed, print its file, SHA-256 fingerprint and how to install it on a device, and exit")
 	fs.BoolVar(&o.ShowVersion, "version", false, "print the version and exit")
+	fs.StringVar(&o.StopFile, "stop-file", "", "internal: exit when this file appears (how `holocron up` stops its web child on every OS)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
 	if o.ShowVersion {
 		return o, nil
 	}
-	cfg, err := LoadConfig(configPath, flags)
+	cfg, err := LoadConfigOver(base, configPath, flags)
 	if err != nil {
 		return o, &UsageError{Err: err, Config: true}
 	}
@@ -170,7 +176,7 @@ func (o Options) Validate() error {
 // Main is camui.exe's main: flags, the one-shot commands, the guards, then Run until Ctrl+C or
 // SIGTERM. It returns the exit code (0, 1 stopped with an error, 2 refused or misused).
 func Main(args []string) int {
-	o, err := parseFlags(args, os.Stderr)
+	o, err := ParseFlagsTo(args, os.Stderr, Config{})
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -298,7 +304,7 @@ func Run(ctx context.Context, o Options) error {
 	// A missing script directory is not a reason to refuse to start - status
 	// is still worth serving - but it has to be said, because every action and
 	// every settings write will fail until it is right.
-	if _, err := os.Stat(filepath.Join(cfg.ScriptDir, "cam.ps1")); err != nil {
+	if _, err := os.Stat(filepath.Join(cfg.ScriptDir, "cam.ps1")); err != nil && !o.GoSystem {
 		log.Warn("no cam.ps1 in the script directory: control actions and settings will fail",
 			"scriptDir", cfg.ScriptDir)
 	}
@@ -317,6 +323,13 @@ func Run(ctx context.Context, o Options) error {
 		"scriptDir", cfg.ScriptDir,
 		"auth", map[bool]string{true: "token required", false: "none (loopback only)"}[cfg.RequiresToken()],
 	)
+
+	if o.StopFile != "" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go watchStopFile(ctx, o.StopFile, cancel)
+	}
 
 	errc := make(chan error, 2)
 	go func() {
@@ -350,6 +363,24 @@ func Run(ctx context.Context, o Options) error {
 			return fmt.Errorf("shutdown: %w", err)
 		}
 		return <-errc
+	}
+}
+
+// watchStopFile calls stop once the file exists (polled: it works the same on every OS, and a
+// child with its own hidden console receives no signal on Windows).
+func watchStopFile(ctx context.Context, path string, stop context.CancelFunc) {
+	t := time.NewTicker(250 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			stop()
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 	}
 }
 

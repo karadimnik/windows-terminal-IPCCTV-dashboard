@@ -82,18 +82,26 @@ type rig struct {
 	root, cfg string
 	ctl       *fakeCtl
 	logSpec   string // HOLOCRON_LOG for the runs
+	insp      osx.Inspector
 }
 
-const rigConfig = "\xef\xbb\xbf{\n    \"SegmentSeconds\":  60,\n    \"HealthStripHeightPx\":  -1,\n    \"Unknown\":  {\"x\": 1},\n    \"StopTimeoutSeconds\":  1,\n    \"alerts\": {\"desktop\": {\"enabled\": false}, \"eventlog\": {\"enabled\": false}}\n}\n"
+const rigConfig = "\xef\xbb\xbf{\n    \"SegmentSeconds\":  60,\n    \"HealthStripHeightPx\":  -1,\n    \"Unknown\":  {\"x\": 1},\n    \"StopTimeoutSeconds\":  1,\n    \"alerts\": {\"desktop\": {\"enabled\": false}, \"eventlog\": {\"enabled\": false}},\n    \"web\": {\"authDir\": \"%AUTH%\", \"listen\": \"127.0.0.1:18821\"}\n}\n"
 const rigCameras = "\xef\xbb\xbf[{\"Name\":\"Front\",\"IP\":\"192.0.2.10\",\"Record\":true,\"Note\":\"kept\"},{\"Name\":\"Back\",\"IP\":\"192.0.2.11\",\"Record\":false}]"
 
 func newRig(t *testing.T) *rig {
 	dir := t.TempDir()
 	r := &rig{t: t, root: filepath.Join(dir, "root"), cfg: filepath.Join(dir, "cfg", "holocron.config.json"), ctl: &fakeCtl{}}
 	os.MkdirAll(filepath.Dir(r.cfg), 0o755)
-	os.WriteFile(r.cfg, []byte(rigConfig), 0o644)
+	os.WriteFile(r.cfg, []byte(strings.Replace(rigConfig, "%AUTH%", filepath.ToSlash(filepath.Join(dir, "auth")), 1)), 0o644)
 	os.WriteFile(r.cameras(), []byte(rigCameras), 0o644)
 	return r
+}
+
+func (r *rig) inspector() osx.Inspector {
+	if r.insp != nil {
+		return r.insp
+	}
+	return fakeInspector{}
 }
 
 func (r *rig) cameras() string { return filepath.Join(filepath.Dir(r.cfg), "cameras.json") }
@@ -103,7 +111,7 @@ func (r *rig) run(args ...string) (string, string, int) {
 	argv := append([]string{"--root", r.root, "--config", r.cfg}, args...)
 	code := run(context.Background(), argv, &out, &errw, &seams{
 		dial:      func(string) (ctl, error) { return r.ctl, nil },
-		inspector: fakeInspector{},
+		inspector: r.inspector(),
 		exe:       "/nonexistent/holocron",
 		getenv: func(k string) string {
 			return map[string]string{app.EnvCameraUser: "u", app.EnvCameraPassword: "p", "HOLOCRON_LOG": r.logSpec}[k]
@@ -236,14 +244,14 @@ func TestExitCodes(t *testing.T) {
 	}{
 		{[]string{"nope"}, 2}, {[]string{"cam"}, 2}, {[]string{"cam", "show"}, 2}, {[]string{"cam", "add", "--name", "x"}, 2},
 		{[]string{"config", "set", "SegmentSeconds"}, 2}, {[]string{"status", "--bogus"}, 2}, {[]string{"up", "--only", "x"}, 2},
-		{[]string{"web"}, 1}, {[]string{"user", "add", "x"}, 1}, {[]string{"status"}, 1}, {[]string{"version"}, 0},
+		{[]string{"web", "-tls-readonly", "maybe"}, 2}, {[]string{"user", "add", "x"}, 1}, {[]string{"status"}, 1}, {[]string{"version"}, 0},
 		{[]string{"cam", "show", "Nope"}, 1}, {[]string{"logs", "--level", "loud"}, 2}, {[]string{"logs", "--since", "yesterday"}, 2},
 	} {
 		if _, errw, code := r.run(c.args...); code != c.code {
 			t.Errorf("%v: exit %d want %d (%s)", c.args, code, c.code, errw)
 		}
 	}
-	if _, errw, _ := r.run("web"); !strings.Contains(errw, "not built yet") {
+	if _, errw, _ := r.run("user", "list"); !strings.Contains(errw, "not built yet") {
 		t.Errorf("not-built message: %s", errw)
 	}
 	var out, errw bytes.Buffer
@@ -265,7 +273,7 @@ func TestCommandsLogBeginAndResult(t *testing.T) {
 		{"cam", "set", "Side", "--record", "true"}, {"cam", "disable", "Side"}, {"cam", "enable", "Side"}, {"cam", "remove", "Side"},
 		{"config", "get", "SegmentSeconds"}, {"config", "set", "ReserveGB", "5"}, {"config", "unset", "ReserveGB"}, {"config", "validate"},
 		{"config", "show"}, {"live", "status"}, {"live", "enable"}, {"live", "disable"}, {"log", "level", "all", "info", "--save"},
-		{"logs"}, {"down"}, {"alert", "test", "log"}, {"web"}, {"config", "set", "RootPath", "/x"},
+		{"logs"}, {"down"}, {"alert", "test", "log"}, {"user", "list"}, {"config", "set", "RootPath", "/x"},
 	}
 	for _, a := range runs {
 		r.run(a...)
@@ -314,7 +322,7 @@ func TestCommandsLogBeginAndResult(t *testing.T) {
 		if x.begin != 1 || x.result != 1 {
 			t.Errorf("%s %s: begin %d result %d", id, x.action, x.begin, x.result)
 		}
-		if (x.action == "web.serve" || x.action == "nvr.status") && x.level != "ERROR" && x.level != "WARN" {
+		if (x.action == "user.list" || x.action == "nvr.status") && x.level != "ERROR" && x.level != "WARN" {
 			t.Errorf("%s failed at %s", x.action, x.level)
 		}
 		if x.action == "config.set" && x.level != "INFO" && x.level != "WARN" {
@@ -579,5 +587,79 @@ func TestCamTestProbe(t *testing.T) {
 	}
 	if got := rtspTarget(config.Camera{IP: "10.0.0.5"}); got != "10.0.0.5:554" {
 		t.Error(got)
+	}
+}
+
+// The web role takes camui's flags: help lists them, -version prints, a bad value is a usage error;
+// none of these binds a port. (A bare `holocron web` would serve until stopped, so tests never run it.)
+func TestWebCommandFlags(t *testing.T) {
+	r := newRig(t)
+	out, errw, code := r.run("web", "-h")
+	if code != 0 || errw != "" {
+		t.Fatalf("web -h: %d %q", code, errw)
+	}
+	for _, f := range []string{"-listen", "-config", "-archive-root", "-status-file", "-script-dir", "-tls-listen", "-tls-dir", "-auth-dir", "-tls-readonly", "-print-ca", "-set-password", "-unlock", "-version"} {
+		if !strings.Contains(out, f) {
+			t.Errorf("web -h does not list %s:\n%s", f, out)
+		}
+	}
+	if out, _, code := r.run("web", "-version"); code != 0 || !strings.HasPrefix(out, "camui ") {
+		t.Errorf("web -version: %d %q", code, out)
+	}
+	for _, args := range [][]string{{"web", "-tls-readonly", "maybe"}, {"web", "-nope"}, {"web", "-config", "/nonexistent/camui.config.json"}, {"up", "--only", "web"}} {
+		if _, _, code := r.run(args...); code != 2 {
+			t.Errorf("%v: exit %d, want 2", args, code)
+		}
+	}
+	// the loopback guard still refuses a non-loopback address without a token
+	if _, errw, code := r.run("web", "-listen", "0.0.0.0:18899"); code != 2 || !strings.Contains(errw, "not loopback") {
+		t.Errorf("guard: %d %s", code, errw)
+	}
+	help, _, _ := r.run("--help")
+	if !strings.Contains(help, "web ") || strings.Contains(help, "not built yet)\n  up") {
+		t.Errorf("--help: %s", help)
+	}
+}
+
+type liveInspector map[int]osx.ProcInfo
+
+func (l liveInspector) Inspect(pid int) (osx.ProcInfo, error) {
+	if p, ok := l[pid]; ok {
+		return p, nil
+	}
+	return osx.ProcInfo{}, osx.ErrNotRunning
+}
+func (liveInspector) Stop(osx.ChildEntry) error { return errors.New("never") }
+
+// status shows the web role: pid found by identity in the aux registry, the listen address, TLS and the login.
+func TestStatusShowsTheWebRole(t *testing.T) {
+	r := newRig(t)
+	r.running()
+	out, _, _ := r.run("status")
+	if !strings.Contains(out, "web app: not running (would listen on http://127.0.0.1:18821/), HTTPS listener off, login none yet") {
+		t.Errorf("not running:\n%s", out)
+	}
+	os.MkdirAll(filepath.Join(r.root, "_state"), 0o700)
+	b, _ := json.Marshal(map[string]any{"supervisor": 1, "children": []osx.ChildEntry{{Pid: 7001, Start: "t", Image: "/bin/holocron", Role: "web"}, {Pid: 7002, Start: "t", Image: "/bin/other", Role: "web"}}})
+	os.WriteFile(filepath.Join(r.root, "_state", "aux.json"), b, 0o600)
+	r.insp = liveInspector{7001: {Start: "t", Image: "/bin/holocron"}, 7002: {Start: "t", Image: "/bin/holocron"}} // 7002: another image = a reused pid
+	out, _, _ = r.run("status")
+	if !strings.Contains(out, "web app: running pid 7001 on http://127.0.0.1:18821/") || strings.Contains(out, "7002") {
+		t.Errorf("running:\n%s", out)
+	}
+	var rep struct{ Web webReport }
+	j, _, _ := r.run("status", "--json")
+	if err := json.Unmarshal([]byte(j), &rep); err != nil || !rep.Web.Running || rep.Web.Pid != 7001 || rep.Web.Listen != "127.0.0.1:18821" || rep.Web.TLS || rep.Web.Login {
+		t.Errorf("%v %+v", err, rep.Web)
+	}
+	// a login user and a TLS listener are reported
+	cfg, _ := os.ReadFile(r.cfg)
+	authDir := filepath.Join(filepath.Dir(filepath.Dir(r.cfg)), "auth")
+	os.MkdirAll(authDir, 0o700)
+	os.WriteFile(filepath.Join(authDir, "users.json"), []byte(`{"version":1,"users":[{"id":"u1","username":"anna","hash":"x","role":"admin","createdAt":"2026-01-01T00:00:00Z"}]}`), 0o600)
+	os.WriteFile(r.cfg, []byte(strings.Replace(string(cfg), `"listen"`, `"tlsListen": "192.168.1.50:8443", "listen"`, 1)), 0o644)
+	out, _, _ = r.run("status")
+	if !strings.Contains(out, "HTTPS login listener on 192.168.1.50:8443, login exists") {
+		t.Errorf("tls/login:\n%s", out)
 	}
 }

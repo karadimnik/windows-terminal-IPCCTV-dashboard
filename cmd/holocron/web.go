@@ -1,0 +1,66 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"holocron/internal/web"
+)
+
+// cmdWeb is the web role: `holocron up` starts it as the host's managed child, and it can be run
+// by hand for diagnostics. It takes every camui flag and config-file key; the defaults come from
+// holocron.config.json (web.listen, web.tlsListen, web.tlsDir, web.authDir, RootPath), the flags
+// and the camui config file override them.
+func cmdWeb(ctx context.Context, e *env) error {
+	out := e.errw
+	for _, a := range e.args {
+		if a == "-h" || a == "-help" || a == "--help" {
+			out = e.out
+		}
+	}
+	base := web.Config{
+		Listen: e.cfg.Web.Listen, TLSListen: e.cfg.Web.TLSListen, TLSDir: e.cfg.Web.TLSDir, AuthDir: e.cfg.Web.AuthDir,
+		ArchiveRoot: e.paths.Root, CamerasPath: e.paths.Cameras, ConfigPath: e.paths.Config,
+	}
+	o, err := web.ParseFlagsTo(e.args, out, base)
+	if err != nil {
+		var ue *web.UsageError
+		switch {
+		case errors.Is(err, flag.ErrHelp):
+			return nil
+		case errors.As(err, &ue):
+			return usageErr("holocron web: %v", ue.Err)
+		}
+		return &exitError{code: exitUsage, quiet: true, err: fmt.Errorf("holocron web: %v", err)}
+	}
+	if code, done := web.RunOneShot(o, os.Stdin, e.out, e.errw); done {
+		if code != 0 {
+			return &exitError{code: code, quiet: true, err: fmt.Errorf("holocron web: exit %d", code)}
+		}
+		return nil
+	}
+	exe, err := e.self()
+	if err != nil {
+		return failed("%v", err)
+	}
+	if o.Config.Token != "" {
+		e.lg.Redactor().Register(o.Config.Token)
+	}
+	o.Logs = e.lg
+	o.GoSystem = true
+	o.Launch = &web.HolocronLaunch{Exe: exe, Args: e.global}
+	if err := o.Validate(); err != nil {
+		return usageErr("%v", err)
+	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := web.Run(ctx, o); err != nil {
+		return failed("the web app stopped: %v", err)
+	}
+	return nil
+}

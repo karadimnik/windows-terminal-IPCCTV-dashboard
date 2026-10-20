@@ -13,9 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"holocron/internal/alerts"
 	"holocron/internal/cli"
 	"holocron/internal/config"
 	"holocron/internal/ctlapi"
+	"holocron/internal/host"
 	"holocron/internal/osx"
 	"holocron/internal/status"
 	"holocron/internal/supervise"
@@ -531,4 +533,48 @@ func TestDownReapsProvableOrphansWithoutSupervisor(t *testing.T) {
 			t.Errorf("%+v", res)
 		}
 	})
+}
+
+// The web role as the host's aux child: its argv, its stop file and the reap of a crashed host's leftovers.
+func TestWebAuxArgsStopFileAndStaleReap(t *testing.T) {
+	p := Paths{Root: t.TempDir()}
+	os.MkdirAll(p.State(), 0o700)
+	b, _ := json.Marshal(map[string]any{"supervisor": 100, "children": []osx.ChildEntry{{Pid: 500, Start: "s500", Image: "/bin/holocron", Role: "web"}}})
+	os.WriteFile(p.AuxFile(), b, 0o600)
+	os.WriteFile(p.WebStopFile(), []byte("old"), 0o600) // left by an earlier host: removed before the new web starts
+
+	// another host is alive: its web child is not ours to reap
+	hb, _ := json.Marshal(osx.ChildEntry{Pid: 100, Start: "s100", Image: "/bin/holocron", Role: "host"})
+	os.WriteFile(p.HostFile(), hb, 0o600)
+	in := &osx.FakeInspector{Procs: map[int]osx.ProcInfo{100: {Start: "s100", Image: "/bin/holocron"}, 500: {Start: "s500", Image: "/bin/holocron"}}}
+	reg := osx.NewRegistry(p.AuxFile())
+	reapStaleWeb(p, reg, in, nil)
+	if len(in.Stopped()) != 0 {
+		t.Fatalf("reaped the web of a live host: %v", in.Stopped())
+	}
+	// the earlier host is gone: its web child is a provable orphan
+	delete(in.Procs, 100)
+	reapStaleWeb(p, reg, in, nil)
+	if got := in.Stopped(); len(got) != 1 || got[0] != 500 {
+		t.Fatalf("stopped %v, want the orphan 500", got)
+	}
+	if e, _ := reg.Load(); len(e) != 0 {
+		t.Errorf("registry not emptied: %+v", e)
+	}
+
+	a := webAux(p, nil, "/bin/holocron", []string{"--root", "/r", "--config", "/c"}, nil)
+	sp := a.Spawner.(*host.ExecSpawner)
+	if sp.Path != "/bin/holocron" || strings.Join(sp.Args, " ") != "--root /r --config /c web --stop-file "+p.WebStopFile() {
+		t.Errorf("spawner %+v", sp)
+	}
+	if _, err := os.Stat(p.WebStopFile()); !os.IsNotExist(err) {
+		t.Error("an old web.stop was left in place")
+	}
+	if a.Name != "web" || a.Restart.AlertID != alerts.IDWebStopped || a.StopWait != 5*time.Second || a.Registry == nil {
+		t.Errorf("%+v", a)
+	}
+	a.Stop(nil)
+	if _, err := os.Stat(p.WebStopFile()); err != nil {
+		t.Errorf("Stop wrote no stop file: %v", err)
+	}
 }

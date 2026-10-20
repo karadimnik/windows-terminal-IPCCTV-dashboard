@@ -65,6 +65,7 @@ type env struct {
 	dial      func(root string) (ctl, error)
 	inspector osx.Inspector
 	exe       string // this executable (re-run as host / supervisor)
+	lg        *logx.Logger
 }
 
 type envKey struct{}
@@ -203,6 +204,7 @@ func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int 
 		lg, _ = app.NewLogger(app.LogOptions{Paths: e.paths, Config: e.cfg, Getenv: e.opts.Getenv, Verbose: e.opts.Verbose, Stderr: verboseStderr(e)})
 	}
 	defer lg.Close()
+	e.lg = lg
 	runner := cli.NewRunner(nil, lg)
 	actx := cli.WithActor(context.WithValue(ctx, envKey{}, e), cli.CLIActor())
 	_, err := runner.Do(actx, cmd.action, cli.Input{Target: targetOf(cmd, args), Args: map[string]any{"args": args}})

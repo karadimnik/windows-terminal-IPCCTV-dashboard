@@ -188,3 +188,13 @@ func runUnlock(cfg Config, username string, out, errOut io.Writer) int {
 	fmt.Fprintf(out, "unlock requested for %q: a running camui forgets its failed sign-ins at the next attempt for that name. Restarting camui clears all of them too.\n", username)
 	return 0
 }
+
+// LoginUsers is the number of users that can sign in to the LAN listener (authDir empty: the
+// default folder). `holocron status` reports whether a login exists.
+func LoginUsers(authDir string) (int, error) {
+	if authDir == "" {
+		authDir = defaultAuthDir()
+	}
+	users, err := newFileUserStore(authDir, time.Now).List()
+	return len(users), err
+}
