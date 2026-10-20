@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"runtime"
 	"time"
@@ -124,13 +123,4 @@ func TakeCensus(p Paths, in osx.Inspector, statusInterval float64) Census {
 		}
 	}
 	return c
-}
-
-// statusOrNil reads status.json; a missing file is nil.
-func statusOrNil(p Paths) (*status.Document, error) {
-	d, err := status.Read(p.StatusFile())
-	if errors.Is(err, status.ErrNoStatus) || errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	return d, err
 }

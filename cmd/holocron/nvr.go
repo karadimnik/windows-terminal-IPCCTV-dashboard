@@ -94,12 +94,14 @@ func up(ctx context.Context, e *env, detach bool) error {
 		return quietFail("NOT RECORDING: %s", why)
 	}
 	rec := 0
-	for _, c := range doc.Cameras {
-		if c.Record {
-			rec++
+	if cams, err := app.LoadCameras(e.paths.Cameras); err == nil {
+		for _, c := range cams.List {
+			if c.Record {
+				rec++
+			}
 		}
 	}
-	fmt.Fprintf(e.out, "RECORDING: supervisor pid %d is running after %.1fs, %d camera(s) set to record\n", doc.SupervisorPid, time.Since(started).Seconds(), rec)
+	fmt.Fprintf(e.out, "RECORDING: supervisor pid %d is running after %.1fs; %d camera(s) set to record (holocron status shows each)\n", doc.SupervisorPid, time.Since(started).Seconds(), rec)
 	return nil
 }
 

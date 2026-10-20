@@ -91,7 +91,9 @@ func usageErr(format string, a ...any) error {
 	return &exitError{code: exitUsage, err: fmt.Errorf(format, a...)}
 }
 
-func failed(format string, a ...any) error { return &exitError{code: exitFailure, err: fmt.Errorf(format, a...)} }
+func failed(format string, a ...any) error {
+	return &exitError{code: exitFailure, err: fmt.Errorf(format, a...)}
+}
 
 // quietFail is a failure whose explanation was already printed; msg goes to the result record.
 func quietFail(format string, a ...any) error {
