@@ -211,7 +211,7 @@ func (r *itRig) writeConfig() {
 	}
 	b, _ := json.MarshalIndent(cfg, "", "    ")
 	must(r.t, os.WriteFile(r.cfg, append([]byte("\xef\xbb\xbf"), b...), 0o644))
-	// IP carries the throwaway camera's port: written here, `cam add` would refuse it (host only)
+	// IP carries the throwaway camera's port (host:port, as `cam add --ip` accepts)
 	cams := fmt.Sprintf(`[{"Name":"cam1","IP":"127.0.0.1:%d","Quality":"cam1","Record":true,"Note":"kept"},{"Name":"cam2","IP":"127.0.0.1:%d","Quality":"cam2","Record":true}]`, itCamPort, itCamPort)
 	must(r.t, os.WriteFile(filepath.Join(filepath.Dir(r.cfg), "cameras.json"), []byte(cams), 0o644))
 }

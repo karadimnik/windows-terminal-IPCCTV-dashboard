@@ -237,7 +237,7 @@ func TestCamerasValidateAndCollisions(t *testing.T) {
 	}
 	want := map[string]string{
 		"cameras[1].Name": "share the folder", "cameras[2].Name": "share the folder", "cameras[4].Name": "reserved",
-		"cameras[5].IP": "address is required", "cameras[6].IP": "host only", "cameras[7].Quality": "stream name", "cameras[8].Name": "no characters",
+		"cameras[5].IP": "address is required", "cameras[6].IP": "no scheme", "cameras[7].Quality": "stream name", "cameras[8].Name": "no characters",
 	}
 	got := map[string]string{}
 	for _, p := range ve.Problems {
@@ -265,5 +265,38 @@ func TestCameraNameMayContainPercent(t *testing.T) {
 	c, err := LoadCameras(writeFile(t, `[{"Name":"Cam%Y","IP":"192.0.2.12","Quality":"stream1"}]`))
 	if err != nil || len(c.List) != 1 {
 		t.Fatalf("%v %+v", err, c)
+	}
+}
+
+// The address may carry a port (IR 2); host and port are both validated.
+func TestValidateHostWithPort(t *testing.T) {
+	good := []string{"192.0.2.10", "192.0.2.10:554", "127.0.0.1:18700", "cam.example.com:8554", "cam:1", "cam:65535", "[2001:db8::1]:554", "2001:db8::1"}
+	bad := map[string]string{
+		"192.0.2.10:0": "port", "192.0.2.10:65536": "port", "192.0.2.10:-1": "port", "192.0.2.10:": "port", "192.0.2.10:http": "port",
+		"192.0.2.10:+5": "port", "cam:5:6": "host:port", "[::1]x": "host:port", ":554": "hostname",
+		"bad_host:554": "hostname", "-x.example:554": "hostname", "rtsp://h:554": "no scheme", "u:p@h:554": "credentials", "h:554/x": "path", "h :554": "no scheme",
+	}
+	for _, v := range good {
+		if msg := validateHost(v); msg != "" {
+			t.Errorf("%q refused: %s", v, msg)
+		}
+	}
+	for v, want := range bad {
+		if msg := validateHost(v); !strings.Contains(msg, want) {
+			t.Errorf("%q: %q, want it to mention %q", v, msg, want)
+		}
+	}
+}
+
+// The end-to-end fixture shape: an extra field kept, the port in IP, validated and saved as written.
+func TestCamerasPortFixtureShape(t *testing.T) {
+	p := writeFile(t, `[{"Name":"cam1","IP":"127.0.0.1:18700","Quality":"cam1","Record":true,"Note":"kept"},{"Name":"cam2","IP":"127.0.0.1:18700","Quality":"cam2","Record":true}]`)
+	c, err := LoadCameras(p)
+	if err != nil || c.Validate() != nil || c.List[0].IP != "127.0.0.1:18700" {
+		t.Fatalf("%+v %v %v", c.List, err, c.Validate())
+	}
+	c.List[1].IP = "127.0.0.1:99999"
+	if c.Validate() == nil {
+		t.Error("port 99999 accepted")
 	}
 }

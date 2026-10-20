@@ -395,8 +395,28 @@ func TestCamRoundTripKeepsBOMAndUnknownFields(t *testing.T) {
 	if _, _, code := r.run("cam", "add", "--name", "X", "--ip", "rtsp://u:p@h/"); code != 1 {
 		t.Error("credential URL accepted as an address")
 	}
+	for _, bad := range []string{"192.0.2.31:0", "192.0.2.31:70000", "192.0.2.31:x", "h:1:2"} {
+		if _, _, code := r.run("cam", "add", "--name", "X", "--ip", bad); code != 1 {
+			t.Errorf("address %q accepted", bad)
+		}
+		if _, _, code := r.run("cam", "set", "Back", "--ip", bad); code != 1 {
+			t.Errorf("cam set accepted %q", bad)
+		}
+	}
 	if after, _ := os.ReadFile(r.cameras()); !bytes.Equal(before, after) {
 		t.Error("a refused add changed the file")
+	}
+	for _, a := range [][]string{{"cam", "add", "--name", "Gate", "--ip", "127.0.0.1:18700", "--quality", "gate", "--record"}, {"cam", "set", "Back", "--ip", "cam.example.com:8554"}} {
+		if out, errw, code := r.run(a...); code != 0 {
+			t.Fatalf("%v: %d %s %s", a, code, out, errw)
+		}
+	}
+	c, err = config.LoadCameras(r.cameras())
+	if err != nil || len(c.List) != 3 || c.List[2].IP != "127.0.0.1:18700" || c.List[1].IP != "cam.example.com:8554" {
+		t.Errorf("%+v %v", c.List, err)
+	}
+	if out, _, code := r.run("cam", "show", "Gate"); code != 0 || !strings.Contains(out, "127.0.0.1:18700") {
+		t.Errorf("show: %d %s", code, out)
 	}
 }
 
