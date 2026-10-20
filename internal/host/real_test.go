@@ -223,7 +223,7 @@ func checkWindowClosed(t *testing.T, dir, state string, cmd *exec.Cmd, done <-ch
 	if v, err := status.Validate(raw); err != nil || len(v) > 0 {
 		t.Errorf("status.json invalid: %v %v", err, v)
 	}
-	if d := readDoc(state); d == nil || d.StopKind != status.StopKindWindowClosed || d.LastWindowClose == nil {
+	if d := readDoc(state); d == nil || d.StopKind != status.StopKindWindowClosed || d.LastWindowClose == nil || d.LastWindowClose.DetectedBy != "nvr host" {
 		t.Errorf("document %+v", d)
 	}
 	if a := k.gone(t, 3*time.Second, k.all()...); len(a) != 0 {

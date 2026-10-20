@@ -474,12 +474,13 @@ func (h *Host) recordUnexpected(pid int, reason string) {
 	h.log.Info("recorded StopKind 'unexpected' in status.json (the supervisor could not)", logx.Action("host.status"), logx.Actor("host"), logx.Target(h.statusPath), logx.Result(logx.ResultOK), logx.PID(pid))
 }
 
-// recordWindowClosed is Set-CamStatusWindowClosed. DetectedBy is the schema's only allowed value.
+// recordWindowClosed is Set-CamStatusWindowClosed. The host detects the close itself (no warden
+// process), so DetectedBy is "nvr host" (the schema accepts it besides the PowerShell "nvr warden").
 func (h *Host) recordWindowClosed(pid int, reason string) {
 	doc := h.baseDoc(pid)
 	at := h.now()
 	doc.State, doc.StopKind, doc.UpdatedAt = status.StateStopped, status.StopKindWindowClosed, at
-	doc.LastWindowClose = &status.WindowClose{At: at, Reason: reason, WindowTitle: h.cfg.WindowTitle, DetectedBy: "nvr warden"}
+	doc.LastWindowClose = &status.WindowClose{At: at, Reason: reason, WindowTitle: h.cfg.WindowTitle, DetectedBy: "nvr host"}
 	if err := h.d.Status.Write(doc); err != nil {
 		h.log.Error("could not record the window close in status.json: "+err.Error(), logx.Action("host.status"), logx.Actor("host"), logx.Target(h.statusPath), logx.Result(logx.ResultFail), logx.Err(err))
 		return

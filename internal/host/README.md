@@ -48,7 +48,7 @@ the supervisor gets its own hidden console (`CREATE_NO_WINDOW`), so a window clo
 - **Attached mode, window close** (CTRL_CLOSE/LOGOFF/SHUTDOWN, SIGHUP, SIGTERM, the console probe's `console-gone`): write
   `stop.request`, wait for the supervisor within `AttachedStopBudget` minus a reserve (Windows ends the process 5.04 s after the
   event, SP2); a supervisor still running then is killed (its job/group takes its children). Then, holding the lock, write
-  `StopKind=window-closed` + `LastWindowClose` (DetectedBy `"nvr warden"`, the schema's only value), raise 103 ONCE, return; never
+  `StopKind=window-closed` + `LastWindowClose` (DetectedBy `"nvr host"`; the schema accepts it besides the PowerShell `"nvr warden"`), raise 103 ONCE, return; never
   restart. A close during the restart delay also ends without restart (and 103). Ctrl+C is an orderly stop (`requested`, no alert).
 - **Service mode / ctx**: every OS stop is `requested`: stop.request, wait `StopTimeout`, no alert. A supervisor that does not stop
   in time is NOT killed (G7): ERROR "DID NOT STOP", the request stays in place, `stop-failed`, exit 1.
