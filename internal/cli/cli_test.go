@@ -47,13 +47,13 @@ type expect struct {
 var expectations = map[string]expect{
 	"status.show":   {"DEBUG", "ok", false, false},
 	"camera.list":   {"DEBUG", "ok", false, false},
-	"camera.add":    {"INFO", "ok", false, false},
+	"camera.add":    {"INFO", "ok", false, true},
 	"user.add":      {"INFO", "ok", false, true},
 	"audit.view":    {"DEBUG", "ok", false, true},
 	"config.get":    {"WARN", "refused", true, false},
-	"camera.remove": {"WARN", "refused", true, false},
+	"camera.remove": {"WARN", "refused", true, true},
 	"relay.probe":   {"ERROR", "fail", true, false},
-	"config.set":    {"ERROR", "fail", true, false},
+	"config.set":    {"ERROR", "fail", true, true},
 	"install.run":   {"ERROR", "fail", true, true},
 	"user.del":      {"ERROR", "fail", true, true},
 	"web.peek":      {"ERROR", "fail", true, false},
@@ -338,4 +338,40 @@ func TestConcurrentDo(t *testing.T) {
 		t.Errorf("%d records, want %d", got, want)
 	}
 	rg.log.Levels().SetDefault(logx.LevelError) // run-time change while idle is race-clean too
+}
+
+// unauditedMutating lists the Mutating actions of a registry that are not audited.
+func unauditedMutating(r *Registry) (bad []string) {
+	for _, a := range r.All() {
+		if a.Mutating && !a.Audit {
+			bad = append(bad, a.Name)
+		}
+	}
+	return bad
+}
+
+func TestMutatingActionsAreAudited(t *testing.T) {
+	rg := newRig(t, "")
+	if bad := unauditedMutating(rg.reg); len(bad) != 0 {
+		t.Fatalf("Mutating actions registered without Audit: %v", bad)
+	}
+	for _, a := range rg.reg.All() {
+		before := len(rg.audit.Lines())
+		rg.runner.Do(context.Background(), a.Name, Input{})
+		if a.Mutating && len(rg.audit.Lines()) == before {
+			t.Errorf("Mutating action %s produced no audit record", a.Name)
+		}
+	}
+	// A read-only action can still opt in; one that does not stays out of the audit stream.
+	if a, _ := rg.reg.Lookup("audit.view"); !a.Audit || a.Mutating {
+		t.Errorf("audit.view = %+v", a)
+	}
+	if a, _ := rg.reg.Lookup("status.show"); a.Audit {
+		t.Error("read-only action must not become audited")
+	}
+	// Negative control: an action that bypasses Register is flagged by the check.
+	rg.reg.actions["sneaky.write"] = Action{Name: "sneaky.write", Component: "cli", Mutating: true, Run: ok}
+	if bad := unauditedMutating(rg.reg); len(bad) != 1 || bad[0] != "sneaky.write" {
+		t.Errorf("negative control: unaudited = %v, want [sneaky.write]", bad)
+	}
 }

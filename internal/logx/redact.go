@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 const mask = "***"
@@ -68,7 +69,29 @@ func (r *Redactor) String(s string) string {
 	return userinfoRE.ReplaceAllString(s, "${1}***:***@")
 }
 
+// maxErrBytes bounds the err attribute (after redaction) so a huge error cannot flood the log.
+const maxErrBytes = 1024
+
+func truncateErr(s string) string {
+	if len(s) <= maxErrBytes {
+		return s
+	}
+	cut := maxErrBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s...(truncated %d bytes)", s[:cut], len(s)-cut)
+}
+
 func (r *Redactor) attr(a slog.Attr) slog.Attr {
+	out := r.redactAttr(a)
+	if out.Key == "err" && out.Value.Kind() == slog.KindString {
+		out.Value = slog.StringValue(truncateErr(out.Value.String()))
+	}
+	return out
+}
+
+func (r *Redactor) redactAttr(a slog.Attr) slog.Attr {
 	a.Value = a.Value.Resolve()
 	if isEmptyAttr(a) {
 		return a

@@ -26,8 +26,8 @@ type Output struct {
 type Action struct {
 	Name      string
 	Component string // logger component: cli, host, supervisor, relay, web, auth, ctlapi, ...
-	Mutating  bool   // changes state: a successful result is logged at INFO instead of DEBUG
-	Audit     bool   // security-relevant: its records also go to the audit stream
+	Mutating  bool   // changes state: a successful result is logged at INFO instead of DEBUG; implies Audit
+	Audit     bool   // security-relevant: its records also go to the audit stream (Register sets it for every Mutating action)
 	Run       func(ctx context.Context, in Input) (Output, error)
 }
 
@@ -54,10 +54,13 @@ var Default = NewRegistry()
 func Register(a Action) { Default.Register(a) }
 
 // Register adds an action. A duplicate name, an empty name or component, or a nil Run panics, so
-// the mistake surfaces at program start.
+// the mistake surfaces at program start. Every Mutating action is registered as Audit.
 func (r *Registry) Register(a Action) {
 	if a.Name == "" || a.Component == "" || a.Run == nil {
 		panic(fmt.Sprintf("cli: invalid action %+v: Name, Component and Run are required", a.Name))
+	}
+	if a.Mutating {
+		a.Audit = true
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

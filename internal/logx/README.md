@@ -22,7 +22,7 @@ JSON option: `{"time":"2026-10-17T13:44:05.123456+03:00","level":"INFO","compone
 - Redaction runs in the handler (message, string attrs, errors, Stringers, groups) and again on every formatted line
   before any sink. Attributes whose key contains password|passwd|secret|token|authorization|cookie|hash|apikey|api_key
   are masked. Non-string, non-error, non-Stringer `Any` values are flattened to a string so they can be redacted.
-- Records with top-level `audit=true` go to the main sink and the audit sink. They obey the level filter like any record.
+- Records with top-level `audit=true` go to the main sink and the audit sink. They bypass the level filter on the audit sink (an INFO audit record at level ERROR is still audited); the main sink still honours the level. The `err` attribute is cut to 1024 bytes after redaction (`...(truncated N bytes)`).
 - `RotatingFile` opens, appends and closes on every write and looks at the on-disk size each time (it tolerates other
   processes; no cross-process lock). Rotation: size >= MaxBytes before append, one `.1` generation. Failures never reach
   the caller. A blocked rotation produces one notice (in the file, next to the line) per episode, rearmed after a
@@ -60,7 +60,7 @@ cli:
 
     type Input struct{ ActionID, Target string; Args map[string]any }
     type Output struct{ Target string; Data any }
-    type Action struct{ Name, Component string; Mutating, Audit bool; Run func(context.Context, Input) (Output, error) }
+    type Action struct{ Name, Component string; Mutating, Audit bool; /* Register sets Audit for every Mutating action */ Run func(context.Context, Input) (Output, error) }
     var ErrRefused error; func Refuse(format string, args ...any) error; var ErrUnknownAction error
     type Registry; func NewRegistry() *Registry; var Default *Registry; func Register(Action)
       (r) Register(Action) (panics on duplicate/invalid); All() []Action; Lookup(name string) (Action, bool)
