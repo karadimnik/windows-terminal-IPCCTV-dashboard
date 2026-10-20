@@ -96,6 +96,9 @@ func TestAlertsAndSecretsValidation(t *testing.T) {
 		{`{"secrets":{"backend":"vault"}}`, "secrets.backend", "auto, keyring, file, env"},
 		{`{"secrets":{"backend":1}}`, "secrets.backend", "string"},
 		{`{"secrets":"env"}`, "secrets", "object"},
+		{`{"secrets":{"file":1}}`, "secrets.file", "string"},
+		{`{"secrets":{"keyFile":"\\\\server\\share\\k"}}`, "secrets.keyFile", "local file path"},
+		{`{"secrets":{"file":"a\nb"}}`, "secrets.file", "local file path"},
 		{`{"logging":{"level":"loud"}}`, "logging.level", ""},
 	} {
 		_, _, err := Parse([]byte(c.doc), linP)
@@ -138,5 +141,15 @@ func TestWebSection(t *testing.T) {
 		if !errors.As(err, &ve) || ve.Problems[0].Path != bad.path || !strings.Contains(ve.Problems[0].Message, bad.text) {
 			t.Errorf("%s: %v", bad.doc, err)
 		}
+	}
+}
+
+func TestSecretsFilePaths(t *testing.T) {
+	c, _, err := Parse([]byte(`{"secrets":{"file":" /x/s.enc ","keyFile":"/x/s.key"}}`), linP)
+	if err != nil || c.Secrets.File != "/x/s.enc" || c.Secrets.KeyFile != "/x/s.key" || c.Secrets.Backend != "auto" {
+		t.Errorf("%+v %v", c.Secrets, err)
+	}
+	if d := Defaults(linP).Secrets; d.File != "" || d.KeyFile != "" {
+		t.Errorf("defaults %+v", d)
 	}
 }

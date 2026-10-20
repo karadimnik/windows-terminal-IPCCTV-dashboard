@@ -4,7 +4,7 @@
     type ContainerProfile struct{ Extension, SegmentFormat string; AudioArgs, ExtraArgs []string; SegmentFormatOptions string }
     type Logging struct{ Level string; Levels map[string]string }   // default Level "info"
     Config.Alerts alerts.Config                                       // "alerts" object, defaults of internal/alerts/README.md
-    type Secrets struct{ Backend string }; var SecretBackends          // "secrets" object: auto (default) | keyring | file | env
+    type Secrets struct{ Backend, File, KeyFile string }; var SecretBackends   // "secrets" object: backend auto (default) | keyring | file | env; file and keyFile paths ("" = the auth folder)
     func Defaults(p osx.Platform) Config
     func Parse(data []byte, p osx.Platform) (Config, []Warning, error)   // error is *ValidationError (all problems, with key paths)
     func Load(path string, p osx.Platform) (Config, []Warning, error)    // missing or blank file = defaults

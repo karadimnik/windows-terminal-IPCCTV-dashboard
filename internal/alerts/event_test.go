@@ -17,7 +17,7 @@ func TestParseSeverity(t *testing.T) {
 }
 
 func TestDescribeCoversEveryID(t *testing.T) {
-	for _, id := range []int{100, 101, 102, 103, 110, 120, 121, 122, 130} {
+	for _, id := range []int{100, 101, 102, 103, 104, 110, 120, 121, 122, 130} {
 		if d := Describe(id); strings.HasPrefix(d, "unknown") || d == "" {
 			t.Errorf("Describe(%d) = %q", id, d)
 		}
@@ -26,7 +26,7 @@ func TestDescribeCoversEveryID(t *testing.T) {
 		t.Errorf("Describe(999) = %q", d)
 	}
 	// severities of IR 6
-	want := map[int]Severity{100: Error, 101: Warning, 102: Error, 103: Warning, 110: Warning, 120: Error, 121: Error, 122: Error, 130: Error}
+	want := map[int]Severity{100: Error, 101: Warning, 102: Error, 103: Warning, 104: Error, 110: Warning, 120: Error, 121: Error, 122: Error, 130: Error}
 	ms := Meanings()
 	if len(ms) != len(want) {
 		t.Fatalf("%d meanings, want %d", len(ms), len(want))

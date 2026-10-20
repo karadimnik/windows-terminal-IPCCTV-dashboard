@@ -55,8 +55,10 @@ type Options struct {
 	// Launch lets the Start button run `holocron up --detach` (the holocron web role sets it).
 	Launch *HolocronLaunch
 	// GoSystem marks the holocron web role: with no supervisor answering, the page talks to the Go
-	// system's controller (not PowerShell) and settings writes are refused (they are PowerShell).
+	// system's controller (not PowerShell); settings writes go to Settings, or are refused when it is nil.
 	GoSystem bool
+	// Settings writes PUT /api/cameras and PUT /api/config in the Go system (nil: they answer 501).
+	Settings SettingsWriter
 	// StopFile, when set, ends Run as soon as the file exists (how the host stops the web role on
 	// every OS; removed by the host).
 	StopFile string
@@ -276,7 +278,7 @@ func Run(ctx context.Context, o Options) error {
 	}
 	cfg := o.Config
 	var log *slog.Logger
-	opts := []serveOpt{withController(o.Controller), withLaunch(o.Launch, o.GoSystem)}
+	opts := []serveOpt{withController(o.Controller), withLaunch(o.Launch, o.GoSystem), withSettings(o.Settings)}
 	if o.Logs != nil {
 		log = o.Logs.For("web")
 		opts = append(opts, withLogs(o.Logs), withRequestLevel(slog.LevelDebug))

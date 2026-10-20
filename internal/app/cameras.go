@@ -185,3 +185,102 @@ func FindCamera(path, name string) (config.Camera, error) {
 	}
 	return c.List[i], nil
 }
+
+// CameraRow is one row of the Settings page: OriginalName names the camera in the file that this
+// row edits (empty for a new camera), so a rename keeps the fields the product does not know.
+type CameraRow struct {
+	OriginalName, Name, IP, Quality string
+	Record                          bool
+}
+
+// RowProblem is one reason a row of PutCameras was refused; Field is name, ip or quality.
+type RowProblem struct {
+	Row            int
+	Field, Message string
+}
+
+// InvalidRows is the refusal of PutCameras: nothing was written.
+type InvalidRows struct{ Problems []RowProblem }
+
+func (e *InvalidRows) Error() string {
+	var parts []string
+	for _, p := range e.Problems {
+		parts = append(parts, fmt.Sprintf("row %d %s: %s", p.Row+1, p.Field, p.Message))
+	}
+	return "refused: " + strings.Join(parts, "; ")
+}
+
+// Unwrap makes errors.Is(err, cli.ErrRefused) true.
+func (e *InvalidRows) Unwrap() error { return cli.ErrRefused }
+
+// PutCameras replaces the whole camera list with rows, in that order (the Settings page's save):
+// every row is validated like `cam add|set` (name as a folder, host or host:port with the port
+// checked, stream, folder collisions) and any problem refuses the lot with *InvalidRows, the file
+// untouched. A row with an OriginalName keeps the fields of that camera the product does not know;
+// cameras missing from rows are removed. A request that changes nothing writes nothing. Returns the
+// number of cameras added, removed or edited (a pure reordering counts 1).
+func PutCameras(path string, rows []CameraRow) (int, error) {
+	c, err := LoadCameras(path)
+	if err != nil {
+		return 0, err
+	}
+	old := c.List
+	var probs []RowProblem
+	used := map[int]bool{}
+	next := make([]config.Camera, 0, len(rows))
+	changed, last, reordered := 0, -1, false
+	for i, r := range rows {
+		var cam config.Camera
+		orig := -1
+		if r.OriginalName != "" {
+			if orig = findCamera(c, r.OriginalName); orig < 0 {
+				probs = append(probs, RowProblem{Row: i, Field: "name", Message: fmt.Sprintf("the camera %q is not in the file any more; reload the page", r.OriginalName)})
+			} else if used[orig] {
+				probs = append(probs, RowProblem{Row: i, Field: "name", Message: fmt.Sprintf("the camera %q is listed twice", r.OriginalName)})
+				orig = -1
+			} else {
+				used[orig] = true
+				cam = old[orig]
+			}
+		}
+		cam.Name, cam.IP, cam.Quality, cam.Record = strings.TrimSpace(r.Name), strings.TrimSpace(r.IP), strings.TrimSpace(r.Quality), r.Record
+		if orig < 0 || old[orig].Name != cam.Name || old[orig].IP != cam.IP || old[orig].Quality != cam.Quality || old[orig].Record != cam.Record {
+			changed++
+		}
+		if orig >= 0 {
+			reordered = reordered || orig < last
+			last = orig
+		}
+		next = append(next, cam)
+	}
+	changed += len(old) - len(used)
+	if len(probs) == 0 {
+		if err := (&config.Cameras{List: next}).Validate(); err != nil {
+			var ve *config.ValidationError
+			if !errors.As(err, &ve) {
+				return 0, err
+			}
+			for _, p := range ve.Problems {
+				var row int
+				var field string
+				if _, serr := fmt.Sscanf(p.Path, "cameras[%d].%s", &row, &field); serr == nil {
+					probs = append(probs, RowProblem{Row: row, Field: strings.ToLower(field), Message: p.Message})
+				}
+			}
+		}
+	}
+	if len(probs) > 0 {
+		return 0, &InvalidRows{Problems: probs}
+	}
+	if changed == 0 && !reordered {
+		return 0, nil
+	}
+	if reordered && changed == 0 {
+		changed = 1
+	}
+	c.List = next
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return 0, err
+	}
+	return changed, c.Save(path)
+}

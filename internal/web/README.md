@@ -11,6 +11,9 @@ the code, the embedded `static/` and the tests are the ones that were there. Sec
     func Main(args) int                     // camui.exe's whole main (cmd/camui): the above, text records on stdout, SIGINT/SIGTERM
     type Options struct{ Config; Logs cli.LogSource; Controller; Launch *HolocronLaunch; GoSystem bool; StopFile string; ... }
     func LoginUsers(authDir) (int, error)   // `holocron status`: does a login exist
+    func Users(authDir, *slog.Logger) *UserAdmin   // `holocron user`: Add, SetPassword, Remove, List (no hashes), Unlock (admin.go); ErrUserExists, ErrNoSuchUser, IsInputError
+    func CAFor(tlsDir) (CAInfo, error); CACertificatePEM(tlsDir); WriteCAInstructions(w, CAInfo); RotateCA(tlsDir)   // `holocron tls`
+    type SettingsWriter interface{ PutCameras(ctx, path, []CameraPut); PutConfig(ctx, path, map[string]any) }  // Options.Settings
 
 `holocron web` calls the same functions with `Logs` set to the process's logx logger (component `web`, request lines at DEBUG;
 camui.exe keeps slog text lines on stdout with the request lines at INFO, which the PowerShell harness reads), `GoSystem` true and
@@ -26,8 +29,11 @@ view-only gate on the TLS listener, the WHEP exception, certificate handling) wa
 in the headers. The choice is made per request and cached for 5 s: the API controller when `<root>/_state/ctl.addr` answers within
 1 s, in the holocron web role the API controller in its "stopped" form when it does not (Start runs `<holocron> up --detach` when
 `Launch` is set, otherwise answers 409 "start it with holocron up"; Stop and the record toggle answer 409), PowerShell otherwise.
-`GET /api/status` reports the choice in `controller`. In the Go system `PUT /api/cameras` and `PUT /api/config` answer 501 (their
-writer is a PowerShell script); `Config.CamerasPath` / `Config.ConfigPath` point the readers at `cameras.json` and
+`GET /api/status` reports the choice in `controller`. In the Go system `PUT /api/cameras` and `PUT /api/config` go to `Options.Settings` (a `SettingsWriter`: the holocron web role
+supplies one over the shared edit helpers of `internal/app` and reloads the supervisor; the page's name and stream rules still run
+first, the address check is the writer's so `host:port` is accepted, and a blank stream is `stream1`; a writer's `invalid` rows
+answer 422 with the fields, an `ErrRefused` 422, any other error 500, nothing written), and answer 501 only when no writer was
+supplied; `camui.exe` keeps the PowerShell script; `Config.CamerasPath` / `Config.ConfigPath` point the readers at `cameras.json` and
 `holocron.config.json`.
 
 ## Rule R2 (`actions.go`)

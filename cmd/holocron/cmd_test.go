@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 
 func TestMain(m *testing.M) {
 	os.Setenv(app.SandboxEnv, "1")
+	os.Setenv("SANDBOX_ONLY", "1") // internal/prune's own sandbox: the executor deletes only under the OS temp folder
 	os.Exit(m.Run())
 }
 
@@ -81,7 +83,12 @@ type rig struct {
 	t         *testing.T
 	root, cfg string
 	ctl       *fakeCtl
-	logSpec   string // HOLOCRON_LOG for the runs
+	logSpec   string    // HOLOCRON_LOG for the runs
+	stdin     string    // what the commands read from standard input
+	stdinR    io.Reader // when set, used instead of stdin
+	noCreds   bool      // the camera login variables are not set
+	noCtl     bool      // no supervisor answers on the control endpoint
+	opened    []string
 	insp      osx.Inspector
 }
 
@@ -110,10 +117,25 @@ func (r *rig) run(args ...string) (string, string, int) {
 	var out, errw bytes.Buffer
 	argv := append([]string{"--root", r.root, "--config", r.cfg}, args...)
 	code := run(context.Background(), argv, &out, &errw, &seams{
-		dial:      func(string) (ctl, error) { return r.ctl, nil },
+		dial: func(string) (ctl, error) {
+			if r.noCtl {
+				return nil, errors.New("no ctl.addr")
+			}
+			return r.ctl, nil
+		},
 		inspector: r.inspector(),
 		exe:       "/nonexistent/holocron",
+		stdin: func() io.Reader {
+			if r.stdinR != nil {
+				return r.stdinR
+			}
+			return strings.NewReader(r.stdin)
+		}(),
+		opener: func(u string) error { r.opened = append(r.opened, u); return nil },
 		getenv: func(k string) string {
+			if r.noCreds && (k == app.EnvCameraUser || k == app.EnvCameraPassword) {
+				return ""
+			}
 			return map[string]string{app.EnvCameraUser: "u", app.EnvCameraPassword: "p", "HOLOCRON_LOG": r.logSpec}[k]
 		},
 	})
@@ -244,14 +266,14 @@ func TestExitCodes(t *testing.T) {
 	}{
 		{[]string{"nope"}, 2}, {[]string{"cam"}, 2}, {[]string{"cam", "show"}, 2}, {[]string{"cam", "add", "--name", "x"}, 2},
 		{[]string{"config", "set", "SegmentSeconds"}, 2}, {[]string{"status", "--bogus"}, 2}, {[]string{"up", "--only", "x"}, 2},
-		{[]string{"web", "-tls-readonly", "maybe"}, 2}, {[]string{"user", "add", "x"}, 1}, {[]string{"status"}, 1}, {[]string{"version"}, 0},
+		{[]string{"web", "-tls-readonly", "maybe"}, 2}, {[]string{"user", "add", "x"}, 2}, {[]string{"install"}, 1}, {[]string{"status"}, 1}, {[]string{"version"}, 0},
 		{[]string{"cam", "show", "Nope"}, 1}, {[]string{"logs", "--level", "loud"}, 2}, {[]string{"logs", "--since", "yesterday"}, 2},
 	} {
 		if _, errw, code := r.run(c.args...); code != c.code {
 			t.Errorf("%v: exit %d want %d (%s)", c.args, code, c.code, errw)
 		}
 	}
-	if _, errw, _ := r.run("user", "list"); !strings.Contains(errw, "not built yet") {
+	if _, errw, _ := r.run("install"); !strings.Contains(errw, "not built yet") {
 		t.Errorf("not-built message: %s", errw)
 	}
 	var out, errw bytes.Buffer
@@ -273,7 +295,7 @@ func TestCommandsLogBeginAndResult(t *testing.T) {
 		{"cam", "set", "Side", "--record", "true"}, {"cam", "disable", "Side"}, {"cam", "enable", "Side"}, {"cam", "remove", "Side"},
 		{"config", "get", "SegmentSeconds"}, {"config", "set", "ReserveGB", "5"}, {"config", "unset", "ReserveGB"}, {"config", "validate"},
 		{"config", "show"}, {"live", "status"}, {"live", "enable"}, {"live", "disable"}, {"log", "level", "all", "info", "--save"},
-		{"logs"}, {"down"}, {"alert", "test", "log"}, {"user", "list"}, {"config", "set", "RootPath", "/x"},
+		{"logs"}, {"down"}, {"alert", "test", "log"}, {"install"}, {"config", "set", "RootPath", "/x"},
 	}
 	for _, a := range runs {
 		r.run(a...)
@@ -322,7 +344,7 @@ func TestCommandsLogBeginAndResult(t *testing.T) {
 		if x.begin != 1 || x.result != 1 {
 			t.Errorf("%s %s: begin %d result %d", id, x.action, x.begin, x.result)
 		}
-		if (x.action == "user.list" || x.action == "nvr.status") && x.level != "ERROR" && x.level != "WARN" {
+		if (x.action == "install.run" || x.action == "nvr.status") && x.level != "ERROR" && x.level != "WARN" {
 			t.Errorf("%s failed at %s", x.action, x.level)
 		}
 		if x.action == "config.set" && x.level != "INFO" && x.level != "WARN" {

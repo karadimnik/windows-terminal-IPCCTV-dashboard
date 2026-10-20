@@ -106,7 +106,8 @@ type API struct {
 	powerShell *PowerShellController
 	dialCtl    func(root string) (apiClient, error)
 	launch     *HolocronLaunch
-	goSystem   bool // the holocron web role: an unanswering control endpoint means "stopped", not "PowerShell"
+	goSystem   bool           // the holocron web role: an unanswering control endpoint means "stopped", not "PowerShell"
+	settings   SettingsWriter // the Go system's settings writer (nil: PUT /api/cameras and /api/config answer 501 there)
 	pickMu     sync.Mutex
 	picked     Controller
 	pickedAt   time.Time

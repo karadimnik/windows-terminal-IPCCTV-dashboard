@@ -53,6 +53,7 @@ func cmdWeb(ctx context.Context, e *env) error {
 	}
 	o.Logs = e.lg
 	o.GoSystem = true
+	o.Settings = webSettings{e: e}
 	o.Launch = &web.HolocronLaunch{Exe: exe, Args: e.global}
 	if err := o.Validate(); err != nil {
 		return usageErr("%v", err)
