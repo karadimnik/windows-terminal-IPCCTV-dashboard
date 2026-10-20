@@ -28,6 +28,9 @@ type goldenVariant struct {
 
 func loadGoldens(t *testing.T) []goldenVariant {
 	t.Helper()
+	if _, err := os.Stat(goldenDir); err != nil {
+		t.Skipf("the golden files are not reachable from this working directory (a test binary run elsewhere): %v", err)
+	}
 	files, _ := filepath.Glob(filepath.Join(goldenDir, "*.json"))
 	var out []goldenVariant
 	for _, f := range files {
