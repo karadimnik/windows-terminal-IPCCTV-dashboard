@@ -1,0 +1,261 @@
+{
+    "Name":  "pruneowner-foreign",
+    "Check":  "pruneowner",
+    "Expect":  [
+
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "none",
+    "Claim":  null,
+    "Entries":  [
+                    {
+                        "Path":  "archive/Photos/holiday.jpg",
+                        "Kind":  "file",
+                        "Bytes":  2097152,
+                        "CTime":  "2026-10-20T06:00:00.0000000Z",
+                        "MTime":  "2026-10-20T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/pruneowner-foreign/pruneowner-foreign_20261015_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-15T06:00:00.0000000Z",
+                        "MTime":  "2026-10-15T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/pruneowner-foreign/pruneowner-foreign_20261016_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-16T06:00:00.0000000Z",
+                        "MTime":  "2026-10-16T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/pruneowner-foreign/pruneowner-foreign_20261020_085900+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:00.0000000Z",
+                        "MTime":  "2026-10-20T05:59:00.0000000Z"
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "claim"
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "claim",
+                        "Created":  false,
+                        "Problem":  "RootPath \u0027archive\u0027 holds 1 top-level entry the recorder did not write: Photos\\holiday.jpg (not a recorder segment)"
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "there is no ownership marker at archive/_state/archive-owner.json and the recorder cannot claim the root: RootPath \u0027archive\u0027 holds 1 top-level entry the recorder did not write: Photos\\holiday.jpg (not a recorder segment). Move those entries out of RootPath, or point RootPath at a folder of its own, then restart the recorder",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "",
+                        "Message":  "PRUNING DISABLED: there is no ownership marker at archive/_state/archive-owner.json and the recorder cannot claim the root: RootPath \u0027archive\u0027 holds 1 top-level entry the recorder did not write: Photos\\holiday.jpg (not a recorder segment). Move those entries out of RootPath, or point RootPath at a folder of its own, then restart the recorder. Nothing is deleted until this is fixed, so the disk will fill. Recording continues.",
+                        "Protected":  [
+
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+                                       {
+                                           "Id":  120,
+                                           "Type":  "Error",
+                                           "Title":  "pruning is disabled - the disk will fill"
+                                       }
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  true,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  1,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  0
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "there is no ownership marker at archive/_state/archive-owner.json and the recorder cannot claim the root: RootPath \u0027archive\u0027 holds 1 top-level entry the recorder did not write: Photos\\holiday.jpg (not a recorder segment). Move those entries out of RootPath, or point RootPath at a folder of its own, then restart the recorder",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "",
+                        "Message":  "PRUNING DISABLED: there is no ownership marker at archive/_state/archive-owner.json and the recorder cannot claim the root: RootPath \u0027archive\u0027 holds 1 top-level entry the recorder did not write: Photos\\holiday.jpg (not a recorder segment). Move those entries out of RootPath, or point RootPath at a folder of its own, then restart the recorder. Nothing is deleted until this is fixed, so the disk will fill. Recording continues.",
+                        "Protected":  [
+
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  true,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  0
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "there is no ownership marker at archive/_state/archive-owner.json and the recorder cannot claim the root: RootPath \u0027archive\u0027 holds 1 top-level entry the recorder did not write: Photos\\holiday.jpg (not a recorder segment). Move those entries out of RootPath, or point RootPath at a folder of its own, then restart the recorder",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "",
+                        "Message":  "PRUNING DISABLED: there is no ownership marker at archive/_state/archive-owner.json and the recorder cannot claim the root: RootPath \u0027archive\u0027 holds 1 top-level entry the recorder did not write: Photos\\holiday.jpg (not a recorder segment). Move those entries out of RootPath, or point RootPath at a folder of its own, then restart the recorder. Nothing is deleted until this is fixed, so the disk will fill. Recording continues.",
+                        "Protected":  [
+
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  true,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  0
+                                   }
+                    }
+                ]
+}

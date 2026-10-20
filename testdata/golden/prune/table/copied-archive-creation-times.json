@@ -1,0 +1,118 @@
+{
+    "Name":  "copied-archive-creation-times",
+    "Check":  "difference",
+    "Expect":  [
+                   "open-segment"
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "claim",
+    "Claim":  {
+                  "Created":  true,
+                  "Problem":  ""
+              },
+    "Entries":  [
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261015_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:00:00.0000000Z",
+                        "MTime":  "2026-10-15T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261016_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T03:00:00.0000000Z",
+                        "MTime":  "2026-10-16T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261017_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T04:00:00.0000000Z",
+                        "MTime":  "2026-10-17T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261020_085900+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T02:00:00.0000000Z",
+                        "MTime":  "2026-10-20T05:59:00.0000000Z"
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  1
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "the oldest candidate archive/Cam_A/Cam_A_20261016_090000+0300.mkv (written 2026-10-16 09:00:00) is later than the newest segment archive/Cam_A/Cam_A_20261015_090000+0300.mkv (written 2026-10-15 09:00:00)",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: refused before the first deletion - the oldest candidate archive/Cam_A/Cam_A_20261016_090000+0300.mkv (written 2026-10-16 09:00:00) is later than the newest segment archive/Cam_A/Cam_A_20261015_090000+0300.mkv (written 2026-10-15 09:00:00)",
+                        "Message":  "PRUNE REFUSED: the oldest candidate archive/Cam_A/Cam_A_20261016_090000+0300.mkv (written 2026-10-16 09:00:00) is later than the newest segment archive/Cam_A/Cam_A_20261015_090000+0300.mkv (written 2026-10-15 09:00:00). Nothing deleted this run; recording continues.",
+                        "Protected":  [
+                                          "archive/Cam_A/Cam_A_20261015_090000+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  true,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  1,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  0
+                                   }
+                    }
+                ]
+}

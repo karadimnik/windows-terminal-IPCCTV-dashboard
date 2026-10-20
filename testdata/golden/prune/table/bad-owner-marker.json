@@ -1,0 +1,197 @@
+{
+    "Name":  "bad-owner-marker",
+    "Check":  "pruneroots",
+    "Expect":  [
+
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "badowner",
+    "Claim":  null,
+    "Entries":  [
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261015_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-15T06:00:00.0000000Z",
+                        "MTime":  "2026-10-15T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261016_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-16T06:00:00.0000000Z",
+                        "MTime":  "2026-10-16T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261020_085700+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  0,
+                        "CTime":  "2026-10-20T05:57:00.0000000Z",
+                        "MTime":  "2026-10-20T05:57:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:00.0000000Z",
+                        "MTime":  "2026-10-20T05:59:00.0000000Z"
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  1
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  true,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  1
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "there is no ownership marker at archive/_state/archive-owner.json. The root qualifies - restart the recorder and it claims it",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "",
+                        "Message":  "PRUNING DISABLED: there is no ownership marker at archive/_state/archive-owner.json. The root qualifies - restart the recorder and it claims it. Nothing is deleted until this is fixed, so the disk will fill. Recording continues.",
+                        "Protected":  [
+
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+                                       {
+                                           "Id":  120,
+                                           "Type":  "Error",
+                                           "Title":  "pruning is disabled - the disk will fill"
+                                       }
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  true,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  1,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  0
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  true,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/Front_Entrance/Front_Entrance_20261015_090000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Front_Entrance/Front_Entrance_20261016_090000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          }
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  false,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule reached its cutoff 2026-10-19 09:00:00 after 2 deletion(s), stopping at Front_Entrance_20261020_085700+0300.mkv (written 2026-10-20 08:57:00); watermark not needed: free 0.00 GB is at or above the 0.00 GB reserve",
+                        "Message":  "prune: 2 file(s) deleted, 0.000 GB freed, free 0.00 -\u003e 0.00 GB (reserve 0.00, target 0.00)",
+                        "Protected":  [
+                                          "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  3,
+                        "Deleted":  2,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  1.9073486328125E-06,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    }
+                ]
+}

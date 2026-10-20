@@ -1,0 +1,181 @@
+{
+    "Name":  "pruneowner-clean",
+    "Check":  "pruneowner",
+    "Expect":  [
+
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "none",
+    "Claim":  null,
+    "Entries":  [
+                    {
+                        "Path":  "archive/pruneowner-clean/pruneowner-clean_20261018_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-18T06:00:00.0000000Z",
+                        "MTime":  "2026-10-18T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/pruneowner-clean/pruneowner-clean_20261020_085900+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:00.0000000Z",
+                        "MTime":  "2026-10-20T05:59:00.0000000Z"
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "claim"
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "claim",
+                        "Created":  true,
+                        "Problem":  ""
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/pruneowner-clean/pruneowner-clean_20261018_090000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          }
+                                      ],
+                        "Removed":  [
+                                        "archive/pruneowner-clean/pruneowner-clean_20261018_090000+0300.mkv"
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  false,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule: 1 deletion(s), every candidate was older than the cutoff 2026-10-19 09:00:00 - nothing deletable left; watermark not needed: free 0.06 GB is at or above the 0.00 GB reserve",
+                        "Message":  "prune: 1 file(s) deleted, 0.000 GB freed, free 0.00 -\u003e 0.06 GB (reserve 0.00, target 0.00)",
+                        "Protected":  [
+                                          "archive/pruneowner-clean/pruneowner-clean_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  1,
+                        "Deleted":  1,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0.06,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  1,
+                                       "summary":  1,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  false,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule: 0 deletion(s), every candidate was older than the cutoff 2026-10-19 09:00:00 - nothing deletable left; watermark not needed: free 0.00 GB is at or above the 0.00 GB reserve",
+                        "Message":  "",
+                        "Protected":  [
+                                          "archive/pruneowner-clean/pruneowner-clean_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    }
+                ]
+}

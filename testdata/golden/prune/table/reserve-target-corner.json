@@ -1,0 +1,194 @@
+{
+    "Name":  "reserve-target-corner",
+    "Check":  "corner",
+    "Expect":  [
+
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "claim",
+    "Claim":  {
+                  "Created":  true,
+                  "Problem":  ""
+              },
+    "Entries":  [
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261020_060000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  1073741824,
+                        "CTime":  "2026-10-20T03:00:00.0000000Z",
+                        "MTime":  "2026-10-20T03:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261020_070000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  1073741824,
+                        "CTime":  "2026-10-20T04:00:00.0000000Z",
+                        "MTime":  "2026-10-20T04:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261020_085900+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  1073741824,
+                        "CTime":  "2026-10-20T05:59:00.0000000Z",
+                        "MTime":  "2026-10-20T05:59:00.0000000Z"
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  9,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  10,
+                                     "PruneHysteresisGB":  5,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  11,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  10,
+                                     "PruneHysteresisGB":  5,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261020_060000+0300.mkv",
+                                              "Bytes":  1073741824,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 9.00 GB below reserve 10.00 GB, target 15.00 GB"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261020_070000+0300.mkv",
+                                              "Bytes":  1073741824,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 10.00 GB below reserve 10.00 GB, target 15.00 GB"
+                                          }
+                                      ],
+                        "Removed":  [
+                                        "archive/Cam_A/Cam_A_20261020_060000+0300.mkv",
+                                        "archive/Cam_A/Cam_A_20261020_070000+0300.mkv"
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 2 deletion(s), free 11.00 GB is still below the 10.00 GB reserve",
+                        "Message":  "PRUNE BLOCKED: free 11.00 GB is below the 10.00 GB reserve and nothing deletable is left (2 candidate(s), 0 undeletable, 1 protected as in-progress). Recording continues. Lower ReserveGB, move RootPath to a larger volume, or free space by hand.",
+                        "Protected":  [
+                                          "archive/Cam_A/Cam_A_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  2,
+                        "Deleted":  2,
+                        "Failed":  0,
+                        "FreeGBBefore":  9,
+                        "FreeGBAfter":  11,
+                        "ReserveGB":  10,
+                        "TargetGB":  15,
+                        "Alerts":  [
+                                       {
+                                           "Id":  121,
+                                           "Type":  "Error",
+                                           "Title":  "pruning is blocked - the disk is filling"
+                                       }
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  true,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  1,
+                                       "deleted":  2,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  false,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark not needed: free 11.00 GB is at or above the 10.00 GB reserve",
+                        "Message":  "",
+                        "Protected":  [
+                                          "archive/Cam_A/Cam_A_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  11,
+                        "FreeGBAfter":  11,
+                        "ReserveGB":  10,
+                        "TargetGB":  15,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    }
+                ]
+}

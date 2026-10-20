@@ -1,0 +1,285 @@
+{
+    "Name":  "strict-allowlist-age",
+    "Check":  "difference",
+    "Expect":  [
+                   "strict-allowlist"
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "claim",
+    "Claim":  {
+                  "Created":  true,
+                  "Problem":  ""
+              },
+    "Entries":  [
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261015_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-15T06:00:00.0000000Z",
+                        "MTime":  "2026-10-15T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261016_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-16T06:00:00.0000000Z",
+                        "MTime":  "2026-10-16T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261020_085900+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:00.0000000Z",
+                        "MTime":  "2026-10-20T05:59:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_2026101\u0663_101010+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  2097152,
+                        "CTime":  "2026-10-14T06:00:00.0000000Z",
+                        "MTime":  "2026-10-14T06:00:00.0000000Z",
+                        "Late":  true
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261345_101010+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  2097152,
+                        "CTime":  "2026-10-13T06:00:00.0000000Z",
+                        "MTime":  "2026-10-13T06:00:00.0000000Z",
+                        "Late":  true
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261012_256161+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  2097152,
+                        "CTime":  "2026-10-12T06:00:00.0000000Z",
+                        "MTime":  "2026-10-12T06:00:00.0000000Z",
+                        "Late":  true
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261012_101010+9900.mkv",
+                        "Kind":  "file",
+                        "Bytes":  2097152,
+                        "CTime":  "2026-10-11T06:00:00.0000000Z",
+                        "MTime":  "2026-10-11T06:00:00.0000000Z",
+                        "Late":  true
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "prune",
+                      "Dry":  true,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  1
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  1
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "prune",
+                        "Dry":  true,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261012_101010+9900.mkv",
+                                              "Bytes":  2097152,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261012_256161+0300.mkv",
+                                              "Bytes":  2097152,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261345_101010+0300.mkv",
+                                              "Bytes":  2097152,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_2026101\u0663_101010+0300.mkv",
+                                              "Bytes":  2097152,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261015_090000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261016_090000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          }
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  false,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule: 6 deletion(s), every candidate was older than the cutoff 2026-10-19 09:00:00 - nothing deletable left; watermark not needed: free 0.00 GB is at or above the 0.00 GB reserve",
+                        "Message":  "prune: 6 file(s) deleted, 0.000 GB freed, free 0.00 -\u003e 0.00 GB (reserve 0.00, target 0.00)",
+                        "Protected":  [
+                                          "archive/Cam_A/Cam_A_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  6,
+                        "Deleted":  6,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  2.0265579223632813E-06,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261012_101010+9900.mkv",
+                                              "Bytes":  2097152,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261012_256161+0300.mkv",
+                                              "Bytes":  2097152,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261345_101010+0300.mkv",
+                                              "Bytes":  2097152,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_2026101\u0663_101010+0300.mkv",
+                                              "Bytes":  2097152,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261015_090000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261016_090000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "age",
+                                              "Detail":  "older than MaxRetentionDays=1"
+                                          }
+                                      ],
+                        "Removed":  [
+                                        "archive/Cam_A/Cam_A_20261012_101010+9900.mkv",
+                                        "archive/Cam_A/Cam_A_20261012_256161+0300.mkv",
+                                        "archive/Cam_A/Cam_A_2026101\u0663_101010+0300.mkv",
+                                        "archive/Cam_A/Cam_A_20261015_090000+0300.mkv",
+                                        "archive/Cam_A/Cam_A_20261016_090000+0300.mkv",
+                                        "archive/Cam_A/Cam_A_20261345_101010+0300.mkv"
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  false,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule: 6 deletion(s), every candidate was older than the cutoff 2026-10-19 09:00:00 - nothing deletable left; watermark not needed: free 0.13 GB is at or above the 0.00 GB reserve",
+                        "Message":  "prune: 6 file(s) deleted, 0.000 GB freed, free 0.00 -\u003e 0.13 GB (reserve 0.00, target 0.00)",
+                        "Protected":  [
+                                          "archive/Cam_A/Cam_A_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  6,
+                        "Deleted":  6,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0.13,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  6,
+                                       "summary":  1,
+                                       "stop":  1
+                                   }
+                    }
+                ]
+}
