@@ -34,6 +34,16 @@ func assertOwnerOnly(t *testing.T, path string) {
 	}
 }
 
+func problems(path string, text string) []string {
+	var found []string
+	for _, who := range []string{"Everyone", `BUILTIN\Users`, "Authenticated Users", `BUILTIN\Administrators`, `NT AUTHORITY\SYSTEM`} {
+		if strings.Contains(text, who) {
+			found = append(found, who)
+		}
+	}
+	return found
+}
+
 // A created secret file names the current user alone, and a file that was open to others is repaired.
 func TestSecretFileAclOnWindows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "secret.txt")
@@ -43,12 +53,26 @@ func TestSecretFileAclOnWindows(t *testing.T) {
 	}
 	assertOwnerOnly(t, path)
 
-	// negative control: the same check fails on a file with the inherited (open) ACL
+	// negative control: a plain file in the same folder inherits entries for SYSTEM and Administrators,
+	// and one explicitly opened to Everyone shows that name; the check reports both
 	open := filepath.Join(t.TempDir(), "open.txt")
 	os.WriteFile(open, []byte(l.Secret), 0o644)
-	if out := aclText(t, open); !strings.Contains(out, `BUILTIN\Users`) && !strings.Contains(out, "Everyone") && !strings.Contains(out, "Authenticated Users") {
-		t.Skipf("the temp folder gives other accounts no access, so the repair cannot be shown here:\n%s", out)
+	if p := problems(open, aclText(t, open)); len(p) == 0 {
+		t.Fatalf("negative control: the inherited ACL went unnoticed:\n%s", aclText(t, open))
 	}
+	if out, err := exec.Command("icacls.exe", open, "/grant", "*S-1-1-0:(R)").CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	found := problems(open, aclText(t, open))
+	hasEveryone := false
+	for _, f := range found {
+		hasEveryone = hasEveryone || f == "Everyone"
+	}
+	if !hasEveryone {
+		t.Fatalf("negative control: Everyone not reported: %v", found)
+	}
+
+	// the load repairs it and still returns the stored secret
 	again, err := LoadLiveSecret(osx.Current(), open, false)
 	if err != nil || again.Secret != l.Secret {
 		t.Fatal(again, err)
