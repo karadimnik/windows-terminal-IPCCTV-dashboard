@@ -86,22 +86,20 @@ func TestEqualWriteTimesOrderByName(t *testing.T) {
 func TestExecutorRechecksEachFile(t *testing.T) {
 	type tc struct {
 		name   string
-		change func(r *rig, victim, guard string)
+		change func(t *testing.T, r *rig, victim, guard string)
 		why    string
 	}
 	for _, c := range []tc{
-		{"size", func(r *rig, v, _ string) { r.put(v, unit/32, fileTime(t, v)) }, "size changed"},
-		{"mtime", func(r *rig, v, _ string) { r.touch(v, fileTime(t, v).Add(time.Second)) }, "modified after the plan"},
-		{"gone", func(r *rig, v, _ string) { os.Remove(v) }, "it is gone"},
-		{"guard-gone", func(r *rig, _, g string) { os.Remove(g) }, "protected newest segment"},
-		{"guard-older", func(r *rig, v, g string) { r.touch(g, fileTime(t, v).Add(-time.Hour)) }, "no longer strictly older"},
-		{"link", func(r *rig, v, _ string) {
-			mt := fileTime(t, v)
+		{"size", func(t *testing.T, r *rig, v, _ string) { r.put(v, unit/32, fileTime(t, v)) }, "size changed"},
+		{"mtime", func(t *testing.T, r *rig, v, _ string) { r.touch(v, fileTime(t, v).Add(time.Second)) }, "modified after the plan"},
+		{"gone", func(t *testing.T, r *rig, v, _ string) { os.Remove(v) }, "it is gone"},
+		{"guard-gone", func(t *testing.T, r *rig, _, g string) { os.Remove(g) }, "protected newest segment"},
+		{"guard-older", func(t *testing.T, r *rig, v, g string) { r.touch(g, fileTime(t, v).Add(-time.Hour)) }, "no longer strictly older"},
+		{"link", func(t *testing.T, r *rig, v, _ string) {
 			os.Remove(v)
 			if err := os.Symlink(filepath.Join(r.dir, "elsewhere"), v); err != nil {
 				t.Skip("no symbolic links here:", err)
 			}
-			_ = mt
 		}, "link"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -114,7 +112,7 @@ func TestExecutorRechecksEachFile(t *testing.T) {
 			in := r.inputs(false)
 			r.fs.Before = func(p string) {
 				if p == a {
-					c.change(r, b, guard)
+					c.change(t, r, b, guard)
 				}
 			}
 			res, err := r.exec(false).Run(in, &r.st)
