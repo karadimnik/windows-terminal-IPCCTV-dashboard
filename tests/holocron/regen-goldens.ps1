@@ -71,7 +71,7 @@ try {
         foreach ($file in $files) { $known[$file.FullName.Substring($target.Length).TrimStart('\')] = $true }
         foreach ($file in @(Get-ChildItem -LiteralPath $goldenRoot -Recurse -File)) {
             $relative = $file.FullName.Substring($goldenRoot.Length).TrimStart('\')
-            if ($relative -like 'README.md' -or $relative -like '.gitkeep' -or $relative -like 'status\generated\*') { continue }
+            if ($relative -like 'README.md' -or $relative -like '.gitkeep' -or $relative -like 'status\generated\*' -or $relative -like 'prune\*') { continue }   # prune goldens have their own harness: tests/holocron/prune-diff.ps1
             if (-not $known.ContainsKey($relative)) { Write-Host "DIFF  $relative : committed but not produced"; $differences++ }
         }
         Write-Host ("verify: {0} generated files compared, {1} differences" -f $checked, $differences)
