@@ -70,7 +70,6 @@ func TestHostNeverRestartsDeliberateOrRefusedStops(t *testing.T) {
 		{"interrupted", func(h *harness, l *fakeLife) { l.stopped(status.StopKindInterrupted, 0) }, OutcomeInterrupted},
 		{"window-closed", func(h *harness, l *fakeLife) { l.stopped(status.StopKindWindowClosed, 0) }, OutcomeWindowClosed},
 		{"exit 20", func(h *harness, l *fakeLife) { l.exit(20) }, OutcomeAnother},
-		{"exit 21", func(h *harness, l *fakeLife) { l.exit(21) }, OutcomeConfigFault},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newHarness(t, Service)
@@ -428,6 +427,28 @@ func TestHostConfigFaultAfterRestartRaises102(t *testing.T) {
 	}
 	if ids := h.alerts.ids(); !reflect.DeepEqual(ids, []int{AlertStopped, AlertBudgetSpent}) {
 		t.Errorf("alerts %v", ids)
+	}
+}
+
+// Exit 21 on the FIRST life is not restarted and raises 102 too: the NVR is down and stays down.
+func TestHostConfigFaultFirstLifeRaises102(t *testing.T) {
+	h := newHarness(t, Service)
+	h.start()
+	l := h.life(1)
+	l.running()
+	l.exit(21)
+	res, err := h.wait()
+	if err != nil || res.Outcome != OutcomeConfigFault || res.ExitCode() != 21 {
+		t.Fatalf("%+v %v", res, err)
+	}
+	h.eventuallyStep("a possible restart", time.Second, func() bool { return h.clk.Since(0) > 2*time.Minute })
+	if n := h.nLives(); n != 1 {
+		t.Errorf("%d lives, want 1 (no restart)", n)
+	}
+	ev := h.alerts.all()
+	if len(ev) != 1 || ev[0].ID != AlertBudgetSpent || ev[0].Severity != "Error" ||
+		!strings.Contains(ev[0].Message, "configuration fault: the supervisor cannot start") || !strings.Contains(ev[0].Message, "stays down") {
+		t.Errorf("alerts %+v", ev)
 	}
 }
 
