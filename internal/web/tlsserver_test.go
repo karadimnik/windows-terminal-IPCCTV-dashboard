@@ -38,7 +38,7 @@ type tlsRig struct {
 
 // newTLSRig builds the LAN listener's real handler chain over a throwaway auth
 // folder holding one user (anna), with a cheap hasher and an injected clock.
-func newTLSRig(t *testing.T, mutate func(*Config)) *tlsRig {
+func newTLSRig(t *testing.T, mutate func(*Config), opts ...serveOpt) *tlsRig {
 	t.Helper()
 	dir := t.TempDir()
 	cfg := Config{Listen: "127.0.0.1:8787", ArchiveRoot: dir, StatusFile: dir + "/_state/status.json", ScriptDir: dir,
@@ -68,7 +68,7 @@ func newTLSRig(t *testing.T, mutate func(*Config)) *tlsRig {
 		t.Fatal(err)
 	}
 	auth := newAuthService(cfg.AuthDir, users, log, clock.now, hasher)
-	h, err := newTLSHandler(cfg, log, mgr, names, auth)
+	h, err := newTLSHandler(cfg, log, mgr, names, auth, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,7 +1,9 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -10,6 +12,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"holocron/internal/cli"
 )
 
 // ---------------------------------------------------------------------------
@@ -103,13 +107,28 @@ func (a *API) handleGetCameras(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CamerasResponse{Ok: true, Path: path, Cameras: cameras})
 }
 
-// goSettingsMessage: the settings writer is the PowerShell script; the Go system's files are edited
-// by the commands (the web write path arrives with a later task).
-const goSettingsMessage = "settings cannot be written from the web app in the Go system yet: use holocron cam add|set|remove and holocron config set"
+// SettingsApplied is what a SettingsWriter reports after a successful write.
+type SettingsApplied struct {
+	Changed int
+	Message string
+}
+
+// SettingsWriter is the Go system's writer behind PUT /api/cameras and PUT /api/config (the
+// holocron web role supplies it, over the same edit helpers as `holocron cam` and `holocron
+// config`, and asks the supervisor to reload). path is the file the page reads. A non-empty invalid
+// means the request was refused and nothing was written; an error wrapping cli.ErrRefused is a
+// refusal without field detail (422), any other error is a failure (500).
+type SettingsWriter interface {
+	PutCameras(ctx context.Context, path string, rows []CameraPut) (SettingsApplied, []FieldError, error)
+	PutConfig(ctx context.Context, path string, values map[string]any) (SettingsApplied, []FieldError, error)
+}
+
+// goSettingsMessage answers a Go-system web app that was started without a SettingsWriter.
+const goSettingsMessage = "settings cannot be written from this web app: use holocron cam add|set|remove and holocron config set"
 
 func (a *API) handlePutCameras(w http.ResponseWriter, r *http.Request) {
 	setTarget(r, "cameras")
-	if a.goSystem {
+	if a.goSystem && a.settings == nil {
 		writeAPIError(w, http.StatusNotImplemented, goSettingsMessage)
 		return
 	}
@@ -122,7 +141,13 @@ func (a *API) handlePutCameras(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if invalid := validateCameras(request.Cameras); len(invalid) > 0 {
+	// In the Go system the address check belongs to the writer (host or host:port, as the
+	// command line takes it); the page's name and stream limits stay here.
+	rules := rowRules{hostCheck: validateHost}
+	if a.goSystem {
+		rules = rowRules{streamOptional: true} // a blank stream is stream1 in the Go system
+	}
+	if invalid := validateCameraRows(request.Cameras, rules); len(invalid) > 0 {
 		// Nothing is written. The whole request is refused, because applying
 		// the valid rows would leave the Operator with a list he did not ask
 		// for and no way to tell which half took effect.
@@ -136,10 +161,20 @@ func (a *API) handlePutCameras(w http.ResponseWriter, r *http.Request) {
 	}
 	defer a.actionMu.Unlock()
 
-	applied, err := a.applySettings("cameras", request)
-	if err != nil {
-		writeAPIError(w, http.StatusBadGateway, err.Error())
-		return
+	var applied applyResult
+	if a.goSystem {
+		var ok bool
+		if applied, ok = a.putGo(w, r, func(ctx context.Context) (SettingsApplied, []FieldError, error) {
+			return a.settings.PutCameras(ctx, a.cfg.CamerasFile(), request.Cameras)
+		}, "row needs", "rows need"); !ok {
+			return
+		}
+	} else {
+		var err error
+		if applied, err = a.applySettings("cameras", request); err != nil {
+			writeAPIError(w, http.StatusBadGateway, err.Error())
+			return
+		}
 	}
 
 	// Re-read, so what the page shows next is what is on disk, not what the
@@ -155,6 +190,23 @@ func (a *API) handlePutCameras(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// putGo runs the Go system's writer and answers the refusals itself; ok is false when it has.
+func (a *API) putGo(w http.ResponseWriter, r *http.Request, write func(context.Context) (SettingsApplied, []FieldError, error), one, many string) (applyResult, bool) {
+	applied, invalid, err := write(actionCtx(r))
+	switch {
+	case len(invalid) > 0:
+		writeFieldErrors(w, plural(len(invalid), one, many)+" attention. Nothing was written.", invalid)
+		return applyResult{}, false
+	case errors.Is(err, cli.ErrRefused):
+		writeAPIError(w, http.StatusUnprocessableEntity, ScrubText(err.Error())+". Nothing was written.")
+		return applyResult{}, false
+	case err != nil:
+		writeAPIError(w, http.StatusInternalServerError, ScrubText(err.Error()))
+		return applyResult{}, false
+	}
+	return applyResult{Ok: true, Changed: applied.Changed, Message: applied.Message}, true
+}
+
 func (a *API) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	config, path, err := a.readRecorderConfig()
 	if err != nil {
@@ -168,7 +220,7 @@ func (a *API) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	setTarget(r, "config")
-	if a.goSystem {
+	if a.goSystem && a.settings == nil {
 		writeAPIError(w, http.StatusNotImplemented, goSettingsMessage)
 		return
 	}
@@ -192,10 +244,20 @@ func (a *API) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	defer a.actionMu.Unlock()
 
-	applied, err := a.applySettings("config", request)
-	if err != nil {
-		writeAPIError(w, http.StatusBadGateway, err.Error())
-		return
+	var applied applyResult
+	if a.goSystem {
+		var ok bool
+		if applied, ok = a.putGo(w, r, func(ctx context.Context) (SettingsApplied, []FieldError, error) {
+			return a.settings.PutConfig(ctx, a.cfg.RecorderConfigFile(), request.Config)
+		}, "setting needs", "settings need"); !ok {
+			return
+		}
+	} else {
+		var err error
+		if applied, err = a.applySettings("config", request); err != nil {
+			writeAPIError(w, http.StatusBadGateway, err.Error())
+			return
+		}
 	}
 
 	config, path, err := a.readRecorderConfig()
@@ -329,6 +391,17 @@ const maxCameraNameLength = 48
 // validateCameras checks every row and returns every problem found, so the page
 // can mark all the bad fields at once instead of one per attempt.
 func validateCameras(rows []CameraPut) []FieldError {
+	return validateCameraRows(rows, rowRules{hostCheck: validateHost})
+}
+
+// rowRules are the parts of the row check that differ in the Go system, whose writer checks the
+// address (host or host:port) and takes a blank stream as stream1.
+type rowRules struct {
+	hostCheck      func(string) string // nil: the address is not checked here
+	streamOptional bool
+}
+
+func validateCameraRows(rows []CameraPut, rules rowRules) []FieldError {
 	invalid := []FieldError{}
 	names := map[string]int{}
 	safeNames := map[string]int{}
@@ -357,10 +430,12 @@ func validateCameras(rows []CameraPut) []FieldError {
 			}
 		}
 
-		if message := validateHost(row.IP); message != "" {
-			invalid = append(invalid, FieldError{Row: i, Field: "ip", Message: message})
+		if rules.hostCheck != nil {
+			if message := rules.hostCheck(row.IP); message != "" {
+				invalid = append(invalid, FieldError{Row: i, Field: "ip", Message: message})
+			}
 		}
-		if !streamName.MatchString(strings.TrimSpace(row.Quality)) {
+		if quality := strings.TrimSpace(row.Quality); !(rules.streamOptional && quality == "") && !streamName.MatchString(quality) {
 			invalid = append(invalid, FieldError{Row: i, Field: "quality",
 				Message: "a stream name is required, and may use only letters, digits, dot, dash and underscore (the cameras serve stream1 and stream2)"})
 		}

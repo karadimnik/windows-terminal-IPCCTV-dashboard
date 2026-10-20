@@ -13,6 +13,7 @@ type serveEnv struct {
 	ctl      Controller
 	launch   *HolocronLaunch
 	goSystem bool
+	settings SettingsWriter
 	reqLevel slog.Level
 }
 
@@ -33,6 +34,7 @@ func withController(c Controller) serveOpt { return func(e *serveEnv) { e.ctl = 
 func withLaunch(l *HolocronLaunch, goSystem bool) serveOpt {
 	return func(e *serveEnv) { e.launch, e.goSystem = l, goSystem }
 }
+func withSettings(w SettingsWriter) serveOpt { return func(e *serveEnv) { e.settings = w } }
 func withRequestLevel(l slog.Level) serveOpt { return func(e *serveEnv) { e.reqLevel = l } }
 
 // apply configures an API.
@@ -40,5 +42,5 @@ func (e serveEnv) apply(a *API) {
 	if e.runner != nil {
 		a.runner = e.runner
 	}
-	a.ctlFixed, a.launch, a.goSystem = e.ctl, e.launch, e.goSystem
+	a.ctlFixed, a.launch, a.goSystem, a.settings = e.ctl, e.launch, e.goSystem, e.settings
 }
