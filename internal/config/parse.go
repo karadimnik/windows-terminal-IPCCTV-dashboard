@@ -37,7 +37,7 @@ var keptKeys = []string{
 	"RestreamerEnabled", "RestreamerExePath", "RestreamerConfigPath", "RelayBase", "RelayApiBase", "RelayProbeTimeoutMs",
 	"RelayStartupWaitSeconds", "RelayReadyWaitSeconds", "StartStaggerMs",
 	"LiveViewEnabled", "LiveExePath", "LiveConfigPath", "LiveWhepAddress", "LiveUdpAddress", "LiveAdvertiseHosts", "LiveSubStream", "LiveCloseAfterSeconds", "LiveSecretPath",
-	"logging",
+	"logging", "alerts", "secrets",
 }
 
 // KeptKeys returns the keys the Go core reads (copy).
@@ -298,6 +298,8 @@ func (d *decoder) run(c *Config) {
 
 	d.live(c)
 	d.logging(c)
+	d.alerts(c)
+	d.secrets(c)
 	d.crossChecks(c)
 }
 

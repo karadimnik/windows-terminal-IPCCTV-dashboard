@@ -2,7 +2,9 @@
 
     type Config struct { ... }                       // fields are the JSON key names, see KEYS.md; (Config).Profile() (ContainerProfile, bool)
     type ContainerProfile struct{ Extension, SegmentFormat string; AudioArgs, ExtraArgs []string; SegmentFormatOptions string }
-    type Logging struct{ Level string; Levels map[string]string }
+    type Logging struct{ Level string; Levels map[string]string }   // default Level "info"
+    Config.Alerts alerts.Config                                       // "alerts" object, defaults of internal/alerts/README.md
+    type Secrets struct{ Backend string }; var SecretBackends          // "secrets" object: auto (default) | keyring | file | env
     func Defaults(p osx.Platform) Config
     func Parse(data []byte, p osx.Platform) (Config, []Warning, error)   // error is *ValidationError (all problems, with key paths)
     func Load(path string, p osx.Platform) (Config, []Warning, error)    // missing or blank file = defaults

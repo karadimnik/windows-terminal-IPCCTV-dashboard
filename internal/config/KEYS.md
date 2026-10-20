@@ -9,43 +9,56 @@ Types are strict: a JSON string is never accepted for a boolean or a number (Pow
 
 ## Kept
 
-| Key | Default | Rule | Why kept |
-|---|---|---|---|
-| RootPath | `E:\cameras` (`/srv/cameras`) | non-blank string without `%` | archive root |
-| FfmpegPath | `C:\ffmpeg\bin\ffmpeg.exe` (`ffmpeg`) | string; empty = look up on PATH | recorder |
-| FfprobePath | `C:\ffmpeg\bin\ffprobe.exe` (`ffprobe`) | string | kept for diagnostics; cheap |
-| SegmentSeconds | 900 | whole number >= 1 | segment length |
-| Container | `mkv` | must name an entry of ContainerProfiles (**Go**) | container choice |
-| ContainerProfiles | mkv + fmp4 | object; the file's map REPLACES the defaults; each: Extension `.` + 1-8 alnum (**Go**: it decides what the pruner may delete), SegmentFormat non-blank, AudioArgs/ExtraArgs string arrays, SegmentFormatOptions string | config-driven container |
-| RtspTransport | `tcp` | one of tcp, udp, udp_multicast, http, https (**Go**) | ffmpeg input |
-| TimeoutMicroseconds | 10000000 | whole number >= 1 (**Go**) | ffmpeg input |
-| ReserveGB | 20 | number >= 0 (**Go**) | pruner watermark |
-| PruneHysteresisGB | 5 | number >= 0 (**Go**) | pruner target |
-| PruneIntervalSeconds | 300 | number > 0 (**Go**) | pruner cycle |
-| MaxRetentionDays | null | null (off) or number > 0 (**Go**: PowerShell treated <= 0 as off) | age rule |
-| MaxAgePruneFraction | 0.5 | number 0.01-1.0 (PowerShell also parsed a numeric string; Go wants a number) | age-rule breaker |
-| ReconcileSeconds, StatusIntervalSeconds, ArchiveScanSeconds | 5, 5, 60 | number > 0 (**Go**) | supervisor loops |
-| CameraDownAlertMinutes, CameraDownRepeatHours, StopTimeoutSeconds | 15, 12, 30 | number > 0 (**Go**) | alerts, stop wait |
-| BackoffStartSeconds, BackoffMaxSeconds, HealthyResetSeconds | 3, 60, 300 | whole number >= 1; Max >= Start (**Go**) | restart backoff |
-| StallFactor | 2.5 | number > 1 | stall watchdog |
-| LogMaxBytes | 2097152 | whole number >= 1 (**Go**) | log rotation |
-| LogRepeatSuppressSeconds | 60 | number >= 0 (**Go**) | repeat collapse |
-| StatusEventCount | 20 | whole number >= 0 (**Go**) | events in status.json |
-| RestreamerEnabled | true | JSON boolean | relay on/off |
-| RestreamerExePath, RestreamerConfigPath | `C:\mediamtx\...` | string | relay |
-| RelayBase, RelayApiBase | `rtsp://127.0.0.1:8554`, `http://127.0.0.1:9997` | string; if set, needs a host:port | relay |
-| RelayProbeTimeoutMs | 1500 | whole number; below 100 is raised to 100 with a warning (PowerShell clamped at use) | relay probe |
-| RelayStartupWaitSeconds | 20 | whole number >= 0 (**Go**) | relay wait |
-| RelayReadyWaitSeconds, StartStaggerMs | 15, 300 | whole number; below 0 is raised to 0 with a warning | relay wait, stagger |
-| LiveViewEnabled | false | JSON boolean | live view |
-| LiveExePath, LiveSecretPath | `` | string, not starting with `\\` | live view |
-| LiveConfigPath | `C:\mediamtx\mediamtx-live.yml` | non-blank, not starting with `\\` | live view |
-| LiveWhepAddress | `127.0.0.1:8889` | `127.0.0.1:<1-65535>`; not the relay's host:port | live view |
-| LiveUdpAddress | `127.0.0.1:8189` | `127.0.0.1`, `0.0.0.0` or one private IPv4, port 1-65535 | live view |
-| LiveAdvertiseHosts | `[]` | <= 4 unique private IPv4 literals; consistency with LiveUdpAddress | live view |
-| LiveSubStream | `stream2` | `^[A-Za-z0-9_-]{1,32}$` | live view |
-| LiveCloseAfterSeconds | 10 | whole number 1-3600 | live view |
-| logging | absent | object `{level, levels{component: level}}` with ERROR/WARN/INFO/DEBUG/TRACE | NEW in holocron (LLD 2.13) |
+| Key | Default | Rule | Why kept | Editable |
+|---|---|---|---|---|
+| RootPath | `E:\cameras` (`/srv/cameras`) | non-blank string without `%` | archive root | no |
+| FfmpegPath | `C:\ffmpeg\bin\ffmpeg.exe` (`ffmpeg`) | string; empty = look up on PATH | recorder | no |
+| FfprobePath | `C:\ffmpeg\bin\ffprobe.exe` (`ffprobe`) | string | kept for diagnostics; cheap | no |
+| SegmentSeconds | 900 | whole number >= 1 | segment length | yes |
+| Container | `mkv` | must name an entry of ContainerProfiles (**Go**) | container choice | no |
+| ContainerProfiles | mkv + fmp4 | object; the file's map REPLACES the defaults; each: Extension `.` + 1-8 alnum (**Go**: it decides what the pruner may delete), SegmentFormat non-blank, AudioArgs/ExtraArgs string arrays, SegmentFormatOptions string | config-driven container | no |
+| RtspTransport | `tcp` | one of tcp, udp, udp_multicast, http, https (**Go**) | ffmpeg input | no |
+| TimeoutMicroseconds | 10000000 | whole number >= 1 (**Go**) | ffmpeg input | no |
+| ReserveGB | 20 | number >= 0 (**Go**) | pruner watermark | yes |
+| PruneHysteresisGB | 5 | number >= 0 (**Go**) | pruner target | yes |
+| PruneIntervalSeconds | 300 | number > 0 (**Go**) | pruner cycle | no |
+| MaxRetentionDays | null | null (off) or number > 0 (**Go**: PowerShell treated <= 0 as off) | age rule | yes |
+| MaxAgePruneFraction | 0.5 | number 0.01-1.0 (PowerShell also parsed a numeric string; Go wants a number) | age-rule breaker | yes |
+| ReconcileSeconds, StatusIntervalSeconds, ArchiveScanSeconds | 5, 5, 60 | number > 0 (**Go**) | supervisor loops | no |
+| CameraDownAlertMinutes, CameraDownRepeatHours, StopTimeoutSeconds | 15, 12, 30 | number > 0 (**Go**) | alerts, stop wait | yes |
+| BackoffStartSeconds, BackoffMaxSeconds, HealthyResetSeconds | 3, 60, 300 | whole number >= 1; Max >= Start (**Go**) | restart backoff | no |
+| StallFactor | 2.5 | number > 1 | stall watchdog | no |
+| LogMaxBytes | 2097152 | whole number >= 1 (**Go**) | log rotation | no |
+| LogRepeatSuppressSeconds | 60 | number >= 0 (**Go**) | repeat collapse | no |
+| StatusEventCount | 20 | whole number >= 0 (**Go**) | events in status.json | no |
+| RestreamerEnabled | true | JSON boolean | relay on/off | no |
+| RestreamerExePath, RestreamerConfigPath | `C:\mediamtx\...` | string | relay | no |
+| RelayBase, RelayApiBase | `rtsp://127.0.0.1:8554`, `http://127.0.0.1:9997` | string; if set, needs a host:port | relay | no |
+| RelayProbeTimeoutMs | 1500 | whole number; below 100 is raised to 100 with a warning (PowerShell clamped at use) | relay probe | no |
+| RelayStartupWaitSeconds | 20 | whole number >= 0 (**Go**) | relay wait | no |
+| RelayReadyWaitSeconds, StartStaggerMs | 15, 300 | whole number; below 0 is raised to 0 with a warning | relay wait, stagger | no |
+| LiveViewEnabled | false | JSON boolean | live view | yes |
+| LiveExePath, LiveSecretPath | `` | string, not starting with `\\` | live view | no |
+| LiveConfigPath | `C:\mediamtx\mediamtx-live.yml` | non-blank, not starting with `\\` | live view | no |
+| LiveWhepAddress | `127.0.0.1:8889` | `127.0.0.1:<1-65535>`; not the relay's host:port | live view | no |
+| LiveUdpAddress | `127.0.0.1:8189` | `127.0.0.1`, `0.0.0.0` or one private IPv4, port 1-65535 | live view | yes |
+| LiveAdvertiseHosts | `[]` | <= 4 unique private IPv4 literals; consistency with LiveUdpAddress | live view | yes |
+| LiveSubStream | `stream2` | `^[A-Za-z0-9_-]{1,32}$` | live view | yes |
+| LiveCloseAfterSeconds | 10 | whole number 1-3600 | live view | yes |
+| logging.level | `info` | ERROR, WARN, INFO, DEBUG or TRACE (any case) | NEW in holocron (LLD 2.13): the default level | yes |
+| logging.levels | `{}` | object component to level, each as logging.level; `holocron config set logging.levels.<component> <level>` | NEW: per-component levels | yes |
+| alerts.queueSize | 256 | whole number >= 1 | NEW (internal/alerts): queue per channel | yes |
+| alerts.timeoutSeconds | 10 | number > 0 | NEW: one delivery attempt | yes |
+| alerts.minRepeatSeconds | 60 | number > 0 | NEW: dedupe window | yes |
+| alerts.retryBackoffSeconds | `[1, 5, 30]` | array of numbers > 0; `[]` = no retries | NEW: network channel retries | yes |
+| alerts.webhook.enabled, .url, .secretName, .secretHeader | false, "", "", `X-Holocron-Secret` | url: https, or http to a loopback/private address (checked whenever set); enabled needs a url; the rest strings | NEW: webhook channel | yes |
+| alerts.push.enabled, .server, .topic, .tokenName | false, `https://ntfy.sh`, "", "" | topic `[A-Za-z0-9_-]{1,64}` required when enabled (checked whenever set); server rule as the webhook url | NEW: ntfy-style push | yes |
+| alerts.desktop.enabled | true | JSON boolean | NEW: desktop notification | yes |
+| alerts.eventlog.enabled | true | JSON boolean | NEW: Windows event log / syslog | yes |
+| secrets.backend | `auto` | one of auto, keyring, file, env | NEW: camera credential store (internal/secrets) | yes |
+
+Editable = the allow-list of `holocron config set|unset` (rule R1); the other keys are changed by hand or by the install.
+Sub-keys of `logging`, `alerts` and `secrets` are camelCase like the JSON; an unknown sub-key is a warning.
 
 An unknown key starting with `Live` (any case) is an ERROR (a misspelled `LiveViewEnabled` would otherwise leave live view off silently), as
 in PowerShell. Any other unknown key is a warning. Key names are case-insensitive; two spellings of one key are an error.
