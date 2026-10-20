@@ -117,8 +117,8 @@ func loadSecret(p osx.Platform, path string, create bool) (string, error) {
 }
 
 // ensureOwnerOnly repairs permissions that let anyone but the owner in. On Unix a mode check avoids
-// a needless chmod; on Windows the ACL is not cheap to read back, so it is reset and restricted
-// again every time (explicit entries for others are dropped first: SetOwnerOnly alone keeps them).
+// a needless chmod; on Windows the ACL is not cheap to read back, so SetOwnerOnly (which resets
+// explicit entries too) runs every time.
 func ensureOwnerOnly(p osx.Platform, path string) error {
 	if p.Name() != "windows" {
 		fi, err := os.Stat(path)
@@ -128,8 +128,6 @@ func ensureOwnerOnly(p osx.Platform, path string) error {
 		if fi.Mode().Perm()&0o077 == 0 {
 			return nil
 		}
-	} else if err := resetACL(path); err != nil {
-		return err
 	}
 	return p.SetOwnerOnly(path)
 }
