@@ -23,7 +23,10 @@ const stampLen = len("20060102_150405+0300") // 20
 // extension (append the container's, for example ".mkv"). A "%" in the safe name is doubled so
 // strftime writes it literally; the PowerShell product passes it through, so a camera called
 // "Cam%z" gets the offset spliced into its file names there (IR 2.2 latent defects). The doubling
-// is unverified against a real ffmpeg: check it in the ffmpeg-runner task.
+// is verified with real ffmpeg (8.x on Windows, a static Linux build): "%%" in the file name is
+// written literally. Because -strftime 1 also expands the directory part, the recorder MUST build
+// the output pattern with ffmpeg.SegmentPattern(root, safe, ext) and never this function plus
+// filepath.Join.
 func FormatSegmentPattern(safe string) string {
 	return strings.ReplaceAll(safe, "%", "%%") + "_%Y%m%d_%H%M%S%z"
 }
