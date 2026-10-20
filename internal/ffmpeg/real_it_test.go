@@ -334,6 +334,8 @@ func segments(t *testing.T, probe, dir string) []segInfo {
 func secOfDay(t time.Time) int { return t.Hour()*3600 + t.Minute()*60 + t.Second() }
 
 // checkSegments asserts the properties of the brief for the segments of one camera and logs the numbers.
+// The real start is estimated as mtime - duration, which carries the close latency of the cut (measured
+// 0.0-1.05 s); tol and firstTol bound it, and the alignment of the name to the segment grid is checked to within 1 s.
 // lastCut: the newest file was cut short by a hard kill, so its length and write time say nothing about its start.
 func checkSegments(t *testing.T, segs []segInfo, safe string, segSeconds int, wantAudio, lastCut bool, tol, firstTol time.Duration) {
 	t.Helper()
@@ -443,7 +445,7 @@ func TestRealFfmpeg(t *testing.T) {
 				}
 				t.Logf("%s (%.1fs)", info.Message(), info.RanFor.Seconds())
 				segs := segments(t, probe, dir)
-				checkSegments(t, segs, safe, 10, true, false, time.Second, time.Second)
+				checkSegments(t, segs, safe, 10, true, false, 1500*time.Millisecond, 1500*time.Millisecond)
 				for _, s := range segs { // (b): the name is the literal one, not strftime-expanded
 					if strings.HasPrefix(s.name, "Cam") && !strings.HasPrefix(s.name, "Cam%Y_") {
 						t.Errorf("percent name was expanded: %s", s.name)
@@ -577,10 +579,9 @@ func TestRealFfmpeg(t *testing.T) {
 		info := waitDone(t, c, 15*time.Second)
 		t.Logf("%s (hard kill); %d stderr lines kept: %q", info.Message(), len(info.LastLines), info.LastLines)
 		segs := segments(t, probe, dir)
-		// The first file after a connect is the exception: its content starts up to ~2 s before the wall
-		// clock instant its name records (SP1 saw 6.4 s of media in a file opened 3 s before the cut).
-		// The proxy (mtime - duration) carries the close latency of the previous cut, measured 0.7-0.9 s.
-		checkSegments(t, segs, safe, 10, true, true, 1500*time.Millisecond, 3*time.Second)
+		// The first file after a connect is the exception: its content starts 2.2-3.4 s before the wall
+		// clock instant its name records (measured; SP1 saw 6.4 s of media in a file opened 3 s before the cut).
+		checkSegments(t, segs, safe, 10, true, true, 1500*time.Millisecond, 4*time.Second)
 		RemoveEmptySegment(dir, ".mkv", EmptyOptions{Root: root, Matcher: archive.DefaultMatcher})
 	})
 
