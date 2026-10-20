@@ -163,7 +163,7 @@ start time, different image path), `dead` (a pid that does not exist). Verdicts,
 | l9 | no `Pdeathsig`, registry, then reap + negative cases | 3 orphans killed by the reap, decoy untouched, three fakes skipped (see above) |
 | l10 | no `Pdeathsig`, children started through `sp3 wrap` with a stdin pipe held by the supervisor | **0 survivors**: each wrapper saw EOF and killed its child's group; wrapper + child gone +16..+51 ms |
 
-Thread check behind l3/l3b (`/tmp/.../tidtest`): a goroutine that locks its thread and exits on a non-main thread ends the thread
+Thread check behind l3/l3b (a 15-line throwaway program, not kept): a goroutine that locks its thread and exits on a non-main thread ends the thread
 (`/proc/self/task/<tid>` gone); when it happens to run on the main thread the thread stays. The runtime source says why
 (`goexit0`, "Kill it rather than returning it to the thread pool"; the main thread is never exited).
 
@@ -237,13 +237,12 @@ from launchd.plist(5), not verified): then the service manager supplies the miss
    negative cases pass). On macOS this is the primary mechanism; on the other two it is the second layer.
 5. **macOS:** document the limit (hard kill orphans until the next start, or until the shim notices) and ship the shim for ffmpeg and MediaMTX children; launchd `AbandonProcessGroup=false` (the default) as an additional net, to be verified on a Mac.
 
-**Confidence.** High for the Windows and Linux binding results (each case run once, 13 of 13 outcomes unambiguous, mechanisms confirmed by the child logs and by the Go runtime source). Medium for "time to death":
+**Confidence.** High for the Windows and Linux binding results (each case run once, every outcome unambiguous, mechanisms confirmed by the child logs and by the Go runtime source). Medium for "time to death":
 the Windows figures include the driver's `TerminateProcess` latency; the Linux figures include a 10 ms poll. Not covered: Windows older than 10 (job-list attribute), a non-nested supervisor (could not be produced),
 real `ffmpeg.exe`/`mediamtx.exe` (ping and sleep stand in; ffmpeg's own children, if any, were not examined), many children (N=3 only), the supervisor dying during `CreateProcess` itself,
 set-uid children, containers/cgroups, systemd `KillMode`, anything on macOS (paper only; the shim and the registry code compile for darwin).
 
 ## Process hygiene and run record
 
-Before and after lists of `sp2`, `sp3`, `ping`, `sleep`, `wt`/`WindowsTerminal`, `conhost`, `OpenConsole` were taken (the "before" list of the SP2 session was lost when the PC rebooted
-during the work; the list taken at the start of SP3 and the list at the end contain no `sp2`, `sp3`, `ping` or `sleep` of mine; the `conhost`/`OpenConsole`/`WindowsTerminal` entries are
+The SP2-session "before" list (taken before the first experiment) was lost when the PC rebooted during the work. The list taken at the end (Windows: `sp2`, `sp3`, `ping`, `sleep`, `wt`, `WindowsTerminal`, `conhost`, `OpenConsole`; WSL: `sleep`, `ping`, `sp3`) contains no `sp2`, `sp3`, `ping` or `sleep` of mine (the one WSL `sleep` is the system's `sleep infinity`); the `conhost`/`OpenConsole`/`WindowsTerminal` entries are
 the Operator's). Every process started by the experiments was recorded by pid and, where it outlived its supervisor on purpose (negative controls w2, w5, w9, l5, l6, l9), killed by pid at the end of its case.
