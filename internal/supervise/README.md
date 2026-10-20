@@ -23,6 +23,7 @@ type SupervisorDeps struct {                    // injected; nil fields get the 
     Clock clock.Clock; Platform osx.Platform; Starter ffmpeg.Starter; Scope ProcessScope
     Scanner RootScanner; Pruner Pruner; Alerts Alerts
     Credentials relay.CredentialSource; APILogin, LiveLogin func() (relay.Login, error); NewRelayAPI func(config.Config, relay.Login) RelayAPI
+    CheckFfmpeg func(path string) (ffmpeg.Version, error) // default ffmpeg.CheckVersion
     Logs LogSource; ChildLog func(component, path string) *slog.Logger; Redactor *logx.Redactor; Redactors []Registrar; Events *EventRing
     Pid int64; Location *time.Location
 }
@@ -85,6 +86,7 @@ func FileChildLogs(maxBytes int64, red *logx.Redactor) func(component, path stri
 | Survivor reported (pid, DID NOT STOP line), the rest still stopped | G7 | `TestSupervisorReportsSurvivor` |
 | Panic anywhere: unexpected + LastUnexpectedStop{DetectedBy: supervisor}, ErrUnexpectedStop | R:4126-4154, G6 | `TestSupervisorPanicIsUnexpected` |
 | Exit 20 (lock or live heartbeat, owner named), 21, lock released on every path | G8, IS 1.5 | `TestSupervisorLockPaths` |
+| ffmpeg below 5.0 or not found: exit 21 with the ffmpeg message, no lock, no child | LLD 11 | `TestSupervisorFfmpegVersionCheck` |
 | A lock fault that is not `ErrHeld` (I/O, permission) is exit 1 (restartable), `ErrHeld` stays 20 | W9a | `TestSupervisorLockErrorExitCodes` |
 | D19: LastUnexpectedStop (At byte for byte) and LastWindowClose carried across runs | IS 1.6 F1 | `TestSupervisorCarryForwardAcrossRuns` |
 | Key sets equal the golden PowerShell documents (live off = master's; live on; stopped; unexpected) | IS 1.2, `livecfg` | `TestSupervisorLiveOffKeySetEqualsMaster`, `TestSupervisorOrderedStop`, `TestSupervisorPanicIsUnexpected` |
@@ -111,8 +113,9 @@ is blocked (goroutine dump), so a woken goroutine acts at the virtual time it wa
 - Exit codes follow the brief: an unexpected stop is 1 (`ErrUnexpectedStop`), 21 is a configuration fault (PowerShell
   used 21 for "the loop threw").
 - The final rows keep LastPid and the counters (PowerShell keeps the entries); NextStartAt is null after the stop.
-- Not done here: the ffmpeg version check (it spawns a process outside the starter), `cli` Actions for start and stop
-  (W9, with the control API). The OS lock and process scope are wired by `NewProduction` (W8).
+- The ffmpeg version check (`CheckFfmpeg`, default `ffmpeg.CheckVersion` on `FfmpegPath`) runs after the configuration
+  is read and before the lock and any child: below 5.0 or not runnable is a `ConfigFault` (exit 21) with the ffmpeg
+  package's message; a development build's warning is logged. It runs outside the process scope (a short `-version`). The OS lock and process scope are wired by `NewProduction` (W8).
 
 # Manager (W7a: the child lifecycle manager)
 

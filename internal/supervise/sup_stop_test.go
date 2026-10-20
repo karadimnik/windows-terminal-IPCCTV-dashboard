@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"holocron/internal/archive"
 	"holocron/internal/config"
+	"holocron/internal/ffmpeg"
 	"holocron/internal/osx"
 	"holocron/internal/prune"
 	"holocron/internal/status"
@@ -388,6 +390,57 @@ func TestSupervisorLockErrorExitCodes(t *testing.T) {
 			}
 			if len(r.st.started("")) != 0 {
 				t.Error("children started")
+			}
+		})
+	}
+}
+
+// The ffmpeg version check runs at start, before the lock and before any child: below 5.0 or not
+// found is a configuration fault (exit 21) carrying the ffmpeg package's message.
+func TestSupervisorFfmpegVersionCheck(t *testing.T) {
+	old, oldErr := ffmpeg.ParseVersion("ffmpeg version 4.2.7-0ubuntu0.1 Copyright (c) 2000-2022 the FFmpeg developers\n")
+	if oldErr == nil {
+		t.Fatalf("4.2.7 accepted: %+v", old)
+	}
+	for _, c := range []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"ok", nil, ExitOK},
+		{"too old", oldErr, ExitConfigFault},
+		{"not found", fmt.Errorf("ffmpeg: cannot run %q -version: %w", "/nope/ffmpeg", exec.ErrNotFound), ExitConfigFault},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newSRig(t, oneCamera("Front"), func(cfg *config.Config) { cfg.FfmpegPath = "/opt/ff/ffmpeg" })
+			var asked []string
+			r.deps.CheckFfmpeg = func(p string) (ffmpeg.Version, error) {
+				asked = append(asked, p)
+				return ffmpeg.Version{Major: 7}, c.err
+			}
+			if c.err == nil {
+				r.start()
+				r.step(2 * time.Second)
+				if len(r.st.started("")) == 0 {
+					t.Error("nothing started after a good check")
+				}
+				r.stop(StopRequested)
+			} else {
+				r.build()
+				_, err := r.sup.Run(context.Background())
+				var cf *ConfigFault
+				if !errors.As(err, &cf) || ExitCode(err) != c.code || !strings.Contains(err.Error(), c.err.Error()) {
+					t.Fatalf("exit %d: %v", ExitCode(err), err)
+				}
+				if a, _ := r.lock.Counts(); a != 0 || len(r.st.started("")) != 0 {
+					t.Errorf("lock taken %d times, %d children started", a, len(r.st.started("")))
+				}
+				if !strings.Contains(r.logs.String(), "ffmpeg check failed") {
+					t.Errorf("not logged:\n%s", r.logs.String())
+				}
+			}
+			if len(asked) != 1 || asked[0] != "/opt/ff/ffmpeg" {
+				t.Errorf("checked %v", asked)
 			}
 		})
 	}
