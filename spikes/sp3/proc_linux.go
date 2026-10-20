@@ -41,11 +41,18 @@ func platRun(o *opts, fn func()) {
 		go func() { defer wg.Done(); fn() }()
 		wg.Wait()
 	case "lockexit": // PITFALL: the starter locks its thread and returns while holding the lock: the runtime ends the thread
+		runtime.LockOSThread() // main goroutine pinned to the main thread, so the starter cannot land on it (Go never ends the main thread)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { defer wg.Done(); runtime.LockOSThread(); fn() }()
+		wg.Wait()
+	case "lockexitfree": // as lockexit but the main goroutine is not pinned: the starter may land on the main thread, which never ends
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go func() { defer wg.Done(); runtime.LockOSThread(); fn() }()
 		wg.Wait()
 	case "lockexitunlock": // control: same, but unlocked before returning, so the thread goes back to the pool
+		runtime.LockOSThread()
 		var wg sync.WaitGroup
 		wg.Add(1)
 		go func() { defer wg.Done(); runtime.LockOSThread(); fn(); runtime.UnlockOSThread() }()
