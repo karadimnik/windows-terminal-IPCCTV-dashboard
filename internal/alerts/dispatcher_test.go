@@ -128,6 +128,11 @@ func TestOverflowDropsOldestWithOneNoticePerEpisode(t *testing.T) {
 		return nil
 	}}
 	d := New(Config{QueueSize: 4, TimeoutSeconds: 30}, []Channel{ch}, lg.For("alerts"))
+	defer func() {
+		if t.Failed() {
+			t.Log(lg.mem.String())
+		}
+	}()
 
 	d.Raise(ev(1))
 	<-started // the worker holds event 1; the queue is empty
@@ -143,7 +148,7 @@ func TestOverflowDropsOldestWithOneNoticePerEpisode(t *testing.T) {
 	if got := ids(ch.delivered()); len(got) != 5 || got[0] != 1 || got[1] != 8 || got[4] != 11 {
 		t.Errorf("delivered %v, want [1 8 9 10 11] (oldest dropped)", got)
 	}
-	eventually(t, "episode summary", func() bool { return len(lg.lines("alert queue drained", "dropped=6")) == 1 })
+	eventually(t, "episode summary", func() bool { return len(lg.lines("alert queue drained", "target=c", "dropped=6")) == 1 })
 
 	// a new episode is announced again
 	block := make(chan struct{})
