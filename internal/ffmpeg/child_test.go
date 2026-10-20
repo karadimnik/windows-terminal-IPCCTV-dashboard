@@ -39,6 +39,8 @@ func helper(mode string) {
 	case "block":
 		fmt.Fprintln(os.Stderr, "running")
 		time.Sleep(time.Minute)
+	case "negexit":
+		os.Exit(-5)
 	case "flood":
 		for i := 0; i < 2000; i++ {
 			fmt.Fprintf(os.Stderr, "line %d\n", i)
@@ -292,5 +294,21 @@ func TestKillThroughFakeStarter(t *testing.T) {
 	c.Kill()
 	if info := c.Wait(); info.Code != -1 || !fs.p.killed {
 		t.Fatalf("%+v killed=%v", info, fs.p.killed)
+	}
+}
+
+// The PowerShell product reports .NET's signed Process.ExitCode: a Windows status such as 0xC0000005
+// reads negative. os.Exit(-5) is 0xFFFFFFFB on Windows and 251 (the low 8 bits) elsewhere.
+func TestExitCodeSignedLikeDotNet(t *testing.T) {
+	c, err := Start(context.Background(), helperSpec("negexit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := 251
+	if runtime.GOOS == "windows" {
+		want = -5
+	}
+	if info := c.Wait(); info.Code != want {
+		t.Fatalf("code %d want %d", info.Code, want)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 )
 
@@ -68,6 +69,9 @@ func (p *execProcess) Wait() (int, error) {
 	code := -1
 	if p.cmd.ProcessState != nil {
 		code = p.cmd.ProcessState.ExitCode()
+		if runtime.GOOS == "windows" {
+			code = int(int32(uint32(code))) // .NET's Process.ExitCode is signed: 0xC0000005 reads -1073741819
+		}
 	}
 	if _, ok := err.(*exec.ExitError); ok {
 		err = nil // a non-zero exit is accounted by the code, not an error of waiting
