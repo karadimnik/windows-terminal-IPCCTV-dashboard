@@ -73,7 +73,7 @@ func TestWindowsKeyring(t *testing.T) {
 	t.Run("independent view through cmdkey, and the size limit", func(t *testing.T) {
 		must(t, p.Put("camera.user", "fakeuser"))
 		out := cmdkeyList(t, prefix+"camera.user")
-		for _, want := range []string{"Target: LegacyGeneric:target=" + prefix + "camera.user", "Type: Generic", "Persistence: Local Computer"} {
+		for _, want := range []string{"Target: " + prefix + "camera.user", "Type: Generic", "Local machine persistence"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("cmdkey output lacks %q:\n%s", want, out)
 			}
@@ -155,6 +155,15 @@ func TestWindowsACL(t *testing.T) {
 	}
 }
 
+// u16 is the UTF-16LE form of s as a string (how Export-Clixml writes text).
+func u16(s string) string {
+	var b []byte
+	for _, r := range s {
+		b = append(b, byte(r), 0)
+	}
+	return string(b)
+}
+
 const exportScript = `$s = ConvertTo-SecureString $env:W11_FAKE_PASS -AsPlainText -Force
 New-Object System.Management.Automation.PSCredential($env:W11_FAKE_USER, $s) | Export-Clixml -LiteralPath $env:W11_FAKE_PATH`
 
@@ -212,8 +221,14 @@ func TestWindowsImporter(t *testing.T) {
 	ps(t, []string{"W11_FAKE_USER=" + fakeUser, "W11_FAKE_PASS=" + fakePass, "W11_FAKE_PATH=" + creds}, exportScript)
 	raw, err := os.ReadFile(creds)
 	must(t, err)
-	if strings.Contains(string(raw), fakePass) {
-		t.Fatal("the fake credential file holds the password in clear")
+	needles := []string{fakePass, u16(fakePass)}
+	for _, n := range needles {
+		if strings.Contains(string(raw), n) {
+			t.Fatal("the fake credential file holds the password in clear")
+		}
+	}
+	if !strings.Contains(string(raw), u16(`N="Password">`)) { // Export-Clixml writes UTF-16
+		t.Fatalf("unexpected Clixml layout (%d bytes)", len(raw))
 	}
 
 	newDst := func(name string) (Provider, string) {
@@ -265,12 +280,8 @@ func TestWindowsImporter(t *testing.T) {
 		must(t, os.WriteFile(half, raw[:len(raw)/2], 0o600))
 		mangled := filepath.Join(scratch, "mangled.xml")
 		s := string(raw)
-		i := strings.Index(s, `N="Password">`)
-		if i < 0 {
-			t.Fatalf("unexpected Clixml layout:\n%s", s)
-		}
-		i += len(`N="Password">`) + 40
-		must(t, os.WriteFile(mangled, []byte(s[:i]+strings.Repeat("0", 24)+s[i+24:]), 0o600))
+		i := strings.Index(s, u16(`N="Password">`)) + len(u16(`N="Password">`)) + 2*40 // into the DPAPI header
+		must(t, os.WriteFile(mangled, []byte(s[:i]+u16(strings.Repeat("0", 24))+s[i+2*24:]), 0o600))
 		notCred := filepath.Join(scratch, "string.xml")
 		ps(t, []string{"W11_FAKE_PATH=" + notCred}, `'hello' | Export-Clixml -LiteralPath $env:W11_FAKE_PATH`)
 		empty := filepath.Join(scratch, "empty.xml")
@@ -318,13 +329,15 @@ func TestWindowsImporter(t *testing.T) {
 				t.Errorf("error leaks the password: %s", e)
 			}
 		}
-		if leaks := scanTree(t, scratch, []string{fakePass}); len(leaks) != 0 {
+		if leaks := scanTree(t, scratch, needles); len(leaks) != 0 {
 			t.Errorf("files holding the password: %v", leaks)
 		}
 		decoy := filepath.Join(scratch, "decoy.txt")
-		must(t, os.WriteFile(decoy, []byte(fakePass), 0o600))
-		if leaks := scanTree(t, scratch, []string{fakePass}); len(leaks) != 1 {
-			t.Errorf("positive control failed: %v", leaks)
+		for _, content := range []string{fakePass, u16(fakePass)} { // plain and UTF-16 forms are both detected
+			must(t, os.WriteFile(decoy, []byte(content), 0o600))
+			if leaks := scanTree(t, scratch, needles); len(leaks) != 1 {
+				t.Errorf("positive control failed: %v", leaks)
+			}
 		}
 		must(t, os.Remove(decoy))
 	})

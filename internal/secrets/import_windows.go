@@ -28,7 +28,7 @@ const (
 // The script reads the file with PowerShell's own Import-Clixml (DPAPI, this user only) and writes
 // {"user":..,"password":..} as UTF-8 to stdout. The path arrives in the environment; the script
 // text holds no secret and the command line holds none either.
-const importScript = `$ErrorActionPreference = 'Stop'
+const importScript = `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
 try {
   $c = Import-Clixml -LiteralPath $env:` + importPathEnv + `
   if ($c -isnot [System.Management.Automation.PSCredential]) { throw 'the file does not hold a PSCredential' }
@@ -83,7 +83,7 @@ func ImportLegacyCameraCreds(ctx context.Context, path string, dst Provider) err
 
 	ps := filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 	cmd := exec.CommandContext(ctx, ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-		"-EncodedCommand", encodeCommand(importScript))
+		"-OutputFormat", "Text", "-EncodedCommand", encodeCommand(importScript))
 	cmd.Env = append(os.Environ(), importPathEnv+"="+path)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 	out, errOut := &capped{max: importMaxOutput}, &capped{max: 2048}
