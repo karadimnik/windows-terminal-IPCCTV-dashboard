@@ -13,10 +13,10 @@ import (
 // named <prefix><name>, persisted for the local machine, protected by the user's logon (DPAPI
 // underneath), which is the protection camera_creds.xml has.
 const (
-	credTypeGeneric        = 1
+	credTypeGeneric         = 1
 	credPersistLocalMachine = 2
-	errorNotFound          = syscall.Errno(1168)
-	maxCredBlob            = 5 * 512 // CRED_MAX_CREDENTIAL_BLOB_SIZE
+	errorNotFound           = syscall.Errno(1168)
+	maxCredBlob             = 5 * 512 // CRED_MAX_CREDENTIAL_BLOB_SIZE
 )
 
 var (
