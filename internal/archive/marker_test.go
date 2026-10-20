@@ -36,6 +36,10 @@ func mk(t *testing.T, root string, files ...string) {
 }
 
 func TestClaimProblem(t *testing.T) {
+	caseWant := "not a recorder segment" // case-sensitive hosts
+	if runtime.GOOS == "windows" {
+		caseWant = ""
+	}
 	seg := func(cam string) string { return cam + "/" + cam + "_20261017_120000+0300.mkv" }
 	tests := []struct {
 		name  string
@@ -45,7 +49,7 @@ func TestClaimProblem(t *testing.T) {
 		{"empty root", nil, ""},
 		{"only recorder folders", []string{"_state/status.json", "_logs/recorder.log", "_selftest/x"}, ""},
 		{"camera folders with segments", []string{seg("Cam_A"), seg("Cam_B"), "Cam_C/"}, ""},
-		{"case-insensitive extension and prefix", []string{"Cam_A/cam_a_20261017_120000+0300.MKV"}, ""},
+		{"different case: Windows only", []string{"Cam_A/cam_a_20261017_120000+0300.MKV"}, caseWant},
 		{"a file at the top level", []string{seg("Cam_A"), "notes.txt"}, "notes.txt (a file at the top level)"},
 		{"a foreign file in a camera folder", []string{"Cam_A/desktop.ini"}, "Cam_A/desktop.ini (not a recorder segment)"},
 		{"another camera's segment in the folder", []string{"Cam_A/Cam_B_20261017_120000+0300.mkv"}, "not a recorder segment"},

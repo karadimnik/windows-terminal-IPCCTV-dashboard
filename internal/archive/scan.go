@@ -20,32 +20,45 @@ type DirScan struct {
 
 	OldestWrite       time.Time // zero when the directory has no files
 	NewestWrite       time.Time
-	NewestClosedWrite time.Time // newest mtime of every file except the open segment
+	NewestClosedWrite time.Time // newest mtime of every file except Newest
 
-	// Open is the open segment: the newest file matching the strict segment pattern whose
-	// modification time is within segmentSeconds+60 s of the scan time; "" when there is none.
-	// "Newest" is by the start instant parsed from the name (the later name wins, so the repeated
-	// hour after a fall-back orders correctly), then by name.
-	Open      string
-	OpenMTime time.Time
-	OpenBytes int64
+	// Newest is the newest strict-pattern segment of the camera, ordered by modification time with
+	// the NAME as tie-break (later name wins); "" when there is none. The pruner ALWAYS protects it,
+	// as the PowerShell pruner protects the newest-created file. Name order alone is wrong across a
+	// daylight-saving fall-back (spike SP4); mtime order is right.
+	Newest      string
+	NewestMTime time.Time
+	NewestBytes int64
+
+	// Recent: Newest was modified within segmentSeconds+60 s of the scan time (a file ahead of the
+	// scan time counts as recent). Only the stall watchdog and the camera-down alert use it: a
+	// camera whose newest file is not recent is not writing.
+	Recent bool
+	// Anomaly: Newest is dated more than 60 s in the future (clock skew); it is still Recent.
+	Anomaly bool
 }
 
-// openGrace is how far past the segment length a file's mtime may lag and still count as open.
+// openGrace is how far past the segment length a file's mtime may lag and still be recent.
 const openGrace = 60 * time.Second
 
-// futureTolerance is how far ahead of the scan time an mtime may be and still count as open
+// futureTolerance is how far ahead of the scan time an mtime may be before it is an Anomaly
 // (the pruner's clock-sanity tolerance, IR 5.2 step 7).
 const futureTolerance = 60 * time.Second
 
+// Scan reads one camera directory with DefaultMatcher. See Matcher.Scan.
+func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, error) {
+	return DefaultMatcher.Scan(dir, container, now, segmentSeconds)
+}
+
 // Scan reads one camera directory. The directory name is the camera's safe name and container is
-// the configured extension (".mkv"); both decide which files can be the open segment. A missing
-// directory is an empty scan, not an error. This replaces NTFS creation time as the "open file"
-// signal (HLD section 6); equal modification times are ordered by name (IR U5).
+// the configured extension (".mkv"); both decide which files are strict-pattern segments. A missing
+// directory is an empty scan, not an error. This replaces NTFS creation time as the "which file is
+// open" signal (HLD section 6); os.Stat of a file being written is live on every OS (SP4), so sizes
+// need no special read.
 //
 // Deviation from the task text: container is an extra parameter, because "matches the strict
 // pattern" depends on the configured container.
-func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, error) {
+func (m Matcher) Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, error) {
 	now = now.UTC()
 	scan := DirScan{Dir: dir, ScannedAt: now}
 	entries, err := os.ReadDir(dir)
@@ -56,15 +69,14 @@ func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, er
 		return scan, err
 	}
 	safe := filepath.Base(filepath.Clean(dir))
-	window := time.Duration(segmentSeconds)*time.Second + openGrace
 
 	type file struct {
 		name  string
 		mtime time.Time
 	}
 	var files []file
-	var openStart time.Time
-	var openInfo fs.FileInfo
+	var newest fs.FileInfo
+	var newestM time.Time
 	for _, e := range entries { // sorted by name
 		if e.IsDir() {
 			continue
@@ -84,32 +96,31 @@ func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, er
 		}
 		files = append(files, file{e.Name(), mtime})
 
-		if !info.Mode().IsRegular() || !IsSegmentOf(e.Name(), safe, container) {
+		if !info.Mode().IsRegular() || !m.IsSegmentOf(e.Name(), safe, container) {
 			continue
 		}
-		if age := now.Sub(mtime); age > window || age < -futureTolerance {
-			continue
-		}
-		_, start, _ := ParseSegment(e.Name())
-		// entries are in name order, so >= lets the later name win a tie of start instants
-		if openInfo == nil || !start.Before(openStart) {
-			openStart, openInfo = start, info
+		// entries are in name order, so !Before lets the later name win an mtime tie
+		if newest == nil || !mtime.Before(newestM) {
+			newest, newestM = info, mtime
 		}
 	}
-	if openInfo != nil {
-		scan.Open = openInfo.Name()
-		scan.OpenMTime = openInfo.ModTime().UTC()
-		scan.OpenBytes = openInfo.Size()
+	if newest != nil {
+		scan.Newest = newest.Name()
+		scan.NewestMTime = newestM
+		scan.NewestBytes = newest.Size()
+		age := now.Sub(newestM)
+		scan.Recent = age <= time.Duration(segmentSeconds)*time.Second+openGrace
+		scan.Anomaly = -age > futureTolerance
 	}
 	for _, f := range files {
-		if f.name != scan.Open && f.mtime.After(scan.NewestClosedWrite) {
+		if f.name != scan.Newest && f.mtime.After(scan.NewestClosedWrite) {
 			scan.NewestClosedWrite = f.mtime
 		}
 	}
 	return scan, nil
 }
 
-// Tracker remembers, between scans, when each camera's open segment was first seen: the stand-in
+// Tracker remembers, between scans, when each camera's newest segment was first seen: the stand-in
 // for NTFS creation time in the stall watchdog and the camera-down alert. The supervisor keeps one.
 // First-seen is no earlier than the supervisor's own first scan, like the PowerShell floor at the
 // supervisor's start.
@@ -125,20 +136,20 @@ type seenSegment struct {
 
 func NewTracker() *Tracker { return &Tracker{seen: map[string]seenSegment{}} }
 
-// Observe records the open segment of a scan and returns when it was first seen (the scan time of
-// the first scan that reported this name for this directory). It returns the zero time when the
-// scan has no open segment, and forgets the directory.
+// Observe records the newest segment of a scan and returns when it was first seen (the scan time
+// of the first scan that reported this name for this directory). It returns the zero time when the
+// scan has no segment, and forgets the directory.
 func (t *Tracker) Observe(s DirScan) time.Time {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if s.Open == "" {
+	if s.Newest == "" {
 		delete(t.seen, s.Dir)
 		return time.Time{}
 	}
-	if cur, ok := t.seen[s.Dir]; ok && cur.name == s.Open {
+	if cur, ok := t.seen[s.Dir]; ok && cur.name == s.Newest {
 		return cur.first
 	}
-	t.seen[s.Dir] = seenSegment{name: s.Open, first: s.ScannedAt}
+	t.seen[s.Dir] = seenSegment{name: s.Newest, first: s.ScannedAt}
 	return s.ScannedAt
 }
 

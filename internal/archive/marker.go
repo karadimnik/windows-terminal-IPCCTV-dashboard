@@ -127,7 +127,7 @@ func ClaimProblem(root string, p osx.Platform, container string) string {
 				blockers = append(blockers, name+"/"+c.Name()+" (a folder inside a camera folder)")
 				break
 			}
-			if IsReparse(ci) || !ci.Mode().IsRegular() || !IsSegmentOf(c.Name(), name, container) {
+			if IsReparse(ci) || !ci.Mode().IsRegular() || !MatcherFor(p).IsSegmentOf(c.Name(), name, container) {
 				blockers = append(blockers, name+"/"+c.Name()+" (not a recorder segment)")
 				break
 			}

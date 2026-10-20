@@ -54,31 +54,44 @@ func TestSegmentsGolden(t *testing.T) {
 			if !percent && n.Pattern != FormatSegmentPattern(n.SafeName)+c.Extension {
 				t.Errorf("pattern %q, golden %q", FormatSegmentPattern(n.SafeName)+c.Extension, n.Pattern)
 			}
-			for _, a := range n.Accept {
-				got := IsSegmentOf(a.Name, n.SafeName, c.Extension)
-				switch {
-				case a.Trap:
-					traps++
-					if got || IsSegmentName(a.Name, c.Extension) {
-						t.Errorf("%s: TRAP %q (%s) must be rejected by the strict Go allowlist", n.SafeName, a.Name, a.Why)
-					}
-				case percent && !strings.Contains(a.Name, "%"):
-					// PowerShell accepts the offset-spliced prefix here (it treats %z in the camera name as a
-					// wildcard); Go matches the prefix literally. Covered by TestPercentInName.
-					if got {
-						t.Errorf("%s: %q accepted although its prefix is not the safe name", n.SafeName, a.Name)
-					}
-				default:
-					accepted++
-					if !got {
-						t.Errorf("%s: %q (%s) must be accepted", n.SafeName, a.Name, a.Why)
+			for _, m := range []Matcher{{FoldCase: true}, {FoldCase: false}} { // Windows and Linux/macOS
+				for _, a := range n.Accept {
+					got := m.IsSegmentOf(a.Name, n.SafeName, c.Extension)
+					differentCase := strings.Contains(a.Why, "lower case") || strings.Contains(a.Why, "upper case")
+					switch {
+					case a.Trap:
+						if m.FoldCase {
+							traps++
+						}
+						if got || m.IsSegmentName(a.Name, c.Extension) {
+							t.Errorf("%v %s: TRAP %q (%s) must be rejected by the strict Go allowlist", m, n.SafeName, a.Name, a.Why)
+						}
+					case percent && !strings.Contains(a.Name, "%"):
+						// PowerShell accepts the offset-spliced prefix here (it treats %z in the camera name as a
+						// wildcard); Go matches the prefix literally. Covered by TestPercentInName.
+						if got {
+							t.Errorf("%s: %q accepted although its prefix is not the safe name", n.SafeName, a.Name)
+						}
+					case differentCase && !m.FoldCase: // case-sensitive filesystems: a differently-cased file is foreign
+						if got {
+							t.Errorf("case-sensitive matcher accepted %q", a.Name)
+						}
+					default:
+						if m.FoldCase {
+							accepted++
+						}
+						if !got {
+							t.Errorf("%v %s: %q (%s) must be accepted", m, n.SafeName, a.Name, a.Why)
+						}
 					}
 				}
 			}
 			for _, r := range n.Reject {
 				rejected++
-				if IsSegmentOf(r.Name, n.SafeName, c.Extension) {
-					t.Errorf("%s: %q (%s) must be rejected", n.SafeName, r.Name, r.Why)
+				for _, m := range []Matcher{{FoldCase: true}, {FoldCase: false}} {
+					if m.IsSegmentOf(r.Name, n.SafeName, c.Extension) {
+						t.Errorf("%v %s: %q (%s) must be rejected", m, n.SafeName, r.Name, r.Why)
+					}
 				}
 			}
 		}
@@ -117,7 +130,6 @@ func TestSegmentShapeAndRealDates(t *testing.T) {
 		{"Cam_20261025_033000+0000.mkv", true},
 		{"Cam_20261025_033000+1400.mkv", true},
 		{"Cam_20240229_000000+0200.mkv", true},  // leap day
-		{"cam_20261025_033000+0300.MKV", true},  // case-insensitive extension
 		{"Cam_20261325_033000+0300.mkv", false}, // month 13
 		{"Cam_20260230_033000+0300.mkv", false}, // 30 February
 		{"Cam_20250229_033000+0300.mkv", false}, // not a leap year
@@ -138,6 +150,17 @@ func TestSegmentShapeAndRealDates(t *testing.T) {
 	for _, c := range cases {
 		if got := IsSegmentName(c.name, ".mkv"); got != c.want {
 			t.Errorf("IsSegmentName(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+	for _, m := range []Matcher{{FoldCase: true}, {FoldCase: false}} { // both OS rules on any host
+		if got := m.IsSegmentName("cam_20261025_033000+0300.MKV", ".mkv"); got != m.FoldCase {
+			t.Errorf("%v: case-differing extension accepted=%v", m, got)
+		}
+		if got := m.IsSegmentOf("CAM_20261025_033000+0300.mkv", "Cam", ".mkv"); got != m.FoldCase {
+			t.Errorf("%v: case-differing prefix accepted=%v", m, got)
+		}
+		if !m.IsSegmentOf("Cam_20261025_033000+0300.mkv", "Cam", ".mkv") {
+			t.Errorf("%v: exact name refused", m)
 		}
 	}
 	// the container may be given without its dot

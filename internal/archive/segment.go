@@ -1,8 +1,11 @@
 package archive
 
 import (
+	"runtime"
 	"strings"
 	"time"
+
+	"holocron/internal/osx"
 )
 
 // Segment file names are <safe>_YYYYMMDD_HHMMSS+HHMM<ext>: local date and time plus the numeric
@@ -12,8 +15,7 @@ import (
 // with an unanchored-at-the-end "$" (a trailing newline passes) and .NET \d (any Unicode digit
 // passes); here only ASCII digits are accepted, the name must end exactly at the extension, and
 // the digits must form a real date, time and offset. A stricter allowlist can only reduce what the
-// pruner may delete. The extension and the camera prefix stay case-insensitive (ASCII only), as in
-// PowerShell, because the filesystem the pattern describes may be.
+// pruner may delete. Case: see Matcher (insensitive on Windows only).
 
 const stampLen = len("20060102_150405+0300") // 20
 
@@ -138,12 +140,39 @@ func normExt(container string) string {
 	return container
 }
 
+// Matcher decides segment names. FoldCase makes the extension and the camera prefix compare
+// case-insensitively (ASCII only), which is right on Windows (NTFS, as PowerShell's -match did)
+// and wrong on Linux and macOS, where ffmpeg writes exactly the pattern and a differently-cased
+// file is foreign. Everything else in the allowlist is the same on every OS.
+type Matcher struct{ FoldCase bool }
+
+// DefaultMatcher folds case on Windows only.
+var DefaultMatcher = Matcher{FoldCase: runtime.GOOS == "windows"}
+
+// MatcherFor is the matcher of a platform (osx.Platform.Name()), so tables for another OS can be tested.
+func MatcherFor(p osx.Platform) Matcher { return Matcher{FoldCase: p.Name() == "windows"} }
+
+func (m Matcher) eq(a, b string) bool {
+	if m.FoldCase {
+		return asciiEqualFold(a, b)
+	}
+	return a == b
+}
+
+// IsSegmentName reports whether name has the shape of a segment of the given container, using
+// DefaultMatcher. See Matcher.IsSegmentName.
+func IsSegmentName(name, container string) bool { return DefaultMatcher.IsSegmentName(name, container) }
+
+// IsSegmentOf is Matcher.IsSegmentOf with DefaultMatcher.
+func IsSegmentOf(name, safe, container string) bool {
+	return DefaultMatcher.IsSegmentOf(name, safe, container)
+}
+
 // IsSegmentName reports whether name has the shape of a segment of the given container (an
-// extension such as ".mkv", with or without the dot, compared case-insensitively). It does not know
-// the camera; IsSegmentOf adds that.
-func IsSegmentName(name, container string) bool {
+// extension such as ".mkv", with or without the dot). It does not know the camera; IsSegmentOf adds that.
+func (m Matcher) IsSegmentName(name, container string) bool {
 	ext := normExt(container)
-	if len(ext) < 2 || len(name) <= len(ext) || !asciiEqualFold(name[len(name)-len(ext):], ext) {
+	if len(ext) < 2 || len(name) <= len(ext) || !m.eq(name[len(name)-len(ext):], ext) {
 		return false
 	}
 	_, _, ok := parseSegmentBase(name[:len(name)-len(ext)], ext[1:])
@@ -151,13 +180,12 @@ func IsSegmentName(name, container string) bool {
 }
 
 // IsSegmentOf is the Test-CamSegmentName predicate: name is a segment of the camera whose safe name
-// (its folder name) is safe, in the configured container. Only the camera prefix and the extension
-// are matched case-insensitively (ASCII).
-func IsSegmentOf(name, safe, container string) bool {
-	if safe == "" || !IsSegmentName(name, container) {
+// (its folder name) is safe, in the configured container.
+func (m Matcher) IsSegmentOf(name, safe, container string) bool {
+	if safe == "" || !m.IsSegmentName(name, container) {
 		return false
 	}
 	ext := normExt(container)
 	camera := name[:len(name)-len(ext)-stampLen-1]
-	return asciiEqualFold(camera, safe)
+	return m.eq(camera, safe)
 }
