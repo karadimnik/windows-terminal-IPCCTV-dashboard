@@ -144,6 +144,13 @@ func runPrintCA(cfg Config, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, "cannot prepare the local CA:", err)
 		return 1
 	}
+	WriteCAInstructions(out, info)
+	return 0
+}
+
+// WriteCAInstructions prints where the CA certificate is, its fingerprint and how to install it
+// on a device (shared by camui -print-ca and `holocron tls ca`). No key, no token.
+func WriteCAInstructions(out io.Writer, info CAInfo) {
 	fmt.Fprintf(out, "IPCCTV local CA\n  file:         %s\n  name:         %s\n  valid until:  %s\n  SHA-256:      %s\n\n", info.Path, info.Subject, info.NotAfter.Format("2006-01-02"), info.Fingerprint)
 	fmt.Fprintln(out, "Install it once on each device (this file is the CA CERTIFICATE only; its key stays in the same folder and must stay private):")
 	fmt.Fprintln(out, "  1. Get the file to the device: open https://<this PC's address>:<port>/ there, click through the first warning, sign in, and use Settings > Connect a phone (or open /api/tls/ca.crt), or copy the file.")
@@ -151,7 +158,6 @@ func runPrintCA(cfg Config, out, errOut io.Writer) int {
 	fmt.Fprintln(out, "  3. iPhone: Settings > General > VPN & Device Management > install, then Settings > General > About > Certificate Trust Settings > enable it.")
 	fmt.Fprintln(out, "     Android: Settings > Security > Install a certificate > CA certificate. Windows: double-click > Install > Local Machine/Current User > Trusted Root Certification Authorities.")
 	fmt.Fprintln(out, "  Details and removal: docs/ui.md.")
-	return 0
 }
 
 // ---------------------------------------------------------------------------

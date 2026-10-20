@@ -66,6 +66,8 @@ type env struct {
 	inspector osx.Inspector
 	exe       string // this executable (re-run as host / supervisor)
 	lg        *logx.Logger
+	stdin     io.Reader              // secrets are read from here and nowhere else
+	opener    func(url string) error // opens a browser (a fake in tests)
 }
 
 type envKey struct{}
@@ -130,6 +132,8 @@ type seams struct {
 	exe       string
 	platform  osx.Platform
 	getenv    func(string) string
+	stdin     io.Reader
+	opener    func(url string) error
 }
 
 func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int {
@@ -165,7 +169,7 @@ func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int 
 		s = &seams{}
 	}
 	e := &env{opts: app.Options{Root: *root, ConfigPath: *cfgPath, Platform: s.platform, Getenv: s.getenv}, json: *jsonOut,
-		out: out, errw: errw, args: args, global: globalArgs(*root, *cfgPath, *v, *vv), dial: s.dial, inspector: s.inspector, exe: s.exe}
+		out: out, errw: errw, args: args, global: globalArgs(*root, *cfgPath, *v, *vv), dial: s.dial, inspector: s.inspector, exe: s.exe, stdin: s.stdin, opener: s.opener}
 	if *vv {
 		e.opts.Verbose = 2
 	} else if *v {
@@ -182,6 +186,9 @@ func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int 
 	}
 	if e.inspector == nil {
 		e.inspector = osx.OSInspector{}
+	}
+	if e.stdin == nil {
+		e.stdin = os.Stdin
 	}
 	var lg *logx.Logger
 	if cmd.noRoot {

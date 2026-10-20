@@ -18,6 +18,7 @@ type command struct {
 	about    string
 	action   string
 	mutating bool
+	audit    bool // read-only but security-relevant: also in the audit stream
 	role     bool // hidden internal role (host, supervisor)
 	noRoot   bool // touches no root (no log file either)
 	notBuilt bool
@@ -60,30 +61,34 @@ func init() {
 		{path: "help", about: "this list", action: "help.show", noRoot: true, run: func(ctx context.Context, e *env) error { printHelp(e.out); return nil }},
 
 		{path: "web", usage: "[-listen H:P] [-tls-listen IP:P] [-tls-dir D] [-auth-dir D] [-tls-readonly true|false] [-config FILE] [-print-ca] [-set-password USER] [-unlock USER] [-version]", about: "run the web app alone (normally started by up): login page, Live grid, Footage, Settings; camui's flags and config file all work", action: "web.serve", run: cmdWeb},
+		{path: "open", usage: "[camera] [--print]", about: "open the Live grid (or one camera) in the default browser; --print only prints the address", action: "web.open", run: cmdOpen},
+
+		{path: "user add", usage: "<name> [--auth-dir D]", about: "add a login user; the password is read from standard input", action: "user.add", mutating: true, run: func(ctx context.Context, e *env) error { return cmdUserSet(ctx, e, "add") }},
+		{path: "user passwd", usage: "<name> [--auth-dir D]", about: "change a user's password (read from standard input) and end that user's sessions", action: "user.passwd", mutating: true, run: func(ctx context.Context, e *env) error { return cmdUserSet(ctx, e, "passwd") }},
+		{path: "user remove", usage: "<name> [--force] [--auth-dir D]", about: "remove a user and its sessions (the last user only with --force while web.tlsListen is set)", action: "user.remove", mutating: true, run: cmdUserRemove},
+		{path: "user list", usage: "[--json] [--auth-dir D]", about: "names, role and creation time (never hashes)", action: "user.list", audit: true, run: cmdUserList},
+		{path: "user unlock", usage: "<name> [--auth-dir D]", about: "lift a sign-in lockout in a running web app", action: "user.unlock", mutating: true, run: cmdUserUnlock},
+
+		{path: "tls ca", usage: "[--json] [--tls-dir D]", about: "the local CA: file, SHA-256 fingerprint and the steps to install it on a device (created when absent)", action: "tls.ca", mutating: true, run: cmdTLSCA},
+		{path: "tls print", usage: "[--out FILE] [--tls-dir D]", about: "write the CA certificate (never a key) to standard output or a file", action: "tls.print", audit: true, run: cmdTLSPrint},
+		{path: "tls rotate", usage: "--yes [--tls-dir D]", about: "delete the CA and server certificate; a fresh pair is made at the next web start and every device must reinstall the CA", action: "tls.rotate", mutating: true, run: cmdTLSRotate},
+
+		{path: "secret set", usage: "<name>", about: "store a secret read from standard input (camera.user, camera.password, ...)", action: "secret.set", mutating: true, run: cmdSecretSet},
+		{path: "secret delete", usage: "<name>", about: "delete a secret", action: "secret.delete", mutating: true, run: cmdSecretDelete},
+		{path: "secret import", usage: "[--from camera_creds.xml]", about: "Windows: move the old camera_creds.xml login into the store", action: "secret.import", mutating: true, run: cmdSecretImport},
+		{path: "secret list", usage: "[--json]", about: "secret names (never values)", action: "secret.list", audit: true, run: cmdSecretList},
+
+		{path: "prune", usage: "[--dry-run | --now --yes] [--json]", about: "show the pruner's decision (default), or run it now when no supervisor is running", action: "prune.run", mutating: true, run: cmdPrune},
+		{path: "archive stats", usage: "[--json]", about: "per camera: segments, size, oldest and newest; GB per day, free space, projected days", action: "archive.stats", run: cmdArchiveStats},
 		{path: "host", action: "role.host", role: true, run: cmdRoleHost},
 		{path: "supervisor", action: "role.supervisor", role: true, run: cmdRoleSupervisor},
 	}
 	for _, nb := range []struct{ path, usage, about, action string }{
-		{"open", "[camera]", "open the Live grid in the browser", "web.open"},
-		{"user add", "<name>", "add a login user", "user.add"},
-		{"user remove", "<name>", "remove a login user", "user.remove"},
-		{"user passwd", "<name>", "set a user's password", "user.passwd"},
-		{"user list", "", "list login users", "user.list"},
-		{"user unlock", "<name>", "lift a lockout", "user.unlock"},
-		{"tls ca", "", "create the local certificate authority", "tls.ca"},
-		{"tls print", "", "print the CA certificate", "tls.print"},
-		{"tls rotate", "", "renew the server certificate", "tls.rotate"},
-		{"secret set", "<name>", "store a secret", "secret.set"},
-		{"secret delete", "<name>", "delete a secret", "secret.delete"},
-		{"secret import", "", "import camera_creds.xml", "secret.import"},
-		{"secret list", "", "secret names (never values)", "secret.list"},
 		{"install", "[--mode logon|service|systemd|launchd] [--dry-run]", "create the autostart entry", "install.run"},
 		{"uninstall", "[--dry-run]", "remove what install created", "uninstall.run"},
 		{"autostart enable", "", "switch the autostart entry on", "autostart.enable"},
 		{"autostart disable", "", "switch the autostart entry off", "autostart.disable"},
 		{"autostart status", "", "autostart state", "autostart.status"},
-		{"prune", "[--dry-run]", "show or run the pruner's decision now", "prune.run"},
-		{"archive stats", "", "disk, retention, per-camera size and age", "archive.stats"},
 	} {
 		nb := nb
 		commands = append(commands, &command{path: nb.path, usage: nb.usage, about: nb.about, action: nb.action, notBuilt: true,
@@ -93,7 +98,7 @@ func init() {
 	}
 	for _, c := range commands {
 		c := c
-		cli.Register(cli.Action{Name: c.action, Component: "cli", Mutating: c.mutating, Run: func(ctx context.Context, in cli.Input) (cli.Output, error) {
+		cli.Register(cli.Action{Name: c.action, Component: "cli", Mutating: c.mutating, Audit: c.audit, Run: func(ctx context.Context, in cli.Input) (cli.Output, error) {
 			return cli.Output{}, c.run(ctx, envFrom(ctx))
 		}})
 	}
