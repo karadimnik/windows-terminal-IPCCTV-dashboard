@@ -92,8 +92,11 @@ func ImportLegacyCameraCreds(ctx context.Context, path string, dst Provider) err
 	runErr := cmd.Run()
 	raw := out.buf.Bytes()
 	defer wipe(raw)
-	if ctx.Err() != nil {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		return fmt.Errorf("secrets: import: powershell did not finish within %s", importTimeout)
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("secrets: import: %w", ctx.Err())
 	}
 	if runErr != nil {
 		// stderr carries only an exception message, which never holds the login
