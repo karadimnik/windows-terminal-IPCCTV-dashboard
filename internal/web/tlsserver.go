@@ -46,10 +46,14 @@ func tlsGuardConfig(cfg Config, names certNames) Config {
 // session), the view-only gate, the guard (https origins only), then the mux with
 // the TLS-only routes. The login POST passes the guard like any other API call,
 // so a cross-site login attempt is refused before a password is looked at.
-func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNames, auth *authService) (http.Handler, error) {
-	mux, err := buildMux(cfg, log)
+func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNames, auth *authService, opts ...serveOpt) (http.Handler, error) {
+	env := newServeEnv(opts)
+	mux, err := buildMux(cfg, log, opts...)
 	if err != nil {
 		return nil, err
+	}
+	if env.runner != nil {
+		auth.runner = env.runner
 	}
 	auth.routes(mux)
 	mux.HandleFunc("GET /api/tls/ca.crt", func(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +85,7 @@ func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNam
 		// After the session check (401 beats 403) and before the guard and any handler.
 		chain = readOnlyGate(log, chain)
 	}
-	chain = logRequests(log, auth.gate(chain))
+	chain = logRequestsAt(log, env.reqLevel, auth.gate(chain))
 	// Outermost, so the redirects and every refusal carry it too.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -91,7 +95,7 @@ func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNam
 
 // startTLS prepares and binds the LAN listener. With TLSListen empty it returns
 // nils. The returned func serves until the server is shut down.
-func startTLS(cfg Config, log *slog.Logger) (*http.Server, func() error, error) {
+func startTLS(cfg Config, log *slog.Logger, opts ...serveOpt) (*http.Server, func() error, error) {
 	if cfg.TLSListen == "" {
 		return nil, nil, nil
 	}
@@ -110,7 +114,7 @@ func startTLS(cfg Config, log *slog.Logger) (*http.Server, func() error, error) 
 	}
 	clearUnlockMarkers(cfg.AuthDir)
 	auth := newAuthService(cfg.AuthDir, newFileUserStore(cfg.AuthDir, time.Now), log, time.Now, defaultPasswordHasher)
-	handler, err := newTLSHandler(cfg, log, mgr, names, auth)
+	handler, err := newTLSHandler(cfg, log, mgr, names, auth, opts...)
 	if err != nil {
 		return nil, nil, err
 	}

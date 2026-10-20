@@ -79,6 +79,7 @@ func (a *API) handleAcknowledge(w http.ResponseWriter, r *http.Request) {
 			"notice must be one of "+strings.Join(noticeNames(), ", "))
 		return
 	}
+	setTarget(r, notice)
 	at := strings.TrimSpace(request.At)
 	if at == "" || len(at) > maxNoticeTimestamp {
 		writeAPIError(w, http.StatusUnprocessableEntity,

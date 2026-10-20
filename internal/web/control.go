@@ -72,6 +72,9 @@ type psResult struct {
 	Output   []string
 	Err      error
 	Duration time.Duration
+	// HTTP, when set, is the status the page gets instead of the 200/502 pair: a refusal or a
+	// conflict of a controller that did not run anything.
+	HTTP int
 }
 
 func (a *API) handleControl(w http.ResponseWriter, r *http.Request) {
@@ -83,29 +86,19 @@ func (a *API) handleControl(w http.ResponseWriter, r *http.Request) {
 	scope := strings.ToLower(strings.TrimSpace(request.Scope))
 	action := strings.ToLower(strings.TrimSpace(request.Action))
 
-	var scopeFlag []string
 	switch scope {
-	case "all":
-		scopeFlag = nil
-	case "recorder":
-		scopeFlag = []string{"-Recorder"}
-	case "dashboard":
-		scopeFlag = []string{"-Dashboard"}
+	case "all", "recorder", "dashboard":
 	default:
 		writeAPIError(w, http.StatusUnprocessableEntity, "scope must be all, recorder or dashboard")
 		return
 	}
-
-	var actionFlag string
 	switch action {
-	case "start":
-		actionFlag = "-Start"
-	case "stop":
-		actionFlag = "-Stop"
+	case "start", "stop":
 	default:
 		writeAPIError(w, http.StatusUnprocessableEntity, "action must be start or stop")
 		return
 	}
+	setTarget(r, scope+"/"+action)
 
 	// One action at a time. Two stops racing each other, or a start racing a
 	// stop, is how a half-stopped system happens.
@@ -115,7 +108,13 @@ func (a *API) handleControl(w http.ResponseWriter, r *http.Request) {
 	}
 	defer a.actionMu.Unlock()
 
-	result := a.runScript(controlTimeout, "cam.ps1", append([]string{actionFlag}, scopeFlag...)...)
+	ctlr := a.controller()
+	var result ActionResult
+	if action == "start" {
+		result = ctlr.Start(actionCtx(r), scope)
+	} else {
+		result = ctlr.Stop(actionCtx(r), scope)
+	}
 	writeJSON(w, actionStatus(result), ActionResponse{
 		Ok:         result.Err == nil && result.ExitCode == 0,
 		Action:     action,
@@ -156,18 +155,14 @@ func (a *API) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flag := "-Disable"
-	if *request.Enabled {
-		flag = "-Enable"
-	}
-
+	setTarget(r, name)
 	if !a.actionMu.TryLock() {
 		writeAPIError(w, http.StatusConflict, "another action is still running; wait for it to finish")
 		return
 	}
 	defer a.actionMu.Unlock()
 
-	result := a.runScript(recordToggleTimeout, "cam.recorder.ps1", flag, name)
+	result := a.controller().SetRecord(actionCtx(r), name, *request.Enabled)
 	writeJSON(w, actionStatus(result), ActionResponse{
 		Ok:         result.Err == nil && result.ExitCode == 0,
 		Action:     map[bool]string{true: "enable", false: "disable"}[*request.Enabled],
@@ -181,6 +176,9 @@ func (a *API) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
 }
 
 func actionStatus(result psResult) int {
+	if result.HTTP != 0 {
+		return result.HTTP
+	}
 	if result.Err != nil {
 		return http.StatusBadGateway
 	}

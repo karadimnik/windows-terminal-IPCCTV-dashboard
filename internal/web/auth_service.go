@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"holocron/internal/cli"
 )
 
 // sessionCookie is the LAN listener's cookie. It holds a random token whose
@@ -43,6 +45,7 @@ type authService struct {
 	authLog  *authLog
 	log      *slog.Logger
 	now      func() time.Time
+	runner   *cli.Runner // the mutating routes run as Actions; nil: over log
 
 	hashSlots chan struct{}
 	dummyOnce sync.Once
@@ -223,10 +226,13 @@ func (a *authService) setSessionCookie(w http.ResponseWriter, token string, maxA
 // ---------------------------------------------------------------------------
 
 func (a *authService) routes(mux *http.ServeMux) {
+	if a.runner == nil {
+		a.runner = runnerFor(a.log)
+	}
 	mux.HandleFunc("GET /login", a.handleLoginPage)
 	mux.HandleFunc("GET /login.js", serveAsset("login.js", "text/javascript; charset=utf-8", nil))
-	mux.HandleFunc("POST /api/auth/login", a.handleLogin)
-	mux.HandleFunc("POST /api/auth/logout", a.handleLogout)
+	handleAction(mux, a.runner, "POST /api/auth/login", ActionLogin, a.handleLogin)
+	handleAction(mux, a.runner, "POST /api/auth/logout", ActionLogout, a.handleLogout)
 	mux.HandleFunc("GET /api/auth/me", a.handleMe)
 }
 
@@ -303,6 +309,7 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := req.Username
+	setTarget(r, cleanLoggedName(name))
 
 	ok, wait := a.limiter.allow(sourceIP(r))
 	emit(a.log, slog.LevelDebug, "auth.limiter", "anonymous", name, map[bool]string{true: "allowed", false: "throttled"}[ok], started, "from", sourceIP(r), "waitMs", wait.Milliseconds())
@@ -388,6 +395,7 @@ func (a *authService) upgradeHash(user User, password string, started time.Time)
 func (a *authService) handleLogout(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	user, _ := userFrom(r)
+	setTarget(r, cleanLoggedName(user.Username))
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		_ = a.sessions.Delete(c.Value)
 	}
@@ -418,6 +426,7 @@ type loopbackAuth struct {
 	now    func() time.Time
 	audit  *authLog
 	mu     sync.Mutex
+	runner *cli.Runner // nil: over log
 }
 
 // newLoopbackAuth with an empty dir (a bare Config in a test) has no first-run page at all.
@@ -438,7 +447,10 @@ func (l *loopbackAuth) routes(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("GET /setup", l.ifNoUsers(serveAsset("setup.html", "text/html; charset=utf-8", authPageHeaders)))
 	mux.HandleFunc("GET /setup.js", l.ifNoUsers(serveAsset("setup.js", "text/javascript; charset=utf-8", nil)))
-	mux.HandleFunc("POST /api/auth/setup", l.handleSetup)
+	if l.runner == nil {
+		l.runner = runnerFor(l.log)
+	}
+	handleAction(mux, l.runner, "POST /api/auth/setup", ActionSetup, l.handleSetup)
 }
 
 // open reports whether the first-run page may be used: no user exists. An
@@ -471,6 +483,7 @@ func (l *loopbackAuth) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "bad request")
 		return
 	}
+	setTarget(r, cleanLoggedName(req.Username))
 	user, err := newUser(l.hasher, req.Username, req.Password, l.now())
 	if err != nil {
 		writeAPIError(w, http.StatusUnprocessableEntity, err.Error())

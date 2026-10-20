@@ -104,6 +104,7 @@ func (a *API) handleGetCameras(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handlePutCameras(w http.ResponseWriter, r *http.Request) {
+	setTarget(r, "cameras")
 	var request CamerasRequest
 	if !decodeJSONBody(w, r, &request) {
 		return
@@ -158,6 +159,7 @@ func (a *API) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handlePutConfig(w http.ResponseWriter, r *http.Request) {
+	setTarget(r, "config")
 	var request ConfigRequest
 	if !decodeJSONBody(w, r, &request) {
 		return

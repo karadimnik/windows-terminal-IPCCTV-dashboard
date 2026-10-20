@@ -90,6 +90,12 @@ type Config struct {
 	// before it frees them. Absent means 300; 0 frees at once (the pre-1C
 	// behaviour); -1 never frees. The page reads it from GET /api/live.
 	LiveHiddenGraceSeconds *int `json:"liveHiddenGraceSeconds"`
+
+	// CamerasPath and ConfigPath point the web app at cameras.json and the recorder configuration
+	// when they are not "cameras.json" and "recorder.config.json" in ScriptDir. The holocron web
+	// role sets them to its own files (same key names); they are not part of the camui config file.
+	CamerasPath string `json:"-"`
+	ConfigPath  string `json:"-"`
 }
 
 // defaultLiveHiddenGrace is the grace period used when nothing is configured.
@@ -130,10 +136,18 @@ func parseBoolSetting(text string) (bool, bool) {
 }
 
 // CamerasFile is the camera list the scripts read, beside them.
-func (c Config) CamerasFile() string { return filepath.Join(c.ScriptDir, "cameras.json") }
+func (c Config) CamerasFile() string {
+	if c.CamerasPath != "" {
+		return c.CamerasPath
+	}
+	return filepath.Join(c.ScriptDir, "cameras.json")
+}
 
 // RecorderConfigFile is the recorder's own config, beside the scripts.
 func (c Config) RecorderConfigFile() string {
+	if c.ConfigPath != "" {
+		return c.ConfigPath
+	}
 	return filepath.Join(c.ScriptDir, "recorder.config.json")
 }
 

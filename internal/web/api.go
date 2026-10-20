@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"holocron/internal/cli"
 )
 
 // taskNames are the Scheduled Tasks whose state the dashboard reports, keyed by
@@ -36,6 +38,9 @@ type StatusResponse struct {
 	Supervisor SupervisorState     `json:"supervisor"`
 	Status     map[string]any      `json:"status"`
 	Tasks      map[string]TaskInfo `json:"tasks"`
+	// Controller is how control actions are carried out: "powershell" (the old system) or "api"
+	// (the Go supervisor's control endpoint).
+	Controller string `json:"controller"`
 
 	// Acknowledged maps a persistent notice's key to the timestamp of the
 	// event the Operator has said he has seen. See notice.go.
@@ -94,6 +99,17 @@ type API struct {
 	mu        sync.Mutex
 	tasks     map[string]TaskInfo
 	tasksRead time.Time
+
+	// The Controller seam (controller.go) and the Runner of the mutating routes (actions.go).
+	runner     *cli.Runner
+	ctlFixed   Controller // Options.Controller or a test: used as is
+	powerShell *PowerShellController
+	dialCtl    func(root string) (apiClient, error)
+	launch     *HolocronLaunch
+	goSystem   bool // the holocron web role: an unanswering control endpoint means "stopped", not "PowerShell"
+	pickMu     sync.Mutex
+	picked     Controller
+	pickedAt   time.Time
 }
 
 // NewAPI returns an API serving from cfg.
@@ -102,19 +118,37 @@ func NewAPI(cfg Config, log *slog.Logger) *API {
 	api.runScript = func(timeout time.Duration, script string, args ...string) psResult {
 		return runPowerShell(cfg.ScriptDir, timeout, script, args...)
 	}
+	api.runner = runnerFor(log)
 	return api
+}
+
+// ps is the PowerShell controller over this API's script runner and task query, which a test may
+// replace after construction.
+func (a *API) ps() *PowerShellController {
+	if a.powerShell == nil {
+		a.powerShell = &PowerShellController{
+			run: func(timeout time.Duration, script string, args ...string) psResult {
+				return a.runScript(timeout, script, args...)
+			},
+			tasks: a.taskStates,
+		}
+	}
+	return a.powerShell
 }
 
 // Routes registers the API handlers on mux.
 func (a *API) Routes(mux *http.ServeMux) {
+	if a.runner == nil { // an API built as a literal (tests)
+		a.runner = runnerFor(a.log)
+	}
 	mux.HandleFunc("GET /api/status", a.handleStatus)
-	mux.HandleFunc("POST /api/acknowledge", a.handleAcknowledge)
-	mux.HandleFunc("POST /api/control", a.handleControl)
-	mux.HandleFunc("POST /api/cameras/{name}/record", a.handleRecordToggle)
+	handleAction(mux, a.runner, "POST /api/acknowledge", ActionAcknowledge, a.handleAcknowledge)
+	handleAction(mux, a.runner, "POST /api/control", ActionControl, a.handleControl)
+	handleAction(mux, a.runner, "POST /api/cameras/{name}/record", ActionRecord, a.handleRecordToggle)
 	mux.HandleFunc("GET /api/cameras", a.handleGetCameras)
-	mux.HandleFunc("PUT /api/cameras", a.handlePutCameras)
+	handleAction(mux, a.runner, "PUT /api/cameras", ActionCamerasPut, a.handlePutCameras)
 	mux.HandleFunc("GET /api/config", a.handleGetConfig)
-	mux.HandleFunc("PUT /api/config", a.handlePutConfig)
+	handleAction(mux, a.runner, "PUT /api/config", ActionConfigPut, a.handlePutConfig)
 	mux.HandleFunc("GET /api/footage", a.handleFootage)
 	mux.HandleFunc("GET /api/clip", a.handleClip)
 	a.liveRoutes(mux)
@@ -125,7 +159,8 @@ func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Schema:     1,
 		ServerTime: time.Now().Format(time.RFC3339),
 		StatusFile: StatusFileInfo{Path: a.cfg.StatusFile},
-		Tasks:      a.taskStates(),
+		Tasks:      a.controller().TaskStates(),
+		Controller: a.controller().Name(),
 	}
 
 	status, info, err := a.readStatus()

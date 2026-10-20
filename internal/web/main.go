@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"holocron/internal/cli"
 )
 
 //go:embed static
@@ -44,8 +46,20 @@ var version = "dev"
 // Config).
 type Options struct {
 	Config Config
-	// Log receives the web app's records; nil writes text lines to standard output (camui's way).
-	Log *slog.Logger
+	// Logs receives the web app's records (components web and auth) and runs its Actions; the
+	// request lines are then DEBUG records of component web. Nil is camui.exe's way: text lines on
+	// standard output, request lines at INFO.
+	Logs cli.LogSource
+	// Controller carries out Start/Stop/record toggles; nil chooses per request (control.go).
+	Controller Controller
+	// Launch lets the Start button run `holocron up --detach` (the holocron web role sets it).
+	Launch *HolocronLaunch
+	// GoSystem marks the holocron web role: with no supervisor answering, the page talks to the Go
+	// system's controller (not PowerShell) and settings writes are refused (they are PowerShell).
+	GoSystem bool
+	// StopFile, when set, ends Run as soon as the file exists (how the host stops the web role on
+	// every OS; removed by the host).
+	StopFile string
 
 	// One-shot commands of camui.exe, handled by RunOneShot before any listener starts.
 	ShowVersion bool
@@ -176,7 +190,6 @@ func Main(args []string) int {
 		return code
 	}
 	log := newStdoutLogger()
-	o.Log = log
 	if err := o.Validate(); err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		var rf *Refusal
@@ -204,13 +217,15 @@ func newStdoutLogger() *slog.Logger {
 }
 
 // buildMux registers the API and the embedded UI.
-func buildMux(cfg Config, log *slog.Logger) (*http.ServeMux, error) {
+func buildMux(cfg Config, log *slog.Logger, opts ...serveOpt) (*http.ServeMux, error) {
 	static, err := fs.Sub(staticFiles, "static")
 	if err != nil {
 		return nil, fmt.Errorf("embedded UI: %w", err)
 	}
 	mux := http.NewServeMux()
-	NewAPI(cfg, log).Routes(mux)
+	api := NewAPI(cfg, log)
+	newServeEnv(opts).apply(api)
+	api.Routes(mux)
 	mux.Handle("GET /", versioned(hideAuthPages(http.FileServerFS(static))))
 	return mux, nil
 }
@@ -235,13 +250,16 @@ func hideAuthPages(next http.Handler) http.Handler {
 // outermost so an unauthenticated request learns nothing else. There is no login
 // here; the only auth routes are the status answer and, while no user exists,
 // the first-run page. With no AuthDir configured (a bare Config) the latter is off.
-func newHandler(cfg Config, log *slog.Logger) (http.Handler, error) {
-	mux, err := buildMux(cfg, log)
+func newHandler(cfg Config, log *slog.Logger, opts ...serveOpt) (http.Handler, error) {
+	env := newServeEnv(opts)
+	mux, err := buildMux(cfg, log, opts...)
 	if err != nil {
 		return nil, err
 	}
-	newLoopbackAuth(cfg.AuthDir, log).routes(mux)
-	return requireToken(cfg.Token, logRequests(log, newGuard(cfg, log)(mux))), nil
+	lb := newLoopbackAuth(cfg.AuthDir, log)
+	lb.runner = env.runner
+	lb.routes(mux)
+	return requireToken(cfg.Token, logRequestsAt(log, env.reqLevel, newGuard(cfg, log)(mux))), nil
 }
 
 // Run serves the loopback listener (and the TLS listener when configured) until ctx ends, then
@@ -250,11 +268,16 @@ func Run(ctx context.Context, o Options) error {
 	if err := o.Validate(); err != nil {
 		return err
 	}
-	cfg, log := o.Config, o.Log
-	if log == nil {
+	cfg := o.Config
+	var log *slog.Logger
+	opts := []serveOpt{withController(o.Controller), withLaunch(o.Launch, o.GoSystem)}
+	if o.Logs != nil {
+		log = o.Logs.For("web")
+		opts = append(opts, withLogs(o.Logs), withRequestLevel(slog.LevelDebug))
+	} else {
 		log = newStdoutLogger()
 	}
-	handler, err := newHandler(cfg, log)
+	handler, err := newHandler(cfg, log, opts...)
 	if err != nil {
 		return err
 	}
@@ -280,7 +303,7 @@ func Run(ctx context.Context, o Options) error {
 			"scriptDir", cfg.ScriptDir)
 	}
 
-	tlsServer, tlsStop, err := startTLS(cfg, log)
+	tlsServer, tlsStop, err := startTLS(cfg, log, opts...)
 	if err != nil {
 		listener.Close()
 		return err
@@ -348,11 +371,16 @@ func versioned(next http.Handler) http.Handler {
 // logRequests writes one line per request to stdout, which is what a service
 // wrapper captures. The query string is never logged: it can carry the token.
 func logRequests(log *slog.Logger, next http.Handler) http.Handler {
+	return logRequestsAt(log, slog.LevelInfo, next)
+}
+
+// logRequestsAt is logRequests at a given level: DEBUG under holocron (LLD 2.13: request lines).
+func logRequestsAt(log *slog.Logger, level slog.Level, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
-		log.Info("request",
+		log.Log(r.Context(), level, "request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", recorder.status,

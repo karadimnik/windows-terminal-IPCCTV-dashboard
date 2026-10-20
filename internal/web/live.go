@@ -129,8 +129,8 @@ func (a *API) hub() *liveHub {
 
 func (a *API) liveRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/live", a.handleLiveList)
-	mux.HandleFunc("POST /api/live/{camera}/whep", a.handleLiveWhep)
-	mux.HandleFunc("DELETE /api/live/session/{id}", a.handleLiveDelete)
+	handleAction(mux, a.runner, "POST /api/live/{camera}/whep", ActionLiveCreate, a.handleLiveWhep)
+	handleAction(mux, a.runner, "DELETE /api/live/session/{id}", ActionLiveDelete, a.handleLiveDelete)
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +300,7 @@ func (a *API) handleLiveList(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (a *API) handleLiveWhep(w http.ResponseWriter, r *http.Request) {
+	setTarget(r, r.PathValue("camera"))
 	hub := a.hub()
 
 	streams := r.URL.Query()["stream"]
@@ -457,6 +458,7 @@ func upstreamSessionURL(base *url.URL, location, path string) string {
 func (a *API) handleLiveDelete(w http.ResponseWriter, r *http.Request) {
 	hub := a.hub()
 	id := r.PathValue("id")
+	setTarget(r, id)
 	session := hub.take(id)
 	if session == nil {
 		writeAPIError(w, http.StatusNotFound, "unknown session")

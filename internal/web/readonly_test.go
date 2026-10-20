@@ -5,10 +5,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	"holocron/internal/cli"
 )
 
 type roRoute struct {
@@ -135,20 +138,94 @@ func TestReadOnlyRefusalHappensBeforeAnyHandler(t *testing.T) {
 	_ = ack2
 }
 
-// routePattern finds the registrations in the source so a new route cannot appear unclassified.
-var routePattern = regexp.MustCompile(`mux\.Handle(?:Func)?\("([A-Z]+) ([^"]+)"`)
+// routePattern finds the plain registrations in the source so a new route cannot appear unclassified;
+// actionPattern finds the ones registered through handleAction, which runs the handler as a cli.Action
+// (rule R2: the Runner leaves the begin and the result record).
+var (
+	routePattern  = regexp.MustCompile(`mux\.Handle(?:Func)?\("([A-Z]+) ([^"]+)"`)
+	actionPattern = regexp.MustCompile(`handleAction\(mux, [A-Za-z.]+, "([A-Z]+) ([^"]+)", (Action\w+|"[a-z.]+"),`)
+	actionConst   = regexp.MustCompile(`(Action\w+)\s*=\s*"([^"]+)"`)
+)
+
+// scanRoutes returns the registered "METHOD path" patterns of a source text: those registered plainly
+// and those registered as Actions with the action name.
+func scanRoutes(src string, consts map[string]string) (plain []string, acted map[string]string) {
+	acted = map[string]string{}
+	for _, m := range routePattern.FindAllStringSubmatch(src, -1) {
+		plain = append(plain, m[1]+" "+m[2])
+	}
+	for _, m := range actionPattern.FindAllStringSubmatch(src, -1) {
+		name := strings.Trim(m[3], `"`)
+		if v, ok := consts[name]; ok {
+			name = v
+		}
+		acted[m[1]+" "+m[2]] = name
+	}
+	return plain, acted
+}
+
+// mutatingPlain are the plain registrations that change state: each must be an Action instead.
+func mutatingPlain(plain []string) (bad []string) {
+	for _, p := range plain {
+		if method, _, _ := strings.Cut(p, " "); method != "GET" && method != "HEAD" {
+			bad = append(bad, p)
+		}
+	}
+	return bad
+}
 
 func TestEveryRouteIsClassified(t *testing.T) {
 	registered := map[string]bool{}
+	allActed := map[string]string{}
+	consts := map[string]string{}
 	files, _ := filepath.Glob("*.go")
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
 		data, _ := os.ReadFile(f)
-		for _, m := range routePattern.FindAllStringSubmatch(string(data), -1) {
-			registered[m[1]+" "+m[2]] = true
+		for _, m := range actionConst.FindAllStringSubmatch(string(data), -1) {
+			consts[m[1]] = m[2]
 		}
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		data, _ := os.ReadFile(f)
+		plain, acted := scanRoutes(string(data), consts)
+		for _, p := range plain {
+			registered[p] = true
+		}
+		for p, name := range acted {
+			registered[p] = true
+			allActed[p] = name
+		}
+		if bad := mutatingPlain(plain); len(bad) > 0 {
+			t.Errorf("%s registers mutating route(s) %v without handleAction: a web handler that changes state must be a cli.Action (rule R2)", f, bad)
+		}
+	}
+	// every Action named by a route exists, so the Runner can run it
+	for p, name := range allActed {
+		if _, ok := cli.Default.Lookup(name); !ok {
+			t.Errorf("route %q names the action %q, which is not registered", p, name)
+		}
+	}
+	// and every mutating route found is an Action (the other half of the rule, from the table)
+	for p := range registered {
+		if method, _, _ := strings.Cut(p, " "); method != "GET" && method != "HEAD" && allActed[p] == "" {
+			t.Errorf("mutating route %q is not an Action", p)
+		}
+	}
+	// positive controls: the scan catches an unregistered action and a mutating route registered plainly
+	plain, acted := scanRoutes(`mux.HandleFunc("POST /api/new", a.h)
+		mux.HandleFunc("GET /api/read", a.r)
+		handleAction(mux, a.runner, "PUT /api/x", ActionNope, a.x)`, consts)
+	if !reflect.DeepEqual(mutatingPlain(plain), []string{"POST /api/new"}) || acted["PUT /api/x"] != "ActionNope" {
+		t.Errorf("the scan is broken: plain %v acted %v", plain, acted)
+	}
+	if _, ok := cli.Default.Lookup("ActionNope"); ok {
+		t.Error("a bogus action name resolves")
 	}
 	if len(registered) < 15 {
 		t.Fatalf("found only %d registered routes: the scan is broken", len(registered))
