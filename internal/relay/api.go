@@ -154,11 +154,13 @@ func isTimeout(parent context.Context, err error) bool {
 }
 
 type pathList struct {
-	PageCount int `json:"pageCount"`
-	Items     *[]struct {
-		Name  string `json:"name"`
-		Ready bool   `json:"ready"`
-	} `json:"items"`
+	PageCount int             `json:"pageCount"`
+	Items     json.RawMessage `json:"items"` // absent: malformed; null: an empty list
+}
+
+type pathItem struct {
+	Name  string `json:"name"`
+	Ready bool   `json:"ready"`
 }
 
 func (a *API) list(ctx context.Context, auth bool) (ReadySet, error) {
@@ -169,10 +171,11 @@ func (a *API) list(ctx context.Context, auth bool) (ReadySet, error) {
 			return ReadySet{}, err
 		}
 		var l pathList
-		if err := json.Unmarshal(body, &l); err != nil || l.Items == nil {
+		var items []pathItem
+		if err := json.Unmarshal(body, &l); err != nil || len(l.Items) == 0 || json.Unmarshal(l.Items, &items) != nil {
 			return ReadySet{}, fmt.Errorf("%w: %w", ErrUnavailable, ErrMalformed)
 		}
-		for _, it := range *l.Items {
+		for _, it := range items {
 			if it.Ready && it.Name != "" {
 				set.paths[it.Name] = struct{}{}
 			}

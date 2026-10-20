@@ -166,4 +166,3 @@ func configAuthBlock(text string) string {
 	}
 	return strings.TrimRight(strings.Join(block, "\r\n"), " \t\r\n")
 }
-

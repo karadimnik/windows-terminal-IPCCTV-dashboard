@@ -257,4 +257,6 @@ func TestNoCredentialAppearsInAnyGeneratedConfig(t *testing.T) {
 
 type fixedCreds struct{ user, pass string }
 
-func (f fixedCreds) CameraCredential(config.Camera) (string, string, error) { return f.user, f.pass, nil }
+func (f fixedCreds) CameraCredential(config.Camera) (string, string, error) {
+	return f.user, f.pass, nil
+}
