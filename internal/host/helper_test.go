@@ -28,6 +28,8 @@ func TestMain(m *testing.M) {
 		os.Exit(fakeSupervisor())
 	case "host":
 		os.Exit(hostProcess())
+	case "realsup":
+		os.Exit(realSupervisor())
 	}
 	os.Exit(m.Run())
 }
