@@ -160,53 +160,84 @@ type ConfigEdit struct {
 	Changed  bool            `json:"changed"`
 }
 
+// KeyValue is one edit of EditConfigMany: Value nil unsets the key.
+type KeyValue struct {
+	Key   string
+	Value json.RawMessage
+}
+
 // EditConfig sets (value != nil) or unsets one allow-listed key in the configuration file, in
 // place: every other key (unknown and dropped ones included), their order and the file's BOM stay.
 // The edited document is validated with config.Parse first; a refusal leaves the file untouched.
 // The write is atomic (temp in the same folder, sync, rename).
 func EditConfig(path, key string, value json.RawMessage, plat osx.Platform) (ConfigEdit, error) {
-	canon, err := CanonicalKey(key)
+	eds, err := EditConfigMany(path, []KeyValue{{Key: key, Value: value}}, plat)
 	if err != nil {
 		return ConfigEdit{}, err
 	}
+	return eds[0], nil
+}
+
+// EditConfigMany applies several edits as one: all keys are checked against the allow-list, the
+// whole edited document is validated once, and the file is written once (or not at all: any
+// refusal leaves it byte-identical). A refusal for a document problem wraps the *config.ValidationError.
+func EditConfigMany(path string, edits []KeyValue, plat osx.Platform) ([]ConfigEdit, error) {
+	canons := make([]string, len(edits))
+	for i, kv := range edits {
+		canon, err := CanonicalKey(kv.Key)
+		if err != nil {
+			return nil, err
+		}
+		canons[i] = canon
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return ConfigEdit{}, err
+		return nil, err
 	}
 	hasBOM := bytes.HasPrefix(raw, bom)
 	body := bytes.TrimPrefix(raw, bom)
 	var doc object
 	if len(bytes.TrimSpace(body)) > 0 {
 		if doc, err = parseObject(body); err != nil {
-			return ConfigEdit{}, fmt.Errorf("%s: %w", path, err)
+			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 	}
-	before, _ := lookup(body, canon)
-	next, err := doc.edit(strings.Split(canon, "."), value)
-	if err != nil {
-		return ConfigEdit{}, err
+	before := make([]json.RawMessage, len(edits))
+	next := doc
+	var label []string
+	for i, kv := range edits {
+		before[i], _ = lookup(body, canons[i])
+		if next, err = next.edit(strings.Split(canons[i], "."), kv.Value); err != nil {
+			return nil, err
+		}
+		label = append(label, canons[i]+"="+valueText(kv.Value))
 	}
 	var flat, out bytes.Buffer
 	if err := json.Compact(&flat, next.compact()); err != nil {
-		return ConfigEdit{}, err
+		return nil, err
 	}
 	if err := json.Indent(&out, flat.Bytes(), "", "    "); err != nil {
-		return ConfigEdit{}, err
+		return nil, err
 	}
 	out.WriteString("\n")
 	if _, _, err := config.Parse(out.Bytes(), plat); err != nil {
-		return ConfigEdit{}, cli.Refuse("%s=%s: %v", canon, valueText(value), err)
+		return nil, fmt.Errorf("%w: %s: %w", cli.ErrRefused, strings.Join(label, ", "), err)
 	}
-	after, _ := lookup(out.Bytes(), canon)
-	ed := ConfigEdit{Key: canon, Old: before, New: after, Changed: !bytes.Equal(compactJSON(before), compactJSON(after))}
-	if !ed.Changed {
-		return ed, nil
+	res := make([]ConfigEdit, len(edits))
+	changed := false
+	for i := range edits {
+		after, _ := lookup(out.Bytes(), canons[i])
+		res[i] = ConfigEdit{Key: canons[i], Old: before[i], New: after, Changed: !bytes.Equal(compactJSON(before[i]), compactJSON(after))}
+		changed = changed || res[i].Changed
+	}
+	if !changed {
+		return res, nil
 	}
 	data := out.Bytes()
 	if hasBOM {
 		data = append(append([]byte{}, bom...), data...)
 	}
-	return ed, writeAtomic(path, data)
+	return res, writeAtomic(path, data)
 }
 
 func valueText(v json.RawMessage) string {
