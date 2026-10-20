@@ -114,6 +114,10 @@ type SupervisorDeps struct {
 	// NewRelayAPI builds the control-API client; default relay.NewAPI.
 	NewRelayAPI func(cfg config.Config, login relay.Login) RelayAPI
 
+	// Control is the local control endpoint (ctlapi), started after the first status write and
+	// stopped first in the ordered stop; nil: none.
+	Control Control
+
 	// CheckFfmpeg checks the configured ffmpeg before any child starts (LLD 11: minimum 5.0); a
 	// refusal or a missing binary is a configuration fault (exit 21). Default ffmpeg.CheckVersion.
 	CheckFfmpeg func(path string) (ffmpeg.Version, error)
@@ -173,8 +177,16 @@ type Supervisor struct {
 	running chan struct{} // closed when Run has started the goroutines
 	done    chan struct{} // closed when Run has finished
 
-	relayM, liveM *mtxChild
+	relayM, liveM *mtxChild // liveM changes at run time (Reload): read it under mu, replace it under liveMu and mu
+	liveMu        sync.Mutex
 	watch         relay.LoginWatch
+
+	reloadCh       chan chan struct{}
+	firstWrite     chan struct{}
+	firstWriteOnce sync.Once
+	ctlMu          sync.Mutex
+	ctlStarted     bool
+	ctlStopped     bool
 
 	mu        sync.Mutex
 	stopping  bool
@@ -240,6 +252,7 @@ func NewSupervisor(d SupervisorDeps) *Supervisor {
 		startCh: make(chan camStarted, 64), exitCh: make(chan camExited, 64),
 		camsReady: make(chan struct{}), running: make(chan struct{}), done: make(chan struct{}),
 		stopCh: make(chan struct{}), registry: map[*Entry]*ffmpeg.Child{},
+		reloadCh: make(chan chan struct{}), firstWrite: make(chan struct{}),
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	return s
@@ -551,6 +564,7 @@ func (s *Supervisor) supervise(ctx context.Context) {
 	pruneDone := make(chan struct{})
 	go s.pruneLoop(pruneDone)
 	close(s.running)
+	go s.startControl()
 
 	var req stopRequest
 	select {

@@ -47,6 +47,11 @@ func (s *Supervisor) loop(quit <-chan struct{}, done chan<- struct{}) {
 			s.onStarted(r)
 		case x := <-s.exitCh:
 			s.onExited(x)
+		case done := <-s.reloadCh:
+			ls.lastReconcile = s.clk.Mono()
+			s.reconcile(ls)
+			s.publishRows()
+			close(done)
 		case <-timer:
 			s.tick(ls)
 			timer = s.clk.After(time.Second)
@@ -103,7 +108,7 @@ func seconds(v float64) time.Duration { return time.Duration(v * float64(time.Se
 // reconcile re-reads the camera list (and notices a configuration change). A list that cannot be
 // read keeps the current set (R:3871-3875); an unchanged list does nothing.
 func (s *Supervisor) reconcile(ls *loopState) {
-	if cfg, err := s.d.Source.Config(); err != nil || !sameConfig(cfg, s.cfg) {
+	if cfg, err := s.d.Source.Config(); err != nil || !sameConfigIgnoringLive(cfg, s.cfg) {
 		note := "holocron.config.json changed; the running supervisor keeps the values it started with until it is restarted"
 		if err != nil {
 			note = fmt.Sprintf("holocron.config.json cannot be read now (%v); the running supervisor keeps the values it started with", err)
