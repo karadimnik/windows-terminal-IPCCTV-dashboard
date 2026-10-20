@@ -335,7 +335,7 @@ func secOfDay(t time.Time) int { return t.Hour()*3600 + t.Minute()*60 + t.Second
 
 // checkSegments asserts the properties of the brief for the segments of one camera and logs the numbers.
 // lastCut: the newest file was cut short by a hard kill, so its length and write time say nothing about its start.
-func checkSegments(t *testing.T, segs []segInfo, safe string, segSeconds int, wantAudio, lastCut bool, firstTol time.Duration) {
+func checkSegments(t *testing.T, segs []segInfo, safe string, segSeconds int, wantAudio, lastCut bool, tol, firstTol time.Duration) {
 	t.Helper()
 	if len(segs) < 3 {
 		t.Fatalf("%d files, want at least 3: %+v", len(segs), segs)
@@ -357,12 +357,12 @@ func checkSegments(t *testing.T, segs []segInfo, safe string, segSeconds int, wa
 			dur := s.probe.duration()
 			dev := start.Sub(s.mtime.Add(-time.Duration(dur * float64(time.Second))))
 			desc = fmt.Sprintf("start=%s dur=%.3fs mtime-dur-vs-name=%+.2fs video=%v audio(pcm_alaw)=%v", start.Format("15:04:05-0700"), dur, dev.Seconds(), s.probe.has("video", "h264"), s.probe.has("audio", "pcm_alaw"))
-			tol := time.Second
+			lim := tol
 			if i == 0 {
-				tol = firstTol
+				lim = firstTol
 			}
-			if killed := lastCut && i == len(segs)-1; !killed && (dev < -tol || dev > tol) {
-				t.Errorf("%s: name start is %.2fs from the real start (mtime - duration), limit %v", s.name, dev.Seconds(), tol)
+			if killed := lastCut && i == len(segs)-1; !killed && (dev < -lim || dev > lim) {
+				t.Errorf("%s: name start is %.2fs from the real start (mtime - duration), limit %v", s.name, dev.Seconds(), lim)
 			}
 			if !s.probe.has("video", "h264") || (wantAudio && !s.probe.has("audio", "pcm_alaw")) {
 				t.Errorf("%s: streams %+v", s.name, s.probe.Streams)
@@ -443,7 +443,7 @@ func TestRealFfmpeg(t *testing.T) {
 				}
 				t.Logf("%s (%.1fs)", info.Message(), info.RanFor.Seconds())
 				segs := segments(t, probe, dir)
-				checkSegments(t, segs, safe, 10, true, false, time.Second)
+				checkSegments(t, segs, safe, 10, true, false, time.Second, time.Second)
 				for _, s := range segs { // (b): the name is the literal one, not strftime-expanded
 					if strings.HasPrefix(s.name, "Cam") && !strings.HasPrefix(s.name, "Cam%Y_") {
 						t.Errorf("percent name was expanded: %s", s.name)
@@ -579,7 +579,8 @@ func TestRealFfmpeg(t *testing.T) {
 		segs := segments(t, probe, dir)
 		// The first file after a connect is the exception: its content starts up to ~2 s before the wall
 		// clock instant its name records (SP1 saw 6.4 s of media in a file opened 3 s before the cut).
-		checkSegments(t, segs, safe, 10, true, true, 3*time.Second)
+		// The proxy (mtime - duration) carries the close latency of the previous cut, measured 0.7-0.9 s.
+		checkSegments(t, segs, safe, 10, true, true, 1500*time.Millisecond, 3*time.Second)
 		RemoveEmptySegment(dir, ".mkv", EmptyOptions{Root: root, Matcher: archive.DefaultMatcher})
 	})
 
