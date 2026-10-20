@@ -37,6 +37,7 @@ type mtxChild struct {
 	pid         int64
 	lastPid     int64
 	alive       bool
+	starting    bool // a start is under way (also from the supervisor start until the first attempt)
 	startedWall time.Time
 	startedMono clock.Mono
 	restarts    int64
@@ -58,10 +59,18 @@ func (m *mtxChild) stop() {
 	m.stopOnce.Do(func() { close(m.stopCh) })
 }
 
+// aliveSince is what the camera hold needs: the relay process is alive or being started, and since
+// when. Counting a start under way as alive holds the cameras off the direct input at a cold start.
 func (m *mtxChild) aliveSince() (bool, clock.Mono) {
 	m.s.mu.Lock()
 	defer m.s.mu.Unlock()
-	return m.alive, m.startedMono
+	return m.alive || m.starting, m.startedMono
+}
+
+func (m *mtxChild) isAlive() bool {
+	m.s.mu.Lock()
+	defer m.s.mu.Unlock()
+	return m.alive
 }
 
 func (m *mtxChild) running() *ffmpeg.Child {
@@ -116,7 +125,7 @@ func (m *mtxChild) run() {
 				}
 				continue
 			}
-			if alive, _ := s.relayM.aliveSince(); !alive {
+			if !s.relayM.isAlive() {
 				m.say(slog.LevelInfo, "waiting for the recording relay before starting live view")
 				if !m.sleep(time.Second) {
 					return
@@ -265,9 +274,19 @@ func (m *mtxChild) waitAPI(child *ffmpeg.Child) {
 
 // launch renders and writes the config (temp then rename, only when it changed), builds the
 // environment (camera credentials only there) and starts the child through the supervisor's starter.
-func (m *mtxChild) launch() (*ffmpeg.Child, error) {
+func (m *mtxChild) launch() (child *ffmpeg.Child, err error) {
 	s := m.s
 	cfg := s.cfg
+	s.mu.Lock()
+	m.starting, m.startedMono = true, s.clk.Mono()
+	s.mu.Unlock()
+	defer func() {
+		if err != nil {
+			s.mu.Lock()
+			m.starting = false
+			s.mu.Unlock()
+		}
+	}()
 	cams := s.camerasNow()
 	var spec relay.ChildSpec
 	var paths []string
@@ -345,7 +364,7 @@ func (m *mtxChild) launch() (*ffmpeg.Child, error) {
 	if s.isStopping() {
 		return nil, errors.New("the supervisor is stopping")
 	}
-	child, err := ffmpeg.Start(context.Background(), ffmpeg.Spec{
+	child, err = ffmpeg.Start(context.Background(), ffmpeg.Spec{
 		Name: m.name, Exe: spec.Exe, Args: spec.Args, Dir: spec.Dir, Env: spec.Env, Starter: s.starter,
 		Redactor: s.d.Redactor, Log: s.d.ChildLog(m.name, spec.LogPath), Clock: s.clk,
 	})
@@ -353,7 +372,7 @@ func (m *mtxChild) launch() (*ffmpeg.Child, error) {
 		return nil, err
 	}
 	s.mu.Lock()
-	m.child, m.pid, m.lastPid, m.alive = child, int64(child.Pid()), int64(child.Pid()), true
+	m.child, m.pid, m.lastPid, m.alive, m.starting = child, int64(child.Pid()), int64(child.Pid()), true, false
 	m.startedWall, m.startedMono = s.clk.Now(), s.clk.Mono()
 	m.paths, m.liveCams, m.reasonSaid = paths, liveCams, ""
 	s.mu.Unlock()

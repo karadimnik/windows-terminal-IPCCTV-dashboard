@@ -387,7 +387,9 @@ func (s *Supervisor) setup(cfg config.Config) error {
 	}
 	if d.APILogin == nil {
 		p := d.Platform
-		d.APILogin = func() (relay.Login, error) { return relay.LoadAPICredential(p, relay.DefaultAPICredentialPath(p), true) }
+		d.APILogin = func() (relay.Login, error) {
+			return relay.LoadAPICredential(p, relay.DefaultAPICredentialPath(p), true)
+		}
 	}
 	if d.LiveLogin == nil {
 		p, c := d.Platform, cfg
@@ -395,7 +397,9 @@ func (s *Supervisor) setup(cfg config.Config) error {
 	}
 	if d.NewRelayAPI == nil {
 		policy := relay.NewReadinessPolicy(cfg)
-		d.NewRelayAPI = func(c config.Config, l relay.Login) RelayAPI { return relay.NewAPI(c.RelayApiBase, l, policy.ProbeTimeout) }
+		d.NewRelayAPI = func(c config.Config, l relay.Login) RelayAPI {
+			return relay.NewAPI(c.RelayApiBase, l, policy.ProbeTimeout)
+		}
 	}
 	if d.ChildLog == nil {
 		d.ChildLog = FileChildLogs(int64(cfg.LogMaxBytes), d.Redactor)
@@ -490,6 +494,9 @@ func (s *Supervisor) supervise(ctx context.Context) {
 	go s.heartbeat(hbCtx, hbDone)
 
 	loopQuit, loopDone := make(chan struct{}), make(chan struct{})
+	if s.relayM != nil {
+		s.relayM.starting, s.relayM.startedMono = true, s.startedMono
+	}
 	go s.loop(loopQuit, loopDone)
 	if s.relayM != nil {
 		s.relayM.start()
