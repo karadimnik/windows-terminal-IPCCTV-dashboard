@@ -417,3 +417,31 @@ func TestLiveStatusFileConforms(t *testing.T) {
 	t.Logf("live status.json: %d bytes, %d violations, state %q, %d camera rows, Live section present: %v",
 		len(raw), len(vs), doc.State, len(doc.Cameras), doc.Live != nil)
 }
+
+// The Go host records a window close itself (no warden process), so LastWindowClose.DetectedBy
+// accepts "nvr host" besides the PowerShell warden's "nvr warden"; anything else stays refused.
+// The golden fixtures are not edited: the variants are made in memory.
+func TestLastWindowCloseDetectedByHostOrWarden(t *testing.T) {
+	base := readFile(t, filepath.Join(goldenStatus, "patched-windowclose-over-running.json"))
+	if !bytes.Contains(base, []byte(`"nvr warden"`)) {
+		t.Fatal("fixture no longer carries DetectedBy nvr warden")
+	}
+	for value, ok := range map[string]bool{"nvr warden": true, "nvr host": true, "supervisor": false, "": false} {
+		doc := bytes.Replace(base, []byte(`"nvr warden"`), []byte(`"`+value+`"`), 1)
+		vs, err := Validate(doc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := len(vs) == 0; got != ok {
+			t.Errorf("DetectedBy %q: valid=%v, want %v (%v)", value, got, ok, vs)
+		}
+		if ok {
+			var d Document
+			dec := json.NewDecoder(bytes.NewReader(bytes.TrimPrefix(doc, []byte("\xef\xbb\xbf"))))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&d); err != nil || d.LastWindowClose == nil || d.LastWindowClose.DetectedBy != value {
+				t.Errorf("DetectedBy %q: strict decode %v, %+v", value, err, d.LastWindowClose)
+			}
+		}
+	}
+}

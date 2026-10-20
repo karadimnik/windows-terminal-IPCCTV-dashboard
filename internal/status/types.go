@@ -106,12 +106,12 @@ type UnexpectedStop struct {
 	DetectedBy    string `json:"DetectedBy"` // supervisor | nvr host
 }
 
-// WindowClose is LastWindowClose, written only by the warden patch.
+// WindowClose is LastWindowClose, written by the PowerShell warden patch or the Go host.
 type WindowClose struct {
 	At          Time   `json:"At"`
 	Reason      string `json:"Reason"`
 	WindowTitle string `json:"WindowTitle"`
-	DetectedBy  string `json:"DetectedBy"` // nvr warden
+	DetectedBy  string `json:"DetectedBy"` // nvr warden | nvr host
 }
 
 type Disk struct {
