@@ -64,9 +64,9 @@ func TestReapVerifiesEveryEntry(t *testing.T) {
 		1: {Start: "t1", Image: img, Group: 1},
 		2: {Start: "t2", Image: img, Group: 2},
 		3: {Start: "t3", Image: img, Group: 3},
-		7: {Start: "t7-new", Image: img, Group: 7},  // pid 7 was reused by another process
-		8: {Start: "t8", Image: "/usr/bin/other"},   // same pid and start, different program
-		9: {Start: "t9", Image: img, Group: 99},     // moved to another group
+		7: {Start: "t7-new", Image: img, Group: 7}, // pid 7 was reused by another process
+		8: {Start: "t8", Image: "/usr/bin/other"},  // same pid and start, different program
+		9: {Start: "t9", Image: img, Group: 99},    // moved to another group
 	}}
 	r := NewRegistry(filepath.Join(t.TempDir(), "children.json"))
 	for _, e := range []ChildEntry{
