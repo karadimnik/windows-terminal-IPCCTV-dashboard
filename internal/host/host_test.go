@@ -315,14 +315,23 @@ func TestHostWindowCloseKillsHungSupervisorAtBudget(t *testing.T) {
 	h.start()
 	l := h.life(1)
 	h.eventually("console armed", h.console.armed)
-	t0 := h.clk.Now()
 	h.console.trigger(osx.ReasonClose)
+	// let the host write stop.request and arm its timer without moving virtual time (the harness
+	// would otherwise advance the clock during that real file I/O)
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if _, err := os.Stat(h.stopPath()); err == nil {
+			break
+		}
+	}
+	time.Sleep(20 * time.Millisecond)
+	t0 := h.clk.Now()
 	res, _ := h.wait()
 	if res.Outcome != OutcomeWindowClosed || !l.killed.Load() {
 		t.Fatalf("%+v killed=%v", res, l.killed.Load())
 	}
-	if took := h.clk.Now().Sub(t0); took > osx.ConsoleBudget+time.Second {
-		t.Errorf("the close took %v, more than the budget", took)
+	// the kill comes when the wait part of the budget is spent, leaving the reserve for the document
+	if at := time.Unix(0, l.killedAt.Load()).Sub(t0); at < osx.ConsoleBudget*7/8 || at > osx.ConsoleBudget {
+		t.Errorf("killed %v after the close, want within the %v budget after its 7/8 wait", at, osx.ConsoleBudget)
 	}
 	if ids := h.alerts.ids(); !reflect.DeepEqual(ids, []int{AlertWindowClosed}) {
 		t.Errorf("alerts %v", ids)

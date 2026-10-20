@@ -27,6 +27,7 @@ type fakeLife struct {
 	exitCh    chan int
 	once      sync.Once
 	killed    atomic.Bool
+	killedAt  atomic.Int64 // virtual unix nanoseconds
 	h         *harness
 }
 
@@ -35,6 +36,7 @@ func (l *fakeLife) Wait() (int, error) {
 	return <-l.exitCh, nil
 }
 func (l *fakeLife) Kill() error {
+	l.killedAt.CompareAndSwap(0, l.h.clk.Now().UnixNano())
 	l.killed.Store(true)
 	l.exit(1)
 	return nil
@@ -181,7 +183,7 @@ func (h *harness) eventuallyStep(what string, step time.Duration, cond func() bo
 		if time.Now().After(deadline) {
 			h.t.Fatalf("timed out waiting for %s (virtual %v); alerts %v; log:\n%s", what, h.clk.Now(), h.alerts.ids(), h.logs.String())
 		}
-		time.Sleep(200 * time.Microsecond)
+		time.Sleep(time.Millisecond) // the host's real file I/O must not let virtual time run far ahead
 		h.clk.Advance(step)
 	}
 }
