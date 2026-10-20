@@ -309,6 +309,18 @@ Source: `spikes/holocron-spikes-1.md` (SP1, SP1b, SP4, SP6, SP7). These amend th
 
 Incidents worth knowing (SP report): a throwaway MediaMTX was briefly bound to the PC's LAN address on a spike port, and its default MoQ listener on 8892/8893 (outside the allowed range) was up for about three minutes before it was killed by pid. Future briefs must require `moq: no`, `webrtc: no` and every other listener off in throwaway MediaMTX configs, bound to 127.0.0.1.
 
+### 11.1 Decisions from spikes SP2 and SP3 (2026-10-20), `spikes/holocron-spikes-2.md`
+
+| Amends | Decision | Evidence |
+|---|---|---|
+| 2.9, 2.10 host | **No keeper process.** In attached mode an in-process console handler is enough: Go maps `CTRL_CLOSE_EVENT` to SIGTERM, it arrives 6 to 66 ms after the close and the process then has **5.04 s** before Windows ends it (cleanup ran 2 ms after the signal). Same in Windows Terminal and conhost | SP2 |
+| 2.10 host | **Abrupt console-host death sends no event** (a killed pty host or conhost left the process and its children running 15 to 25 s or more): the supervisor runs a console probe at 4 Hz (`GetConsoleProcessList` returns 0, `GetConsoleMode` fails, `GetConsoleWindow` returns 0; detected within 0.5 to 0.8 s) and treats it as a window close (`StopKind=window-closed`, alert 103) | SP2 |
+| 2.9 children | Each child gets its OWN hidden console (`CREATE_NO_WINDOW`): a child sharing the supervisor's console is killed by the close event with no ordered stop | SP2 |
+| 2.9 Windows | First create an unnamed, non-inheritable job with kill-on-close and NEVER breakaway-OK (grandchildren escaped when breakaway was allowed). Start every child with `syscall.CreateProcess` and `CREATE_SUSPENDED | CREATE_NO_WINDOW`, assign it to the job, then resume; a failed assignment is fatal for that child. The assign-after-start gap lets grandchildren escape (3 of 3 with a 300 ms gap); `CREATE_SUSPENDED` or the job-list attribute closes it. Nested jobs work. Hard kill of the supervisor leaves 0 survivors within about 0.1 s | SP3 |
+| 2.9 Linux | `Setpgid` plus `Pdeathsig: SIGKILL`, with ONE dedicated goroutine that calls `runtime.LockOSThread()`, creates every child and never returns until shutdown (a starter that returns takes all children down within 1 ms while the supervisor lives). Grandchildren are not covered by `Pdeathsig` (3 of 3 survived); the orderly stop kills the group: `kill(-pgid, SIGTERM)`, a grace period, then `SIGKILL` | SP3 |
+| 2.9 macOS | No kernel guarantee: `Setpgid`, the registry reap and the stdin-pipe watcher (killed all children within about 50 ms of a hard kill in the Linux test of the technique). Documented limit; launchd behaviour unverified | SP3 |
+| 2.9 registry | `_state/children.json` (pid, start-time token, image path, group id on Unix) written atomically after each start; at supervisor start, before spawning, verify alive AND same start time AND same image (case-insensitive on Windows) and stop only provable orphans (3 of 3 reaped on both OSes; a PID-reuse decoy survived) | SP3 |
+
 ## 10. Definition of done for the OS-independent track
 
 0. Rules R1 and R2 hold: every action in the web app and in this list is a `holocron` subcommand, installing and uninstalling autostart included, and no second executable or script is needed; the action-coverage tests pass.
