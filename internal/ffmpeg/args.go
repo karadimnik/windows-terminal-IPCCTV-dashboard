@@ -126,7 +126,10 @@ func (in Inputs) outputArgs() []string {
 func RelayURL(base, path string) string { return strings.TrimRight(base, "/") + "/" + path }
 
 // SegmentPattern is the ffmpeg output pattern <root>/<safe>/<safe>_%Y%m%d_%H%M%S%z<ext> (the
-// camera folder is <root>/<safe>). A '%' in safe is doubled by archive.FormatSegmentPattern.
+// camera folder is <root>/<safe>). With -strftime 1 ffmpeg expands the WHOLE path, directories
+// included (measured with 4.2.7: a folder "Cam%Y" is written as "Cam2026"), so every '%' in root and
+// in the folder is doubled as well as the one in the file name (archive.FormatSegmentPattern).
 func SegmentPattern(root, safe, ext string) string {
-	return filepath.Join(root, safe, archive.FormatSegmentPattern(safe)+ext)
+	esc := func(s string) string { return strings.ReplaceAll(s, "%", "%%") }
+	return filepath.Join(esc(root), esc(safe), archive.FormatSegmentPattern(safe)+ext)
 }

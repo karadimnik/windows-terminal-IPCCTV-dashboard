@@ -143,8 +143,9 @@ func TestRelayURLAndSegmentPattern(t *testing.T) {
 	if got := SegmentPattern(root, "Camera_One", ".mkv"); got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
-	want = filepath.Join(root, "Cam%Y", "Cam%%Y_%Y%m%d_%H%M%S%z.mp4")
-	if got := SegmentPattern(root, "Cam%Y", ".mp4"); got != want {
+	// strftime also expands the directories: every '%' is doubled in the root and the folder too
+	want = filepath.Join("/a%%b", "Cam%%Y", "Cam%%Y_%Y%m%d_%H%M%S%z.mp4")
+	if got := SegmentPattern("/a%b", "Cam%Y", ".mp4"); got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
 }
