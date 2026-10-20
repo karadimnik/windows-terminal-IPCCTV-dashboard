@@ -20,6 +20,8 @@ type Heartbeater struct {
 	Interval time.Duration
 	// OnError is called with each write error; may be nil.
 	OnError func(error)
+	// Written is called after each successful write; may be nil.
+	Written func()
 	// NewTicker is a test seam; nil uses time.NewTicker.
 	NewTicker func(d time.Duration) (ticks <-chan time.Time, stop func())
 }
@@ -55,7 +57,11 @@ func (h *Heartbeater) once() {
 	if doc == nil {
 		return
 	}
-	if err := h.Writer.Write(doc); err != nil && h.OnError != nil {
-		h.OnError(err)
+	if err := h.Writer.Write(doc); err != nil {
+		if h.OnError != nil {
+			h.OnError(err)
+		}
+	} else if h.Written != nil {
+		h.Written()
 	}
 }

@@ -126,3 +126,42 @@ func TestHeartbeaterNilSnapshotSkipsTheCycle(t *testing.T) {
 		t.Errorf("file written for a nil snapshot: %v", err)
 	}
 }
+
+// Written fires after each successful write only (a failed write calls OnError instead).
+func TestHeartbeaterWrittenOnlyAfterSuccess(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "status.json")
+	w := NewWriter(out, Options{RetryDelay: time.Millisecond})
+	fail := true
+	w.replace = func(tmp, path string) (bool, error) {
+		if fail {
+			return false, errors.New("boom")
+		}
+		return replaceFile(tmp, path)
+	}
+	ft := &fakeTicker{c: make(chan time.Time)}
+	errs, written := make(chan error, 4), make(chan struct{}, 4)
+	doc := fixture(t, "running-full.json")
+	h := &Heartbeater{Writer: w, Interval: time.Second, NewTicker: ft.newTicker,
+		Snapshot: func() *Document { return doc }, OnError: func(err error) { errs <- err }, Written: func() { written <- struct{}{} }}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { h.Run(ctx); close(done) }()
+	<-errs
+	select {
+	case <-written:
+		t.Fatal("Written after a failed write")
+	default:
+	}
+	fail = false
+	ft.c <- time.Time{}
+	select {
+	case <-written:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Written not called after a good write")
+	}
+	if _, err := Read(out); err != nil {
+		t.Fatalf("Written before the file was in place: %v", err)
+	}
+	cancel()
+	<-done
+}
