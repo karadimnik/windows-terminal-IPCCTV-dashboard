@@ -5,7 +5,6 @@ import (
 	"os"
 	"time"
 
-	"holocron/internal/archive"
 	"holocron/internal/clock"
 	"holocron/internal/ffmpeg"
 	"holocron/internal/logx"
@@ -81,6 +80,7 @@ func (s *Supervisor) teardown(req stopRequest, loopQuit chan struct{}, loopDone,
 	killed := map[*ffmpeg.Child]bool{}
 	if managerOK {
 		s.safely("the camera shutdown", func() {
+			s.publishRows()
 			s.m.Shutdown()
 			for _, a := range s.m.Plan(RelayView{}) {
 				s.mu.Lock()
@@ -140,21 +140,26 @@ func (s *Supervisor) teardown(req stopRequest, loopQuit chan struct{}, loopDone,
 			logx.Action("supervisor.stop"), logx.Result(logx.ResultFail))
 	}
 
-	// the final document
-	if managerOK {
-		s.safely("the final rows", func() {
-			var dirs map[string]archive.DirScan
-			s.mu.Lock()
-			if s.archive != nil {
-				dirs = s.archive.Dirs
-			}
-			s.mu.Unlock()
-			rows := s.m.Rows(dirs)
-			s.mu.Lock()
-			s.rows = rows
-			s.mu.Unlock()
-		})
+	// the final document: the rows as they were before the shutdown retired the entries (counters,
+	// LastPid: the proof that no orphan was left), with every child that has gone marked so
+	s.mu.Lock()
+	gone := map[int64]bool{}
+	for _, row := range s.rows {
+		if row.Pid != nil {
+			gone[*row.Pid] = true
+		}
 	}
+	for _, p := range survivors {
+		delete(gone, int64(p))
+	}
+	for i := range s.rows {
+		row := &s.rows[i]
+		if row.Pid != nil && gone[*row.Pid] {
+			row.LastPid, row.Pid, row.Alive = row.Pid, nil, false
+		}
+		row.NextStartAt = status.Time{}
+	}
+	s.mu.Unlock()
 	hbCancel()
 	<-hbDone
 	var us *status.UnexpectedStop

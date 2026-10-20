@@ -26,7 +26,6 @@ type loopState struct {
 	camsLoaded    bool
 	camsErr       string
 	cfgNote       string
-	archiveDirs   map[string]archive.DirScan
 }
 
 // loop is the reconcile goroutine: it owns the Manager. Every second it checks the stop-request
@@ -80,11 +79,23 @@ func (s *Supervisor) tick(ls *loopState) {
 	for _, a := range s.m.Plan(rv) {
 		s.perform(a)
 	}
-	rows := s.m.Rows(ls.archiveDirs)
+	s.publishRows()
+	ls.first = false
+}
+
+// publishRows stores the Manager's rows for the heartbeat (the scan of a camera without a child
+// comes from the last archive scan).
+func (s *Supervisor) publishRows() {
+	var dirs map[string]archive.DirScan
+	s.mu.Lock()
+	if s.archive != nil {
+		dirs = s.archive.Dirs
+	}
+	s.mu.Unlock()
+	rows := s.m.Rows(dirs)
 	s.mu.Lock()
 	s.rows = rows
 	s.mu.Unlock()
-	ls.first = false
 }
 
 func seconds(v float64) time.Duration { return time.Duration(v * float64(time.Second)) }
@@ -153,7 +164,6 @@ func (s *Supervisor) scanArchive(ls *loopState) {
 		s.log.Warn("archive scan failed: "+err.Error(), logx.Action("archive.scan"), logx.Result(logx.ResultFail), logx.Err(err))
 		return
 	}
-	ls.archiveDirs = scan.Dirs
 	s.mu.Lock()
 	s.archive = &scan
 	s.mu.Unlock()
