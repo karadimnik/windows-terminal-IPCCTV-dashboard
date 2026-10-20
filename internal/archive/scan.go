@@ -2,6 +2,7 @@ package archive
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -63,6 +64,9 @@ func (m Matcher) Scan(dir, container string, now time.Time, segmentSeconds int) 
 	scan := DirScan{Dir: dir, ScannedAt: now}
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
+		if fi, serr := os.Stat(dir); serr == nil && !fi.IsDir() { // Windows reports a file as "path not found"
+			return scan, fmt.Errorf("%s is not a directory", dir)
+		}
 		return scan, nil
 	}
 	if err != nil {
