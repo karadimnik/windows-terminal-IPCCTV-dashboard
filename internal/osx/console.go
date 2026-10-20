@@ -1,6 +1,7 @@
 package osx
 
 import (
+	"errors"
 	"sync"
 	"time"
 )
@@ -29,3 +30,6 @@ func onceStop(f func()) func() {
 	var o sync.Once
 	return func() { o.Do(f) }
 }
+
+// ErrNoConsole: the probe cannot be armed because no console is attached now.
+var ErrNoConsole = errors.New("no console is attached to this process")

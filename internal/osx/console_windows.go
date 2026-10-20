@@ -3,7 +3,6 @@
 package osx
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -89,9 +88,6 @@ func ConsolePresent() (bool, string) {
 	}
 	return !(modeErr != nil || hw == 0), detail
 }
-
-// ErrNoConsole: the probe cannot be armed because no console is attached now.
-var ErrNoConsole = errors.New("no console is attached to this process")
 
 // WatchConsole polls ConsolePresent every interval (ProbeInterval when 0) and calls fn once with
 // ReasonConsoleGone when the console host has died: an abrupt death of the terminal sends no event
