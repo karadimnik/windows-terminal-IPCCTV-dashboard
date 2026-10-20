@@ -8,6 +8,10 @@ Mechanics that matter when you are working on this repository rather than using 
 
 That is a PowerShell parameter-binding quirk rather than anything about this project: `-File` hands each argument to the script as a literal string with no parser behind it, so a comma-separated list never becomes an array. Everything the harness runs and which checks can skip is in the [command reference](reference.md#the-test-harness-testscamtestsps1).
 
+## Where the web app's code lives
+
+The web app (`camui`) is the package `internal/web` of the repository's one Go module; the nested `ui/` module is gone. `cmd/camui` is a four-line `main` that calls `web.Main`, and `holocron web` calls the same package. Tests: `go test ./internal/web/...` (about 20 s; `-race` doubles it). `ui/build.sh [output]` keeps its old path and interface (gofmt, vet and test for `./internal/web/...` and `./cmd/camui`, then the `camui.exe` build), because `cam.ps1`, the harness and the docs call it. Two thin shims stay at old paths: `ui/scripts/camui-apply.ps1` (the settings writer moved to `internal/web/scripts/`, where `go:embed` needs it; the harness's `clocklint` still scans `ui\scripts`) and `ui/static/live.js` (a symlink to `internal/web/static/live.js` for `tests/live/bestgrid.test.js`).
+
 ## Time arithmetic
 
 Measure every interval, age and deadline on `Get-CamWallClock`, which returns UTC, and compare it only with `LastWriteTimeUtc` / `CreationTimeUtc` or with a timestamp parsed by `Get-CamDateTimeOrNull`; local time is for display. The `clocklint` check fails on `[DateTime]::Now`, `Get-Date`, `.LastWriteTime` or `.CreationTime` anywhere but a form that can only produce text (`.ToString(...)`, or `Get-Date` with its format parameter); a line that is display only for another reason says so with a `# clock: display` comment. `dst` and `dstloop` prove the arithmetic across this zone's next two transitions without touching the machine clock: unit checks replace `Get-CamWallClock`, and `Set-CamTestSandboxClock` rewrites the clock readings of a sandbox copy for the real supervisor.

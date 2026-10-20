@@ -8,7 +8,7 @@ third-party dependency (the Windows event log uses `syscall` + advapi32, so `gol
 
     type Severity int  // Info, Warning, Error; String() "Info"|"Warning"|"Error"; ParseSeverity(string) (unknown = Error)
     type Event struct{ ID int; Severity Severity; Title, Message, Camera, Key string; At time.Time }
-    const IDSupervisorStopped=100 ... IDRelayLoginRefused=130, IDTest=0; Describe(id) string; Meanings() []Meaning
+    const IDSupervisorStopped=100 ... IDRelayLoginRefused=130, IDTest=0; IDWebStopped=104 (constant only: raised by the host for the web child, Describe/Meanings do not list it yet); Describe(id) string; Meanings() []Meaning
     type Eventer interface{ AlertEvent() Event }                       // producers implement this later
     func FromFields(id int, severity, title, camera, message, key string) Event   // adapter for the string-typed producer structs
 
