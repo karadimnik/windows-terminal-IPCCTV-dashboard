@@ -276,13 +276,14 @@ func TestCameraEditRefusals(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cameras.json")
 	os.WriteFile(path, []byte(sampleCameras), 0o644)
 	for name, err := range map[string]error{
-		"duplicate":        AddCamera(path, config.Camera{Name: "front", IP: "192.0.2.20"}),
-		"reserved name":    AddCamera(path, config.Camera{Name: "CON", IP: "192.0.2.20"}),
-		"bad address":      AddCamera(path, config.Camera{Name: "X", IP: "rtsp://u:p@h/"}),
-		"port in address":  AddCamera(path, config.Camera{Name: "X", IP: "192.0.2.20:554"}),
-		"bad stream":       AddCamera(path, config.Camera{Name: "X", IP: "192.0.2.20", Quality: "a b"}),
-		"folder collision": AddCamera(path, config.Camera{Name: "FRONT?", IP: "192.0.2.20"}),
-		"rename onto":      func() error { _, err := SetCamera(path, "Back", CameraChange{Name: strp("Front")}); return err }(),
+		"duplicate":         AddCamera(path, config.Camera{Name: "front", IP: "192.0.2.20"}),
+		"reserved name":     AddCamera(path, config.Camera{Name: "CON", IP: "192.0.2.20"}),
+		"bad address":       AddCamera(path, config.Camera{Name: "X", IP: "rtsp://u:p@h/"}),
+		"port out of range": AddCamera(path, config.Camera{Name: "X", IP: "192.0.2.20:0"}),
+		"port not a number": AddCamera(path, config.Camera{Name: "X", IP: "192.0.2.20:rtsp"}),
+		"bad stream":        AddCamera(path, config.Camera{Name: "X", IP: "192.0.2.20", Quality: "a b"}),
+		"folder collision":  AddCamera(path, config.Camera{Name: "FRONT?", IP: "192.0.2.20"}),
+		"rename onto":       func() error { _, err := SetCamera(path, "Back", CameraChange{Name: strp("Front")}); return err }(),
 	} {
 		if !errors.Is(err, cli.ErrRefused) {
 			t.Errorf("%s: %v", name, err)
@@ -290,6 +291,10 @@ func TestCameraEditRefusals(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(path); string(b) != sampleCameras {
 		t.Errorf("a refused edit changed the file:\n%s", b)
+	}
+	// an address may carry a valid port (IR 2)
+	if err := AddCamera(filepath.Join(t.TempDir(), "p", "cameras.json"), config.Camera{Name: "P", IP: "192.0.2.20:8554"}); err != nil {
+		t.Errorf("host:port refused: %v", err)
 	}
 	// a fresh install: the first add creates the file
 	fresh := filepath.Join(t.TempDir(), "new", "cameras.json")
@@ -457,4 +462,73 @@ func TestHostRecord(t *testing.T) {
 	if _, ok := ReadHostRecord(p); ok {
 		t.Error("not removed")
 	}
+}
+
+// With no supervisor, `down` reaps PROVABLE orphans of the registry (pid + start time + image +
+// group, the startup reap's verification), reports each, and leaves a pid-reuse decoy alone.
+func TestDownReapsProvableOrphansWithoutSupervisor(t *testing.T) {
+	cfg := config.Defaults(plat)
+	cfg.StopTimeoutSeconds = 1
+	noAPI := func(string) (Stopper, error) {
+		t.Error("the API was used without a supervisor")
+		return nil, ctlapi.ErrUnreachable
+	}
+	g := runtime.GOOS
+	t.Run("orphans reaped, decoy spared", func(t *testing.T) {
+		p := Paths{Root: t.TempDir()}
+		writeRegistry(t, p,
+			osx.ChildEntry{Pid: 200, Start: "s200", Image: "/bin/ffmpeg", Role: "ffmpeg:cam1"},
+			osx.ChildEntry{Pid: 300, Start: "old", Image: "/bin/ffmpeg", Role: "decoy"}, // same pid, another process
+			osx.ChildEntry{Pid: 400, Start: "s400", Image: "/bin/other", Role: "wrong-image"})
+		in := &osx.FakeInspector{Procs: map[int]osx.ProcInfo{200: {Start: "s200", Image: "/bin/ffmpeg"}, 300: {Start: "new", Image: "/bin/ffmpeg"}, 400: {Start: "s400", Image: "/bin/ffmpeg"}}}
+		res := Down(context.Background(), p, cfg, noAPI, in)
+		if got := in.Stopped(); len(got) != 1 || got[0] != 200 {
+			t.Fatalf("stopped %v, want only pid 200 (%s)", got, g)
+		}
+		if res.Via != "reap" || len(res.Reaped) != 3 || !res.Reaped[0].Killed || res.Reaped[1].Killed || res.Reaped[2].Killed {
+			t.Fatalf("%+v", res)
+		}
+		if res.Before.Count() != 1 || !res.OK() {
+			t.Errorf("before %d after %d", res.Before.Count(), res.After.Count())
+		}
+	})
+	t.Run("a supervisor running: behaviour unchanged, nothing reaped", func(t *testing.T) {
+		p := Paths{Root: t.TempDir()}
+		runningDoc(t, p)
+		writeRegistry(t, p, osx.ChildEntry{Pid: 200, Start: "s200", Image: "/bin/ffmpeg", Role: "ffmpeg:cam1"})
+		in := &osx.FakeInspector{Procs: map[int]osx.ProcInfo{200: {Start: "s200", Image: "/bin/ffmpeg"}}}
+		st := &fakeStopper{}
+		res := Down(context.Background(), p, cfg, func(string) (Stopper, error) { return st, nil }, in)
+		if len(res.Reaped) != 0 || len(in.Stopped()) != 0 || st.calls != 1 || res.Via != "api" {
+			t.Errorf("%+v stopped %v", res, in.Stopped())
+		}
+	})
+	t.Run("the host's aux child is left to a live host", func(t *testing.T) {
+		p := Paths{Root: t.TempDir()}
+		os.MkdirAll(p.State(), 0o700)
+		hb, _ := json.Marshal(osx.ChildEntry{Pid: 100, Start: "s100", Image: "/bin/holocron", Role: "host"})
+		os.WriteFile(p.HostFile(), hb, 0o600)
+		ab, _ := json.Marshal(map[string]any{"supervisor": 100, "children": []osx.ChildEntry{{Pid: 500, Start: "s500", Image: "/bin/holocron", Role: "web"}}})
+		os.WriteFile(p.AuxFile(), ab, 0o600)
+		writeRegistry(t, p, osx.ChildEntry{Pid: 200, Start: "s200", Image: "/bin/ffmpeg", Role: "ffmpeg:cam1"})
+		in := &osx.FakeInspector{Procs: map[int]osx.ProcInfo{100: {Start: "s100", Image: "/bin/holocron"}, 200: {Start: "s200", Image: "/bin/ffmpeg"}, 500: {Start: "s500", Image: "/bin/holocron"}}}
+		res := Down(context.Background(), p, cfg, noAPI, in)
+		if got := in.Stopped(); len(got) != 1 || got[0] != 200 {
+			t.Errorf("stopped %v, want only the supervisor's orphan", got)
+		}
+		if res.OK() || res.Via != "stop-file" {
+			t.Errorf("the live host and its web must remain for the stop file: %+v", res)
+		}
+	})
+	t.Run("a web orphan with no host is reaped", func(t *testing.T) {
+		p := Paths{Root: t.TempDir()}
+		os.MkdirAll(p.State(), 0o700)
+		ab, _ := json.Marshal(map[string]any{"supervisor": 100, "children": []osx.ChildEntry{{Pid: 500, Start: "s500", Image: "/bin/holocron", Role: "web"}}})
+		os.WriteFile(p.AuxFile(), ab, 0o600)
+		in := &osx.FakeInspector{Procs: map[int]osx.ProcInfo{500: {Start: "s500", Image: "/bin/holocron"}}}
+		res := Down(context.Background(), p, cfg, noAPI, in)
+		if !res.OK() || len(res.Reaped) != 1 || !res.Reaped[0].Killed || res.Reaped[0].Entry.Role != "web" {
+			t.Errorf("%+v", res)
+		}
+	})
 }

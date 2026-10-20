@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"time"
@@ -114,8 +115,11 @@ func TakeCensus(p Paths, in osx.Inspector, statusInterval float64) Census {
 			}
 		}
 	}
-	entries, err := osx.NewRegistry(osx.RegistryPath(p.State())).Load()
-	if err == nil {
+	for _, path := range []string{osx.RegistryPath(p.State()), p.AuxFile()} {
+		entries, err := osx.NewRegistry(path).Load()
+		if err != nil {
+			continue
+		}
 		for _, e := range entries {
 			if alive, _ := osx.Verify(e, in, runtime.GOOS); alive {
 				c.Children = append(c.Children, e)
@@ -123,4 +127,31 @@ func TakeCensus(p Paths, in osx.Inspector, statusInterval float64) Census {
 		}
 	}
 	return c
+}
+
+// ReapOrphans is the startup reap (osx.Reap: alive AND same start time AND same image AND same
+// group, never by name) run by `down` when no supervisor is running: the children the supervisor's
+// registry still lists and, only when no host is alive to own them, the host's aux children (the
+// web role). It holds the instance lock so a supervisor cannot start under it; a held lock reaps
+// nothing. Every entry is reported, killed or left alone.
+func ReapOrphans(p Paths, in osx.Inspector, log *slog.Logger, withAux bool) ([]osx.ReapVerdict, error) {
+	lk, err := osx.AcquireInstanceLock(p.LockFile())
+	if err != nil {
+		return nil, err
+	}
+	defer lk.Release()
+	paths := []string{osx.RegistryPath(p.State())}
+	if withAux {
+		paths = append(paths, p.AuxFile())
+	}
+	var out []osx.ReapVerdict
+	var errs []error
+	for _, path := range paths {
+		v, err := osx.Reap(osx.NewRegistry(path), in, log)
+		out = append(out, v...)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return out, errors.Join(errs...)
 }

@@ -118,14 +118,22 @@ func down(ctx context.Context, e *env) error {
 	res := app.Down(ctx, e.paths, e.cfg, func(root string) (app.Stopper, error) { return e.dial(root) }, e.inspector)
 	if e.json {
 		printJSON(e.out, map[string]any{"ok": res.OK(), "before": res.Before, "after": res.After, "via": res.Via, "apiError": res.APIError,
-			"report": res.Report, "elapsedMs": res.Elapsed.Milliseconds()})
+			"report": res.Report, "reaped": res.Reaped, "elapsedMs": res.Elapsed.Milliseconds()})
 	} else {
 		if res.Before.Count() == 0 {
 			fmt.Fprintf(e.out, "nothing is running for %s\n", e.paths.Root)
 			return nil
 		}
 		fmt.Fprintf(e.out, "before: %d process(es): %s\n", res.Before.Count(), strings.Join(res.Before.Lines(), "; "))
+		for _, v := range res.Reaped {
+			if v.Killed {
+				fmt.Fprintf(e.out, "orphan reaped: %s pid %d (%s; %s)\n", v.Entry.Role, v.Entry.Pid, v.Entry.Image, v.Why)
+			} else {
+				fmt.Fprintf(e.out, "orphan entry left alone: %s pid %d (%s)\n", v.Entry.Role, v.Entry.Pid, v.Why)
+			}
+		}
 		switch res.Via {
+		case "reap":
 		case "api":
 			fmt.Fprintf(e.out, "stopped through the control API: %s (%s)\n", res.Report.Kind, res.Report.Reason)
 			if len(res.Report.Survivors) > 0 {
