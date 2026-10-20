@@ -164,11 +164,21 @@ func TestTheSegmentBeingRecordedNowIsFlagged(t *testing.T) {
 // newest, so only that one can be growing.
 func TestOnlyTheNewestSegmentCanBeInProgress(t *testing.T) {
 	api, root := newFootageAPI(t)
-	start := time.Now().Add(-20 * time.Minute)
-	addSegment(t, root, "Workshop", start.Format("20060102_150405-0700"), 900, 1024)
-	addSegment(t, root, "Workshop", start.Add(15*time.Minute).Format("20060102_150405-0700"), 300, 1024)
+	// The stamps are fixed so the day never depends on the wall clock (a
+	// fixture built from "now minus 20 minutes" splits across two dates
+	// between 00:05 and 00:20). Only the write times are recent: both files
+	// were written within the in-progress window, so the window alone would
+	// flag both.
+	first := addSegment(t, root, "Workshop", "20261013_120000+0300", 900, 1024)
+	second := addSegment(t, root, "Workshop", "20261013_121500+0300", 300, 1024)
+	now := time.Now()
+	for name, at := range map[string]time.Time{first: now.Add(-30 * time.Second), second: now} {
+		if err := os.Chtimes(filepath.Join(root, "Workshop", name), at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	body := getFootage(t, api, "?camera=Workshop&date="+start.Format("2006-01-02"))
+	body := getFootage(t, api, "?camera=Workshop&date=2026-10-13")
 	if len(body.Segments) != 2 {
 		t.Fatalf("segments %+v", body.Segments)
 	}
@@ -176,7 +186,7 @@ func TestOnlyTheNewestSegmentCanBeInProgress(t *testing.T) {
 		t.Fatalf("the newest segment is the one being written: %+v", body.Segments[0])
 	}
 	if body.Segments[1].InProgress {
-		t.Fatalf("a segment that rolled over five minutes ago is finished: %+v", body.Segments[1])
+		t.Fatalf("a segment that rolled over seconds ago is finished: %+v", body.Segments[1])
 	}
 }
 
