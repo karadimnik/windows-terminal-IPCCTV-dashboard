@@ -70,6 +70,8 @@ type Config struct {
 	Alerts alerts.Config
 	// Secrets is the "secrets" object.
 	Secrets Secrets
+	// Web is the "web" object (the web role).
+	Web Web
 }
 
 // Logging is the "logging" object: the default level and per-component levels.
@@ -155,6 +157,7 @@ func Defaults(p osx.Platform) Config {
 		Logging: Logging{Level: "info", Levels: map[string]string{}},
 		Alerts:  defaultAlerts(),
 		Secrets: Secrets{Backend: "auto"},
+		Web:     defaultWeb(),
 	}
 	if p.Name() == "windows" {
 		c.FfmpegPath = `C:\ffmpeg\bin\ffmpeg.exe`

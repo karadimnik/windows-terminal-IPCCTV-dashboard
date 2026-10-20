@@ -56,9 +56,13 @@ Types are strict: a JSON string is never accepted for a boolean or a number (Pow
 | alerts.desktop.enabled | true | JSON boolean | NEW: desktop notification | yes |
 | alerts.eventlog.enabled | true | JSON boolean | NEW: Windows event log / syslog | yes |
 | secrets.backend | `auto` | one of auto, keyring, file, env | NEW: camera credential store (internal/secrets) | yes |
+| web.enabled | true | JSON boolean | NEW: `holocron up` starts the web role (false: recorder only) | yes |
+| web.listen | `127.0.0.1:8787` | host:port, port 1-65535; the web app's loopback guard decides at start (a non-loopback address needs CAMUI_TOKEN of 16+ characters) | NEW: the web app's listener | no |
+| web.tlsListen | `` | empty (off) or IPv4:port, port 1-65535; the web app requires a private address and at least one user | NEW: the LAN HTTPS listener (login) | no |
+| web.tlsDir, web.authDir | `` | strings; empty = the web app's default folders under `%LOCALAPPDATA%\IPCCTV` (never inside the repository) | NEW: local CA and certificate; users.json, sessions.json | no |
 
 Editable = the allow-list of `holocron config set|unset` (rule R1); the other keys are changed by hand or by the install.
-Sub-keys of `logging`, `alerts` and `secrets` are camelCase like the JSON; an unknown sub-key is a warning.
+Sub-keys of `logging`, `alerts`, `secrets` and `web` are camelCase like the JSON; an unknown sub-key is a warning.
 
 An unknown key starting with `Live` (any case) is an ERROR (a misspelled `LiveViewEnabled` would otherwise leave live view off silently), as
 in PowerShell. Any other unknown key is a warning. Key names are case-insensitive; two spellings of one key are an error.
