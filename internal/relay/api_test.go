@@ -324,3 +324,24 @@ func TestWaitStarted(t *testing.T) {
 		t.Errorf("exited: %v after %v", ok, time.Since(start))
 	}
 }
+
+func TestNewReadySet(t *testing.T) {
+	s := NewReadySet([]string{"front", "back", ""})
+	if s.State != OK || !s.Has("front") || !s.Has("back") || s.Has("side") || s.Has("") {
+		t.Fatalf("ok set: %+v", s)
+	}
+	if got := s.Names(); len(got) != 2 || got[0] != "back" || got[1] != "front" {
+		t.Fatalf("names %q", got)
+	}
+	if e := NewReadySet(nil); e.State != OK || e.Has("front") || len(e.Names()) != 0 {
+		t.Fatalf("empty ok set: %+v", e)
+	}
+	d := DeniedReadySet()
+	if d.State != Denied || !d.Has("anything") || len(d.Names()) != 0 {
+		t.Fatalf("denied: %+v", d)
+	}
+	u := UnavailableReadySet()
+	if u.State != Unavailable || u.Has("front") {
+		t.Fatalf("unavailable: %+v", u)
+	}
+}
