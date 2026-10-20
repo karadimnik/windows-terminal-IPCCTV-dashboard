@@ -106,6 +106,8 @@ type Deps struct {
 	Alerts  Alerts
 	Log     *slog.Logger  // component "supervisor"
 	Tick    time.Duration // the caller's Plan interval; default 1 s (blind-gap rule)
+	// Location of the timestamps in Rows (status.json keeps the local offset); default time.Local.
+	Location *time.Location
 }
 
 // Settings are the configuration values the manager uses (IR 3.1).
