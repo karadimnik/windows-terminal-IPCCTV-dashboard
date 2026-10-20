@@ -86,6 +86,7 @@ var meanings = []Meaning{
 	{IDSupervisorRestarted, Warning, "the supervisor is recording again after a restart"},
 	{IDRestartBudgetSpent, Error, "the supervisor stopped and the restart budget is spent, so it is staying down"},
 	{IDWindowClosed, Warning, "the NVR window was closed, so nothing is recording and nothing will restart it"},
+	{IDWebStopped, Error, "the web app stopped unexpectedly and is being restarted"},
 	{IDCameraDown, Warning, "one camera has made no file progress for the effective limit"},
 	{IDPruneDisabled, Error, "pruning is disabled because the root is unsafe, so the disk will fill"},
 	{IDPruneBlocked, Error, "pruning is blocked with the disk under the reserve and nothing deletable left"},
