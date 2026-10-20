@@ -85,7 +85,8 @@ the host itself; opt-in:
     cd /mnt/c/Windows/Temp/holocron-w8 && HOLOCRON_HOST_REAL=1 TMP='C:\Windows\Temp\holocron-w8\scratch' TEMP=... \
       WSLENV=HOLOCRON_HOST_REAL:TMP:TEMP ./host.test.exe -test.v -test.run TestReal
 
-The Windows console tests start the host helper in a NEW hidden console of its own, find its `conhost.exe` by parent pid and its window
+The deterministic tests read the status goldens from `testdata/`: run a Windows build of them with the package folder as the working
+directory (`cd internal/host && /mnt/c/.../host.test.exe`). The Windows console tests start the host helper in a NEW hidden console of its own, find its `conhost.exe` by parent pid and its window
 from the helper's own `GetConsoleWindow()` (no window is enumerated); they skip if the console was handed to a terminal.
 
 Full chain (`HOLOCRON_IT=1`, `HOLOCRON_IT_FFMPEG` >= 5.0, skips otherwise): host + `supervise.NewProduction` + two real ffmpeg pointed
