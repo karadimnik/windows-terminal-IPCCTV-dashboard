@@ -108,7 +108,7 @@ func ParseFlagsTo(args []string, output io.Writer, base Config) (Options, error)
 	fs.StringVar(&o.Unlock, "unlock", "", "clear this username's failed-login lockout in a running camui, and exit")
 	fs.BoolVar(&o.PrintCA, "print-ca", false, "create the local CA if needed, print its file, SHA-256 fingerprint and how to install it on a device, and exit")
 	fs.BoolVar(&o.ShowVersion, "version", false, "print the version and exit")
-	fs.StringVar(&o.StopFile, "stop-file", "", "internal: exit when this file appears (how `holocron up` stops its web child on every OS)")
+	fs.StringVar(&o.StopFile, "stop-file", "", "internal: exit when this file appears (how holocron up stops its web child on every OS)")
 	if err := fs.Parse(args); err != nil {
 		return o, err
 	}
