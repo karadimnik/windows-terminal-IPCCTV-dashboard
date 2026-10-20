@@ -37,8 +37,9 @@ type sealed struct {
 }
 
 // fileDoc is secrets.enc. Every entry is sealed with its NAME as additional authenticated data,
-// so entries cannot be swapped; Check is sealed over the sorted list of names, so an entry cannot
+// so entries cannot be swapped; Check is sealed over all entries, so an entry cannot
 // be added, dropped or renamed without the key either, and a wrong key is caught on an empty store.
+// Check is sealed over every name and ciphertext, so any edit of the file fails every operation.
 type fileDoc struct {
 	Version int               `json:"version"`
 	Check   *sealed           `json:"check"`
@@ -180,24 +181,29 @@ func (f *fileProvider) load(create bool) (*fileDoc, []byte, error) {
 		return nil, nil, err
 	}
 	// Verify the entry list (and so the key) up front; entries are opened one at a time on Get.
-	names := make([]string, 0, len(doc.Entries))
-	for n := range doc.Entries {
-		names = append(names, n)
-	}
-	if pt, err := open(key, *doc.Check, checkAAD(sorted(names))); err != nil || string(pt) != checkTxt {
+	if pt, err := open(key, *doc.Check, checkAAD(doc.Entries)); err != nil || string(pt) != checkTxt {
 		return nil, nil, ErrAuth
 	}
 	return &doc, key, nil
 }
 
-func checkAAD(sortedNames []string) string { return aadCheck + strings.Join(sortedNames, "\x00") }
-
-func (f *fileProvider) save(doc *fileDoc, key []byte) error {
-	names := make([]string, 0, len(doc.Entries))
-	for n := range doc.Entries {
+// checkAAD binds the whole entry set (names and ciphertexts) into the check.
+func checkAAD(entries map[string]sealed) string {
+	names := make([]string, 0, len(entries))
+	for n := range entries {
 		names = append(names, n)
 	}
-	chk, err := seal(key, []byte(checkTxt), checkAAD(sorted(names)))
+	var b strings.Builder
+	b.WriteString(aadCheck)
+	for _, n := range sorted(names) {
+		e := entries[n]
+		b.WriteString(n + "\x00" + e.Nonce + "\x00" + e.Data + "\x00")
+	}
+	return b.String()
+}
+
+func (f *fileProvider) save(doc *fileDoc, key []byte) error {
+	chk, err := seal(key, []byte(checkTxt), checkAAD(doc.Entries))
 	if err != nil {
 		return err
 	}
