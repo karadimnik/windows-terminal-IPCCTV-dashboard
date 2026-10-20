@@ -43,6 +43,7 @@ const (
 	IDSupervisorRestarted = 101 // Warning: it is recording again
 	IDRestartBudgetSpent  = 102 // Error: it stopped and is staying down
 	IDWindowClosed        = 103 // Warning: the NVR window was closed
+	IDWebStopped          = 104 // Error: the web app crashed repeatedly and is being restarted (Go system only; the host raises it)
 	IDCameraDown          = 110 // Warning: one camera made no file progress for the effective limit
 	IDPruneDisabled       = 120 // Error: pruning disabled, the root is unsafe
 	IDPruneBlocked        = 121 // Error: pruning blocked, the disk is filling

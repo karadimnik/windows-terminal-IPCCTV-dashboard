@@ -97,6 +97,7 @@ type harness struct {
 	lives    []*fakeLife
 	onSpawn  func(*fakeLife)
 	spawnErr error
+	aux      []Aux
 
 	res    Result
 	err    error
@@ -153,7 +154,7 @@ func (h *harness) Spawn(ctx context.Context) (Proc, error) {
 
 func (h *harness) start() {
 	lg, _ := logx.New(logx.Options{Config: logx.Config{Level: "debug"}, Getenv: func(string) string { return "" }, Sink: h.logs})
-	host := New(h.cfg, Deps{Spawner: h, Alerts: h.alerts, Clock: h.clk, Log: lg.For("host"), Lock: h.lock, Console: h.console, Mode: h.console.mode, Location: time.UTC})
+	host := New(h.cfg, Deps{Spawner: h, Alerts: h.alerts, Clock: h.clk, Log: lg.For("host"), Lock: h.lock, Console: h.console, Mode: h.console.mode, Location: time.UTC, Aux: h.aux})
 	go func() {
 		h.res, h.err = host.Run(context.Background())
 		close(h.finish)

@@ -163,6 +163,7 @@ type Deps struct {
 	Console    Console                          // default OSConsole{}
 	Mode       Mode
 	Location   *time.Location // status.json timestamps; default time.Local
+	Aux        []Aux          // auxiliary children (the web role), started after the supervisor's first spawn
 }
 
 // Host runs the supervisor as a child process and restarts it in place after an unexpected stop
@@ -174,6 +175,8 @@ type Host struct {
 	log *slog.Logger
 
 	statusPath, stopPath string
+
+	aux *auxSet // set by Run
 }
 
 // New makes a host; nothing runs until Run.
@@ -300,6 +303,10 @@ func (h *Host) Run(ctx context.Context) (Result, error) {
 		res.Lives++
 		startedAt := h.clk.Mono()
 		proc, err := h.d.Spawner.Spawn(ctx)
+		if res.Lives == 1 && len(h.d.Aux) > 0 {
+			h.aux = h.startAux(ctx)
+			defer func() { h.aux.finish(h) }()
+		}
 		var cls classification
 		var pid int
 		if err != nil {
@@ -503,6 +510,7 @@ func (h *Host) closeKind(r osx.Reason) bool {
 // takes its children); otherwise (service stop, Ctrl+C, ctx) it waits StopTimeout and NEVER kills
 // the supervisor (G7): it reports it.
 func (h *Host) orderedStop(ctx context.Context, proc Proc, waitDone <-chan exitInfo, r osx.Reason, res Result) (Result, error) {
+	h.aux.requestStop() // the auxiliary children end alongside the supervisor
 	closed := h.closeKind(r)
 	budget := h.cfg.StopTimeout
 	if closed {

@@ -55,6 +55,18 @@ the supervisor gets its own hidden console (`CREATE_NO_WINDOW`), so a window clo
 - Logs: component `host`, fields action/actor/target/result/duration_ms/pid; INFO starts/stops, WARN restarts, ERROR budget,
   refusals and failed stops; every alert also as an `ALERT <id>` line.
 
+## Auxiliary children (the web role)
+
+`Deps.Aux []Aux{Name, Spawner, Restart AuxRestart, Stop func(Proc), StopWait, Registry *osx.ChildRegistry, Inspector}`: children of the host that
+are not the supervisor. Started after the supervisor's FIRST spawn, in the host's own scope (they die with the host), restarted in place
+without a limit: delays 5, 10, 20, 40, 60, 60 ... s, reset to 5 s by a life of 300 s; a WARN per restart (`host.<name>.restart`); when it
+crashes 5 times within 30 min the alert (`AlertID`, the web uses `alerts.IDWebStopped` 104, Error) is raised, at most once per 30 min. A crash
+never stops or restarts the supervisor, a supervisor restart never touches an aux child. When the host ends (any outcome) or starts an ordered
+stop, every aux child gets `Stop` (the web role: a stop file) at once, so a window close needs no extra time; one that has not ended after
+`StopWait` (5 s) is killed. With a `Registry` the running child is listed (pid, start token, image, role = Name) for the census of `down`.
+Tests: `TestAuxRestartBackoffAlertAndSupervisorUntouched`, `TestAuxNotRestartedWithTheSupervisor`, `TestAuxStopsWithTheHost`,
+`TestAuxIsListedInTheRegistry`.
+
 ## Guarantees -> tests
 
 | IS 2.2 | Guarantee | Tests |
