@@ -406,5 +406,3 @@ func (m *Manager) blockedBySibling(e *Entry) bool {
 
 // roundInt is PowerShell's [int] cast: round half to even.
 func roundInt(v float64) int64 { return int64(math.RoundToEven(v)) }
-
-func secs(d time.Duration) float64 { return d.Seconds() }
