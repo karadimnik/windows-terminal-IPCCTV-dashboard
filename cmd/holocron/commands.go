@@ -86,7 +86,7 @@ func init() {
 		{"archive stats", "", "disk, retention, per-camera size and age", "archive.stats"},
 	} {
 		nb := nb
-		commands = append(commands, &command{path: nb.path, usage: nb.usage, about: nb.about, action: nb.action, noRoot: true, notBuilt: true,
+		commands = append(commands, &command{path: nb.path, usage: nb.usage, about: nb.about, action: nb.action, notBuilt: true,
 			run: func(context.Context, *env) error {
 				return failed("holocron %s: %v (it arrives with a later task of the OS-independent track)", nb.path, ErrNotBuilt)
 			}})
