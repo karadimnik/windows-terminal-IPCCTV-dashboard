@@ -91,9 +91,10 @@ func TestPruneMatrix(t *testing.T) {
 		t.Fatalf("stop line %q", res.StopLine)
 	}
 	if n := r.log.count(func(x rec) bool {
-		return x.Attrs["action"] == "prune.delete" && x.Attrs["result"] == "ok" && x.Level.String() == "INFO"
+		return x.Attrs["action"] == "prune.delete" && x.Attrs["result"] == "ok" && x.Level.String() == "INFO" && x.Attrs["actor"] == "supervisor" &&
+			x.Attrs["file"] != "" && strings.HasSuffix(x.Attrs["target"], x.Attrs["file"]) && x.Attrs["bytes"] != "" && x.Attrs["reason"] == ReasonAge
 	}); n != 4 {
-		t.Fatalf("%d INFO prune.delete records, want 4", n)
+		t.Fatalf("%d INFO prune.delete records with target, file, bytes and reason, want 4", n)
 	}
 }
 

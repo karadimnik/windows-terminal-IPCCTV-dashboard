@@ -1,0 +1,41 @@
+{
+    "Name":  "pruneconfig",
+    "Check":  "pruneconfig",
+    "Cases":  [
+                  {
+                      "Json":  "{ \"MaxAgePruneFraction\": 0 }",
+                      "Value":  null,
+                      "Error":  "MaxAgePruneFraction must be a number from 0.01 to 1.0 - the largest share of the archive one age-rule run may delete, 1.0 to switch the brake off - got \u00270\u0027."
+                  },
+                  {
+                      "Json":  "{ \"MaxAgePruneFraction\": -1 }",
+                      "Value":  null,
+                      "Error":  "MaxAgePruneFraction must be a number from 0.01 to 1.0 - the largest share of the archive one age-rule run may delete, 1.0 to switch the brake off - got \u0027-1\u0027."
+                  },
+                  {
+                      "Json":  "{ \"MaxAgePruneFraction\": 1.5 }",
+                      "Value":  null,
+                      "Error":  "MaxAgePruneFraction must be a number from 0.01 to 1.0 - the largest share of the archive one age-rule run may delete, 1.0 to switch the brake off - got \u00271.5\u0027."
+                  },
+                  {
+                      "Json":  "{ \"MaxAgePruneFraction\": \"abc\" }",
+                      "Value":  null,
+                      "Error":  "MaxAgePruneFraction must be a number from 0.01 to 1.0 - the largest share of the archive one age-rule run may delete, 1.0 to switch the brake off - got \u0027abc\u0027."
+                  },
+                  {
+                      "Json":  "{ \"MaxAgePruneFraction\": 1.0 }",
+                      "Value":  1,
+                      "Error":  ""
+                  },
+                  {
+                      "Json":  "{ \"MaxAgePruneFraction\": 0.5 }",
+                      "Value":  0.5,
+                      "Error":  ""
+                  },
+                  {
+                      "Json":  "{ \"ReserveGB\": 20 }",
+                      "Value":  0.5,
+                      "Error":  ""
+                  }
+              ]
+}

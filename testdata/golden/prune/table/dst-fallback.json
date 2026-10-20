@@ -1,0 +1,130 @@
+{
+    "Name":  "dst-fallback",
+    "Check":  "corner",
+    "Expect":  [
+
+               ],
+    "Note":  "",
+    "Now":  "2026-10-25T01:20:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "claim",
+    "Claim":  {
+                  "Created":  true,
+                  "Problem":  ""
+              },
+    "Entries":  [
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261025_033000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  1073741824,
+                        "CTime":  "2026-10-25T00:30:00.0000000Z",
+                        "MTime":  "2026-10-25T00:30:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261025_034500+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  1073741824,
+                        "CTime":  "2026-10-25T00:45:00.0000000Z",
+                        "MTime":  "2026-10-25T00:45:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261025_030000+0200.mkv",
+                        "Kind":  "file",
+                        "Bytes":  1073741824,
+                        "CTime":  "2026-10-25T01:00:00.0000000Z",
+                        "MTime":  "2026-10-25T01:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Cam_A/Cam_A_20261025_031500+0200.mkv",
+                        "Kind":  "file",
+                        "Bytes":  1073741824,
+                        "CTime":  "2026-10-25T01:15:00.0000000Z",
+                        "MTime":  "2026-10-25T01:19:30.0000000Z"
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  10,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  12,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261025_033000+0300.mkv",
+                                              "Bytes":  1073741824,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 10.00 GB below reserve 12.00 GB, target 12.00 GB"
+                                          },
+                                          {
+                                              "Path":  "archive/Cam_A/Cam_A_20261025_034500+0300.mkv",
+                                              "Bytes":  1073741824,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 11.00 GB below reserve 12.00 GB, target 12.00 GB"
+                                          }
+                                      ],
+                        "Removed":  [
+                                        "archive/Cam_A/Cam_A_20261025_033000+0300.mkv",
+                                        "archive/Cam_A/Cam_A_20261025_034500+0300.mkv"
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  false,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark reached its target 12.00 GB after 2 deletion(s), free 12.00 GB, stopping at Cam_A_20261025_030000+0200.mkv",
+                        "Message":  "prune: 2 file(s) deleted, 0.000 GB freed, free 10.00 -\u003e 12.00 GB (reserve 12.00, target 12.00)",
+                        "Protected":  [
+                                          "archive/Cam_A/Cam_A_20261025_031500+0200.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  3,
+                        "Deleted":  2,
+                        "Failed":  0,
+                        "FreeGBBefore":  10,
+                        "FreeGBAfter":  12,
+                        "ReserveGB":  12,
+                        "TargetGB":  12,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  2,
+                                       "summary":  1,
+                                       "stop":  1
+                                   }
+                    }
+                ]
+}

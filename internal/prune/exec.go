@@ -283,7 +283,7 @@ func (a *realActor) remove(s *seg, reason, detail string) (bool, bool) {
 		return false, false
 	}
 	log.Info("prune: deleted "+s.path, logx.Action("prune.delete"), logx.Actor(a.e.actor()), logx.Target(s.path), logx.Result(logx.ResultOK),
-		slog.Int64("bytes", s.f.Size), slog.String("reason", reason), slog.String("detail", detail), slog.Time("written", s.f.MTime))
+		slog.String("file", s.f.Name), slog.Int64("bytes", s.f.Size), slog.String("reason", reason), slog.String("detail", detail), slog.Time("written", s.f.MTime))
 	return true, false
 }
 

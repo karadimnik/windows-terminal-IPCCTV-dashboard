@@ -55,6 +55,14 @@ type scaledFS struct {
 	Removed []string
 	FailOn  map[string]bool // Remove of these paths fails
 	Before  func(path string)
+	Scale   uint64 // physical to logical bytes; 0 means scale
+}
+
+func (s *scaledFS) factor() uint64 {
+	if s.Scale == 0 {
+		return scale
+	}
+	return s.Scale
 }
 
 func (s *scaledFS) Reset(baseGB float64) {
@@ -67,7 +75,7 @@ func (s *scaledFS) Reset(baseGB float64) {
 
 func (s *scaledFS) Stat(path string) (Info, error) {
 	i, err := s.OSFS.Stat(path)
-	i.Size *= scale
+	i.Size *= int64(s.factor())
 	return i, err
 }
 
@@ -86,7 +94,7 @@ func (s *scaledFS) Remove(path string) error {
 		return err
 	}
 	s.mu.Lock()
-	s.removed += uint64(fi.Size()) * scale
+	s.removed += uint64(fi.Size()) * s.factor()
 	s.Removed = append(s.Removed, path)
 	s.mu.Unlock()
 	return nil
@@ -203,6 +211,9 @@ func (r *rig) put(path string, n int, mtime time.Time) string {
 		r.t.Fatal(err)
 	}
 	r.touch(path, mtime)
+	if err := setCreated(path, mtime); err != nil {
+		r.t.Fatal(err)
+	}
 	return path
 }
 

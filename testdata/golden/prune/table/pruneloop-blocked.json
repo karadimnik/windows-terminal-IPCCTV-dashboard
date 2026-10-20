@@ -1,0 +1,383 @@
+{
+    "Name":  "pruneloop-blocked",
+    "Check":  "pruneloop",
+    "Expect":  [
+
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  6,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "claim",
+    "Claim":  {
+                  "Created":  true,
+                  "Problem":  ""
+              },
+    "Entries":  [
+                    {
+                        "Path":  "archive/synth1/synth1_20261020_085928+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:28.0000000Z",
+                        "MTime":  "2026-10-20T05:59:34.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/synth1/synth1_20261020_085934+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:34.0000000Z",
+                        "MTime":  "2026-10-20T05:59:40.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/synth1/synth1_20261020_085940+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:40.0000000Z",
+                        "MTime":  "2026-10-20T05:59:46.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/synth1/synth1_20261020_085946+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:46.0000000Z",
+                        "MTime":  "2026-10-20T05:59:52.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/synth1/synth1_20261020_085952+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:52.0000000Z",
+                        "MTime":  "2026-10-20T05:59:58.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/oldcam/oldcam_20261018_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-18T06:00:00.0000000Z",
+                        "MTime":  "2026-10-18T06:00:00.0000000Z",
+                        "Late":  true
+                    },
+                    {
+                        "Path":  "archive/oldcam/oldcam_20261019_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-19T06:00:00.0000000Z",
+                        "MTime":  "2026-10-19T06:00:00.0000000Z",
+                        "Late":  true
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  10,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  1000000,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  10,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  1000000,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  10,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  1000000,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  10,
+                      "Fixed":  false,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  1000000,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/oldcam/oldcam_20261018_090000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 10.00 GB below reserve 1000000.00 GB, target 1000000.00 GB"
+                                          },
+                                          {
+                                              "Path":  "archive/synth1/synth1_20261020_085928+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 10.06 GB below reserve 1000000.00 GB, target 1000000.00 GB"
+                                          },
+                                          {
+                                              "Path":  "archive/synth1/synth1_20261020_085934+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 10.12 GB below reserve 1000000.00 GB, target 1000000.00 GB"
+                                          },
+                                          {
+                                              "Path":  "archive/synth1/synth1_20261020_085940+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 10.19 GB below reserve 1000000.00 GB, target 1000000.00 GB"
+                                          },
+                                          {
+                                              "Path":  "archive/synth1/synth1_20261020_085946+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 10.25 GB below reserve 1000000.00 GB, target 1000000.00 GB"
+                                          }
+                                      ],
+                        "Removed":  [
+                                        "archive/oldcam/oldcam_20261018_090000+0300.mkv",
+                                        "archive/synth1/synth1_20261020_085928+0300.mkv",
+                                        "archive/synth1/synth1_20261020_085934+0300.mkv",
+                                        "archive/synth1/synth1_20261020_085940+0300.mkv",
+                                        "archive/synth1/synth1_20261020_085946+0300.mkv"
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 5 deletion(s), free 10.31 GB is still below the 1000000.00 GB reserve",
+                        "Message":  "PRUNE BLOCKED: free 10.31 GB is below the 1000000.00 GB reserve and nothing deletable is left (5 candidate(s), 0 undeletable, 2 protected as in-progress). Recording continues. Lower ReserveGB, move RootPath to a larger volume, or free space by hand.",
+                        "Protected":  [
+                                          "archive/oldcam/oldcam_20261019_090000+0300.mkv",
+                                          "archive/synth1/synth1_20261020_085952+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  5,
+                        "Deleted":  5,
+                        "Failed":  0,
+                        "FreeGBBefore":  10,
+                        "FreeGBAfter":  10.31,
+                        "ReserveGB":  1000000,
+                        "TargetGB":  1000000,
+                        "Alerts":  [
+                                       {
+                                           "Id":  121,
+                                           "Type":  "Error",
+                                           "Title":  "pruning is blocked - the disk is filling"
+                                       }
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  true,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  1,
+                                       "deleted":  5,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 0 deletion(s), free 10.00 GB is still below the 1000000.00 GB reserve",
+                        "Message":  "PRUNE BLOCKED: free 10.00 GB is below the 1000000.00 GB reserve and nothing deletable is left (0 candidate(s), 0 undeletable, 2 protected as in-progress). Recording continues. Lower ReserveGB, move RootPath to a larger volume, or free space by hand.",
+                        "Protected":  [
+                                          "archive/oldcam/oldcam_20261019_090000+0300.mkv",
+                                          "archive/synth1/synth1_20261020_085952+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  10,
+                        "FreeGBAfter":  10,
+                        "ReserveGB":  1000000,
+                        "TargetGB":  1000000,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  true,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  1,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 0 deletion(s), free 10.00 GB is still below the 1000000.00 GB reserve",
+                        "Message":  "PRUNE BLOCKED: free 10.00 GB is below the 1000000.00 GB reserve and nothing deletable is left (0 candidate(s), 0 undeletable, 2 protected as in-progress). Recording continues. Lower ReserveGB, move RootPath to a larger volume, or free space by hand.",
+                        "Protected":  [
+                                          "archive/oldcam/oldcam_20261019_090000+0300.mkv",
+                                          "archive/synth1/synth1_20261020_085952+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  10,
+                        "FreeGBAfter":  10,
+                        "ReserveGB":  1000000,
+                        "TargetGB":  1000000,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  true,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  1,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 0 deletion(s), free 10.00 GB is still below the 1000000.00 GB reserve",
+                        "Message":  "PRUNE BLOCKED: free 10.00 GB is below the 1000000.00 GB reserve and nothing deletable is left (0 candidate(s), 0 undeletable, 2 protected as in-progress). Recording continues. Lower ReserveGB, move RootPath to a larger volume, or free space by hand.",
+                        "Protected":  [
+                                          "archive/oldcam/oldcam_20261019_090000+0300.mkv",
+                                          "archive/synth1/synth1_20261020_085952+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  10,
+                        "FreeGBAfter":  10,
+                        "ReserveGB":  1000000,
+                        "TargetGB":  1000000,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  true,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  1,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    }
+                ]
+}

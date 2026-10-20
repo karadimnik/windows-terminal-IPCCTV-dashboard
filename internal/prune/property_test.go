@@ -115,6 +115,7 @@ func generate(rng *rand.Rand, root string) genTree {
 		in.MarkerProblem = "there is no ownership marker at " + archive.MarkerPath(root)
 	}
 
+	withCreated := rng.IntN(3) == 0 // as on Windows
 	names := []string{"Cam_A", "Front_Entrance", "Workshop", "_state", "Yard"}
 	rng.Shuffle(len(names), func(i, j int) { names[i], names[j] = names[j], names[i] })
 	for _, cam := range names[:rng.IntN(4)+1] {
@@ -150,6 +151,12 @@ func generate(rng *rand.Rand, root string) genTree {
 			}
 			mtime = mtime.Add(time.Duration(rng.IntN(1000)) * time.Millisecond).UTC()
 			f := File{Name: name, MTime: mtime, Size: int64(rng.IntN(1<<11)+1) << 20, Reparse: rng.IntN(30) == 0}
+			if withCreated {
+				f.Created = start.Add(time.Duration(rng.IntN(1000)) * time.Millisecond).UTC()
+				if rng.IntN(15) == 0 { // copied or restored
+					f.Created = now.Add(-time.Duration(rng.IntN(3600)) * time.Second).UTC()
+				}
+			}
 			c.Files = append(c.Files, f)
 		}
 		for i := rng.IntN(4); i > 0; i-- {
@@ -256,19 +263,23 @@ func checkPlan(in Inputs, d Decision) []string {
 				continue
 			}
 		}
-		var top time.Time
+		var top, ctop time.Time
 		var w *ref
 		for _, s := range segs {
 			if s.start.After(top) {
 				top = s.start
 			}
+			if s.f.Created.After(ctop) {
+				ctop = s.f.Created
+			}
 			if w == nil || s.f.MTime.After(w.f.MTime) || (s.f.MTime.Equal(w.f.MTime) && s.f.Name > w.f.Name) {
 				w = s
 			}
 		}
+		newestOf := func(s *ref) bool { return s.start.Equal(top) || (!ctop.IsZero() && s.f.Created.Equal(ctop)) }
 		var rep *ref
 		for _, s := range segs {
-			if s.start.Equal(top) {
+			if newestOf(s) {
 				s.protect = true
 				if rep == nil || s.f.MTime.Before(rep.f.MTime) {
 					rep = s
@@ -282,7 +293,7 @@ func checkPlan(in Inputs, d Decision) []string {
 			if in.same(s.f.Name, c.Newest) {
 				s.protect = true
 			}
-			if !s.start.Equal(top) {
+			if !newestOf(s) {
 				unprotected = append(unprotected, s)
 			}
 			byPath[s.path] = s

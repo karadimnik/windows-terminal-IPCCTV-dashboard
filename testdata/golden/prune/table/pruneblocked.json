@@ -1,0 +1,390 @@
+{
+    "Name":  "pruneblocked",
+    "Check":  "pruneblocked",
+    "Expect":  [
+
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "claim",
+    "Claim":  {
+                  "Created":  true,
+                  "Problem":  ""
+              },
+    "Entries":  [
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261020_060000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T03:00:00.0000000Z",
+                        "MTime":  "2026-10-20T03:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:00.0000000Z",
+                        "MTime":  "2026-10-20T05:59:00.0000000Z"
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "prune",
+                      "Dry":  true,
+                      "Free":  1,
+                      "Fixed":  true,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  20,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  1,
+                      "Fixed":  true,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  20,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  1,
+                      "Fixed":  true,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  20,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  1,
+                      "Fixed":  true,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  1,
+                      "Fixed":  true,
+                      "Shift":  0,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  20,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  null,
+                                     "MaxAgePruneFraction":  0.5
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "prune",
+                        "Dry":  true,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/Front_Entrance/Front_Entrance_20261020_060000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 1.00 GB below reserve 20.00 GB, target 20.00 GB"
+                                          }
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 1 deletion(s), free 1.00 GB is still below the 20.00 GB reserve",
+                        "Message":  "would be BLOCKED: free 1.00 GB is below the 20.00 GB reserve and only 1 segment(s) could be deleted, 1 protected as in-progress",
+                        "Protected":  [
+                                          "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  1,
+                        "Deleted":  1,
+                        "Failed":  0,
+                        "FreeGBBefore":  1,
+                        "FreeGBAfter":  1.0000009536743164,
+                        "ReserveGB":  20,
+                        "TargetGB":  20,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+                                          {
+                                              "Path":  "archive/Front_Entrance/Front_Entrance_20261020_060000+0300.mkv",
+                                              "Bytes":  67108864,
+                                              "Reason":  "watermark",
+                                              "Detail":  "free 1.00 GB below reserve 20.00 GB, target 20.00 GB"
+                                          }
+                                      ],
+                        "Removed":  [
+                                        "archive/Front_Entrance/Front_Entrance_20261020_060000+0300.mkv"
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 1 deletion(s), free 1.00 GB is still below the 20.00 GB reserve",
+                        "Message":  "PRUNE BLOCKED: free 1.00 GB is below the 20.00 GB reserve and nothing deletable is left (1 candidate(s), 0 undeletable, 1 protected as in-progress). Recording continues. Lower ReserveGB, move RootPath to a larger volume, or free space by hand.",
+                        "Protected":  [
+                                          "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  1,
+                        "Deleted":  1,
+                        "Failed":  0,
+                        "FreeGBBefore":  1,
+                        "FreeGBAfter":  1,
+                        "ReserveGB":  20,
+                        "TargetGB":  20,
+                        "Alerts":  [
+                                       {
+                                           "Id":  121,
+                                           "Type":  "Error",
+                                           "Title":  "pruning is blocked - the disk is filling"
+                                       }
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  true,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  1,
+                                       "deleted":  1,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 0 deletion(s), free 1.00 GB is still below the 20.00 GB reserve",
+                        "Message":  "PRUNE BLOCKED: free 1.00 GB is below the 20.00 GB reserve and nothing deletable is left (0 candidate(s), 0 undeletable, 1 protected as in-progress). Recording continues. Lower ReserveGB, move RootPath to a larger volume, or free space by hand.",
+                        "Protected":  [
+                                          "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  1,
+                        "FreeGBAfter":  1,
+                        "ReserveGB":  20,
+                        "TargetGB":  20,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  true,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  1,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  false,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark not needed: free 1.00 GB is at or above the 0.00 GB reserve",
+                        "Message":  "",
+                        "Protected":  [
+                                          "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  1,
+                        "FreeGBAfter":  1,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: age rule off; watermark: nothing deletable left after 0 deletion(s), free 1.00 GB is still below the 20.00 GB reserve",
+                        "Message":  "PRUNE BLOCKED: free 1.00 GB is below the 20.00 GB reserve and nothing deletable is left (0 candidate(s), 0 undeletable, 1 protected as in-progress). Recording continues. Lower ReserveGB, move RootPath to a larger volume, or free space by hand.",
+                        "Protected":  [
+                                          "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  0,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  1,
+                        "FreeGBAfter":  1,
+                        "ReserveGB":  20,
+                        "TargetGB":  20,
+                        "Alerts":  [
+                                       {
+                                           "Id":  121,
+                                           "Type":  "Error",
+                                           "Title":  "pruning is blocked - the disk is filling"
+                                       }
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  false,
+                                      "BlockedAlerted":  true,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  1,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  1
+                                   }
+                    }
+                ]
+}

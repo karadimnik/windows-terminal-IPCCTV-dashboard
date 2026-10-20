@@ -33,7 +33,8 @@ type File struct {
 	Name    string
 	MTime   time.Time // UTC
 	Size    int64
-	Reparse bool // a symbolic link, junction, any reparse point, or not a regular file
+	Reparse bool      // a symbolic link, junction, any reparse point, or not a regular file
+	Created time.Time // creation time where the OS reports it (Windows); zero elsewhere
 }
 
 // Camera is one immediate subfolder of the root and its files.
@@ -276,12 +277,13 @@ func run(in Inputs, a actor) Decision {
 		d.Folders++
 		seen = append(seen, segs...)
 
-		// 4: protection. PowerShell protects the newest by NTFS creation time; here the stand-in
-		// for creation is the instant in the name (the time ffmpeg created the file). Every file
-		// tied at that instant is protected, and the strictly-older bound is the earliest write
-		// among them, so the choice can only protect more than PowerShell's. The newest by write
-		// time (the file ffmpeg holds open, archive.Scan's Newest) is protected as well.
-		named := nameNewest(segs)
+		// 4: protection. PowerShell protects the newest by NTFS creation time. Here the newest is
+		// the latest instant in the name (when ffmpeg created the file) and, where the OS reports
+		// creation time (Windows), also the latest created - they differ only for files copied or
+		// restored. Every file tied at either is protected and the strictly-older bound is the
+		// earliest write among them, so this protects at least what PowerShell protects. The
+		// newest by write time (the file ffmpeg holds open, archive.Scan's Newest) is protected too.
+		named := append(nameNewest(segs), createdNewest(segs)...)
 		if faults.protectOldest {
 			named = []*seg{segs[0]}
 			for _, s := range segs {
@@ -517,6 +519,21 @@ func nameNewest(segs []*seg) []*seg {
 		case len(out) == 0 || s.start.After(out[0].start):
 			out = []*seg{s}
 		case s.start.Equal(out[0].start):
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// createdNewest is every segment at the latest creation time, where it is known.
+func createdNewest(segs []*seg) []*seg {
+	var out []*seg
+	for _, s := range segs {
+		switch {
+		case s.f.Created.IsZero():
+		case len(out) == 0 || s.f.Created.After(out[0].f.Created):
+			out = []*seg{s}
+		case s.f.Created.Equal(out[0].f.Created):
 			out = append(out, s)
 		}
 	}

@@ -55,7 +55,7 @@ func Collect(root string, p osx.Platform, r Rules, now time.Time, dryRun bool) (
 				continue
 			}
 			cam.Files = append(cam.Files, File{
-				Name: c.Name(), MTime: ci.ModTime().UTC(), Size: ci.Size(),
+				Name: c.Name(), MTime: ci.ModTime().UTC(), Size: ci.Size(), Created: created(ci),
 				Reparse: archive.IsReparse(ci) || !ci.Mode().IsRegular(),
 			})
 		}

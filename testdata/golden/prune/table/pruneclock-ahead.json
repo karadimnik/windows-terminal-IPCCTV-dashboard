@@ -1,0 +1,178 @@
+{
+    "Name":  "pruneclock-ahead",
+    "Check":  "pruneclock",
+    "Expect":  [
+
+               ],
+    "Note":  "",
+    "Now":  "2026-10-20T06:00:00.0000000Z",
+    "SegmentSeconds":  900,
+    "StallFactor":  2.5,
+    "Container":  "mkv",
+    "Marker":  "claim",
+    "Claim":  {
+                  "Created":  true,
+                  "Problem":  ""
+              },
+    "Entries":  [
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261017_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-17T06:00:00.0000000Z",
+                        "MTime":  "2026-10-17T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261018_090000+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-18T06:00:00.0000000Z",
+                        "MTime":  "2026-10-18T06:00:00.0000000Z"
+                    },
+                    {
+                        "Path":  "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv",
+                        "Kind":  "file",
+                        "Bytes":  67108864,
+                        "CTime":  "2026-10-20T05:59:00.0000000Z",
+                        "MTime":  "2026-10-20T05:59:00.0000000Z"
+                    }
+                ],
+    "Steps":  [
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  2592000,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  1
+                                 }
+                  },
+                  {
+                      "Op":  "prune",
+                      "Dry":  false,
+                      "Free":  0,
+                      "Fixed":  false,
+                      "Shift":  2592000,
+                      "State":  "carry",
+                      "Config":  {
+                                     "ReserveGB":  0,
+                                     "PruneHysteresisGB":  0,
+                                     "MaxRetentionDays":  1,
+                                     "MaxAgePruneFraction":  1
+                                 }
+                  }
+              ],
+    "Results":  [
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "the wall clock 2026-11-19 08:00:00 is 2592060 s ahead of the newest segment archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv (written 2026-10-20 08:59:00), more than the 2250 s stall threshold - the clock jumped or nothing is recording",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: refused before the first deletion - the wall clock 2026-11-19 08:00:00 is 2592060 s ahead of the newest segment archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv (written 2026-10-20 08:59:00), more than the 2250 s stall threshold - the clock jumped or nothing is recording",
+                        "Message":  "PRUNE REFUSED: the wall clock 2026-11-19 08:00:00 is 2592060 s ahead of the newest segment archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv (written 2026-10-20 08:59:00), more than the 2250 s stall threshold - the clock jumped or nothing is recording. Nothing deleted this run; recording continues.",
+                        "Protected":  [
+                                          "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  2,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  true,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  1,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  0
+                                   }
+                    },
+                    {
+                        "Op":  "prune",
+                        "Dry":  false,
+                        "Deletions":  [
+
+                                      ],
+                        "Removed":  [
+
+                                    ],
+                        "Changed":  0,
+                        "Blocked":  true,
+                        "RootRefusal":  "",
+                        "ClockRefusal":  "the wall clock 2026-11-19 08:00:00 is 2592060 s ahead of the newest segment archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv (written 2026-10-20 08:59:00), more than the 2250 s stall threshold - the clock jumped or nothing is recording",
+                        "AgeBreaker":  "",
+                        "StopLine":  "prune stop: refused before the first deletion - the wall clock 2026-11-19 08:00:00 is 2592060 s ahead of the newest segment archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv (written 2026-10-20 08:59:00), more than the 2250 s stall threshold - the clock jumped or nothing is recording",
+                        "Message":  "PRUNE REFUSED: the wall clock 2026-11-19 08:00:00 is 2592060 s ahead of the newest segment archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv (written 2026-10-20 08:59:00), more than the 2250 s stall threshold - the clock jumped or nothing is recording. Nothing deleted this run; recording continues.",
+                        "Protected":  [
+                                          "archive/Front_Entrance/Front_Entrance_20261020_085900+0300.mkv"
+                                      ],
+                        "Rejected":  [
+
+                                     ],
+                        "Foreign":  [
+
+                                    ],
+                        "Candidates":  2,
+                        "Deleted":  0,
+                        "Failed":  0,
+                        "FreeGBBefore":  0,
+                        "FreeGBAfter":  0,
+                        "ReserveGB":  0,
+                        "TargetGB":  0,
+                        "Alerts":  [
+
+                                   ],
+                        "State":  {
+                                      "RefusalAlerted":  false,
+                                      "ClockRefused":  true,
+                                      "BlockedAlerted":  false,
+                                      "AgeBreakerTripped":  false
+                                  },
+                        "Logged":  {
+                                       "refusal":  0,
+                                       "clockRefused":  0,
+                                       "clockResumed":  0,
+                                       "held":  0,
+                                       "breakerReset":  0,
+                                       "blocked":  0,
+                                       "deleted":  0,
+                                       "summary":  0,
+                                       "stop":  0
+                                   }
+                    }
+                ]
+}
