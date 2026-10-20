@@ -30,8 +30,12 @@ type ConfigSource interface{ Config() (config.Config, error); Cameras() ([]confi
 type RelayAPI interface{ Ready(ctx) (relay.ReadySet, error); WaitStarted(ctx, relay.ReadinessPolicy, <-chan struct{}) (relay.ReadySet, bool) } // *relay.API
 type RootScanner interface{ Scanner; ScanRoot(root string, now time.Time) (ArchiveScan, error) } // ArchiveScanner
 type Pruner interface{ Claim(now) (archive.ClaimResult, error); Run(now, *prune.State) (prune.Result, error) } // ArchivePruner
-type InstanceLock interface{ Acquire() (release func(), owner string, err error) } // MemoryLock until the OS lock (W8)
-type ProcessScope interface{ Open(ffmpeg.Starter) (ffmpeg.Starter, error); Close() error } // NoScope until W8
+type InstanceLock interface{ Acquire() (release func(), owner string, err error) } // OSLock in production, MemoryLock in tests
+type ProcessScope interface{ Open(ffmpeg.Starter) (ffmpeg.Starter, error); Close() error } // NoScope for tests
+func NewProduction(SupervisorDeps, root string) *Supervisor  // W8: Lock = OSLock{<root>/_state/supervisor.lock}, Scope = &OSScope{StateDir}
+type OSLock struct{ Path string }                            // osx.AcquireInstanceLock; the owner is named on refusal
+type OSScope struct{ StateDir; Log; Inspector osx.Inspector; StopGrace } // Open: osx.Reap then osx.NewScope; Close: Stop + Close
+type ScopedStarter struct{ Scope *osx.Scope }               // ffmpeg.Starter inside the scope (here because ffmpeg imports osx)
 type EventRing  // logx.Sink: wire it into the process logger; NewEventRing(); Newest(n) []status.Event
 func FileChildLogs(maxBytes int64, red *logx.Redactor) func(component, path string) *slog.Logger
 ```
@@ -107,7 +111,7 @@ is blocked (goroutine dump), so a woken goroutine acts at the virtual time it wa
   used 21 for "the loop threw").
 - The final rows keep LastPid and the counters (PowerShell keeps the entries); NextStartAt is null after the stop.
 - Not done here: the ffmpeg version check (it spawns a process outside the starter), `cli` Actions for start and stop
-  (W9, with the control API), the OS lock and process scope (W8). `relay.ExitMessage` still truncates the seconds.
+  (W9, with the control API). The OS lock and process scope are wired by `NewProduction` (W8). `relay.ExitMessage` still truncates the seconds.
 
 # Manager (W7a: the child lifecycle manager)
 
