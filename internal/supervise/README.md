@@ -13,7 +13,7 @@ func (*Supervisor) Run(ctx) (StopReport, error) // returns after the ordered sto
 func (*Supervisor) Stop(kind string) StopReport // requested | interrupted | unexpected; waits for the stop
 func (*Supervisor) Done() <-chan struct{}
 type StopReport struct{ Kind, Reason string; Survivors []int; Final bool }
-func ExitCode(err error) int                    // 0 clean, 20 ErrAnotherSupervisor, 21 *ConfigFault, 1 else (ErrUnexpectedStop)
+func ExitCode(err error) int                    // 0 clean, 20 ErrAnotherSupervisor (lock held), 21 *ConfigFault, 1 else (ErrUnexpectedStop, a lock I/O or permission fault)
 type AnotherSupervisorError struct{ Owner string } // errors.Is(err, ErrAnotherSupervisor); the message names the owner
 type ConfigFault struct{ Err error }
 
@@ -85,6 +85,7 @@ func FileChildLogs(maxBytes int64, red *logx.Redactor) func(component, path stri
 | Survivor reported (pid, DID NOT STOP line), the rest still stopped | G7 | `TestSupervisorReportsSurvivor` |
 | Panic anywhere: unexpected + LastUnexpectedStop{DetectedBy: supervisor}, ErrUnexpectedStop | R:4126-4154, G6 | `TestSupervisorPanicIsUnexpected` |
 | Exit 20 (lock or live heartbeat, owner named), 21, lock released on every path | G8, IS 1.5 | `TestSupervisorLockPaths` |
+| A lock fault that is not `ErrHeld` (I/O, permission) is exit 1 (restartable), `ErrHeld` stays 20 | W9a | `TestSupervisorLockErrorExitCodes` |
 | D19: LastUnexpectedStop (At byte for byte) and LastWindowClose carried across runs | IS 1.6 F1 | `TestSupervisorCarryForwardAcrossRuns` |
 | Key sets equal the golden PowerShell documents (live off = master's; live on; stopped; unexpected) | IS 1.2, `livecfg` | `TestSupervisorLiveOffKeySetEqualsMaster`, `TestSupervisorOrderedStop`, `TestSupervisorPanicIsUnexpected` |
 | Events: own INFO+ records, newest first, StatusEventCount, log stamp, redacted; whole document redacted | IS 1.3, 1.1 | `TestEventRingParsesRecords`, `TestSupervisorEventsAndRedaction` |

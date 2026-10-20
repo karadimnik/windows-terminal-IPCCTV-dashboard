@@ -30,7 +30,8 @@ const (
 )
 
 // Exit codes for cmd (IS 1.5, brief): 0 clean stop, 20 another supervisor, 21 configuration fault,
-// 1 anything else (an unexpected stop included, so the host restarts it).
+// 1 anything else (an unexpected stop or a lock that cannot be taken for an I/O or permission
+// reason included, so the host restarts it within its budget).
 const (
 	ExitOK                = 0
 	ExitFailure           = 1
@@ -293,6 +294,12 @@ func (s *Supervisor) Run(ctx context.Context) (StopReport, error) {
 	}
 
 	release, owner, err := s.d.Lock.Acquire()
+	if err != nil && !lockHeld(err) {
+		// an I/O or permission fault, not a holder: exit 1 so the host retries within its budget
+		s.log.Error(fmt.Sprintf("the supervisor lock cannot be taken: %v", err),
+			logx.Action("supervisor.start"), logx.Result(logx.ResultFail), logx.Err(err))
+		return StopReport{}, fmt.Errorf("the supervisor lock cannot be taken: %w", err)
+	}
 	if err != nil {
 		s.log.Error(fmt.Sprintf("A supervisor is already running: %s. Refusing to start a second one - use stop first.", owner),
 			logx.Action("supervisor.start"), logx.Result(logx.ResultRefused), logx.Err(err))
@@ -353,6 +360,12 @@ func (s *Supervisor) Run(ctx context.Context) (StopReport, error) {
 		return rep, fmt.Errorf("%w: %s", ErrUnexpectedStop, fault)
 	}
 	return rep, nil
+}
+
+// lockHeld: the lock refused because another holder has it (exit 20), as opposed to a fault
+// taking it (exit 1).
+func lockHeld(err error) bool {
+	return errors.Is(err, osx.ErrHeld) || errors.Is(err, ErrLockHeld)
 }
 
 // setup validates the configuration and fills the defaults that depend on it.

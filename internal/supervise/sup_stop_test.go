@@ -14,6 +14,7 @@ import (
 
 	"holocron/internal/archive"
 	"holocron/internal/config"
+	"holocron/internal/osx"
 	"holocron/internal/prune"
 	"holocron/internal/status"
 )
@@ -354,4 +355,40 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+type errLock struct{ err error }
+
+func (l errLock) Acquire() (func(), string, error) { return nil, "unknown", l.err }
+
+// A lock that is held is exit 20 (do not restart); a lock that cannot be taken for any other reason
+// (I/O, permission) is exit 1, which the host restarts within its budget.
+func TestSupervisorLockErrorExitCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"held (osx)", &osx.HeldError{Path: "x", Owner: osx.LockOwner{Pid: 4242}}, ExitAnotherSupervisor},
+		{"held (memory)", ErrLockHeld, ExitAnotherSupervisor},
+		{"permission", fmt.Errorf("open supervisor.lock: %w", os.ErrPermission), ExitFailure},
+		{"io", errors.New("lock: input/output error"), ExitFailure},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newSRig(t, oneCamera("Front"), nil)
+			r.deps.Lock = errLock{c.err}
+			r.build()
+			_, err := r.sup.Run(context.Background())
+			if got := ExitCode(err); got != c.code {
+				t.Fatalf("exit %d, want %d (%v)", got, c.code, err)
+			}
+			if c.code == ExitFailure && (errors.Is(err, ErrAnotherSupervisor) || !errors.Is(err, c.err)) {
+				t.Errorf("a lock fault reads as another supervisor or loses its cause: %v", err)
+			}
+			if len(r.st.started("")) != 0 {
+				t.Error("children started")
+			}
+		})
+	}
 }
