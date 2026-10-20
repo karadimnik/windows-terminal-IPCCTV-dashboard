@@ -259,3 +259,11 @@ func TestCamerasValidateAndCollisions(t *testing.T) {
 		}
 	}
 }
+
+// A '%' in a camera NAME stays valid: the ffmpeg package doubles it in the output pattern.
+func TestCameraNameMayContainPercent(t *testing.T) {
+	c, err := LoadCameras(writeFile(t, `[{"Name":"Cam%Y","IP":"192.0.2.12","Quality":"stream1"}]`))
+	if err != nil || len(c.List) != 1 {
+		t.Fatalf("%v %+v", err, c)
+	}
+}

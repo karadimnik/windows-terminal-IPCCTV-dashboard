@@ -46,7 +46,9 @@ Naming, scanning and root-safety rules. The pruner planner/executor (W3) builds 
   satisfied it). A copied/moved archive is re-claimed by `ClaimRoot` when it holds only recorder files. The marker is written atomically
   (temp in `_state`, `Sync`, owner-only via `Platform.SetOwnerOnly`, rename); a failed owner-only restriction fails the claim (fail closed).
 - **`%` in a camera name**: `FormatSegmentPattern` doubles it so strftime writes it literally (PowerShell splices the offset into the prefix).
-  UNVERIFIED against a real ffmpeg; the ffmpeg-runner task must check it. Existing PowerShell-written files for such a camera stay "foreign".
+  Verified by W5 with a real ffmpeg 8.x (Windows) and a static Linux build: `%%` in the FILE NAME part is written literally (`Cam%Y_...`).
+  `-strftime 1` also expands the directory part, so the recorder MUST build the output pattern with `ffmpeg.SegmentPattern(root, safe, ext)`
+  and never `archive.FormatSegmentPattern` plus `filepath.Join`. Existing PowerShell-written files for such a camera stay "foreign".
 - `CheckRoot`: lexical checks use the `osx.Platform`'s syntax (`Name()`), so the Windows table is tested on Linux; symlink/reparse and
   symlinked-ancestor checks run only when the platform is the host. A root that does not exist yet passes (claiming checks existence).
   A folder inside a protected one is accepted (the marker decides), as in PowerShell.

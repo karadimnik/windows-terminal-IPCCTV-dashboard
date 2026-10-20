@@ -211,6 +211,7 @@ func TestValidationClasses(t *testing.T) {
 		{"segment seconds fraction", `{"SegmentSeconds":1.5}`, "SegmentSeconds", "whole number"},
 		{"stall factor 1", `{"StallFactor":1}`, "StallFactor", "greater than 1"},
 		{"stall factor low", `{"StallFactor":0.5}`, "StallFactor", "greater than 1"},
+		{"root with percent", `{"RootPath":"/srv/Cam%Y"}`, "RootPath", "must not contain '%'"},
 		{"root empty", `{"RootPath":""}`, "RootPath", "must not be empty"},
 		{"root blank", `{"RootPath":"   "}`, "RootPath", "must not be empty"},
 		{"root number", `{"RootPath":5}`, "RootPath", "must be a string"},
@@ -274,7 +275,7 @@ func TestValidationClasses(t *testing.T) {
 	}
 
 	good := []string{
-		`{"MaxAgePruneFraction":1.0}`, `{"MaxAgePruneFraction":0.5}`, `{"MaxAgePruneFraction":0.01}`, `{"MaxRetentionDays":null}`, `{"StallFactor":1.01}`,
+		`{"RootPath":"/srv/cams"}`, `{"MaxAgePruneFraction":1.0}`, `{"MaxAgePruneFraction":0.5}`, `{"MaxAgePruneFraction":0.01}`, `{"MaxRetentionDays":null}`, `{"StallFactor":1.01}`,
 		`{"LiveViewEnabled":true,"LiveUdpAddress":"0.0.0.0:8189","LiveAdvertiseHosts":["192.168.1.50","10.0.0.2"]}`,
 		`{"LiveAdvertiseHosts":null}`, `{"LiveCloseAfterSeconds":3600}`, `{"RtspTransport":"udp"}`,
 		`{"Container":"fmp4"}`, `{"ContainerProfiles":{"x":{"Extension":".ts","SegmentFormat":"mpegts"}},"Container":"X"}`,

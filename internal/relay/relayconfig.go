@@ -31,11 +31,11 @@ func RelayConfig(in RelayInputs) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	rtsp, err := hostPort(in.Config.RelayBase)
+	rtsp, err := config.HostPort(in.Config.RelayBase)
 	if err != nil {
 		return nil, err
 	}
-	api, err := hostPort(in.Config.RelayApiBase)
+	api, err := config.HostPort(in.Config.RelayApiBase)
 	if err != nil {
 		return nil, err
 	}
@@ -66,20 +66,10 @@ func RelayConfig(in RelayInputs) ([]byte, error) {
 }
 
 var (
-	schemeRE   = regexp.MustCompile(`(?i)^[a-z][a-z0-9+.\-]*://`)
 	scalarRE   = regexp.MustCompile(`^[A-Za-z0-9_.:\[\]\-]+$`)
 	userRE     = regexp.MustCompile(`^[A-Za-z0-9_.\-]+$`)
 	newlinesRE = regexp.MustCompile("\r\n|\n")
 )
-
-// hostPort is Get-CamRelayHostPort: the URL without its scheme and trailing slashes.
-func hostPort(url string) (string, error) {
-	text := strings.TrimRight(schemeRE.ReplaceAllString(url, ""), "/")
-	if strings.TrimSpace(text) == "" {
-		return "", fmt.Errorf("'%s' has no host:port to give MediaMTX.", url)
-	}
-	return text, nil
-}
 
 // crlf is the normalisation PowerShell applies last: every CRLF or LF becomes CRLF.
 func crlf(s string) string { return newlinesRE.ReplaceAllString(s, "\r\n") }

@@ -19,8 +19,8 @@ var (
 	sensitiveKeyRE = regexp.MustCompile(`(?i)password|passwd|secret|token|authorization|cookie|hash|apikey|api_key`)
 )
 
-// Redactor masks secrets. It masks registered secrets (raw, URL-query-escaped and path-escaped
-// forms; values shorter than 3 chars are ignored), then scheme://user:pass@ userinfo, and it blanks
+// Redactor masks secrets. It masks registered secrets (raw, URL-query-escaped, path-escaped and
+// userinfo-escaped forms; values shorter than 3 chars are ignored), then scheme://user:pass@ userinfo, and it blanks
 // the value of attributes whose key looks sensitive. Safe for concurrent use.
 type Redactor struct {
 	mu       sync.RWMutex
@@ -38,7 +38,9 @@ func (r *Redactor) Register(secret string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, f := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret)} {
+	// url.UserPassword escapes @ : / differently from QueryEscape and PathEscape; the "u:" prefix is dropped
+	userinfo := strings.TrimPrefix(url.UserPassword("u", secret).String(), "u:")
+	for _, f := range []string{secret, url.QueryEscape(secret), url.PathEscape(secret), userinfo} {
 		r.secrets[f] = struct{}{}
 	}
 	all := make([]string, 0, len(r.secrets))

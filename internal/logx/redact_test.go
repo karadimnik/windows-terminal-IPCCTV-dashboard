@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -129,6 +130,37 @@ func TestRedactorUnit(t *testing.T) {
 	}
 	if got := r.attr(slog.Int("tokens_total", 3)); got.Value.String() != "***" {
 		t.Error("sensitive key must be masked whatever the value kind")
+	}
+}
+
+// A secret with every awkward character is masked in its raw, query, path and userinfo forms. The
+// userinfo form differs from the other three, so a redactor knowing only those leaks it (positive control).
+func TestRedactorMasksUserinfoEscapedForm(t *testing.T) {
+	const secret = "a@b:c/d%e f+g&h#i"
+	userinfo := strings.TrimPrefix(url.UserPassword("u", secret).String(), "u:")
+	forms := map[string]string{
+		"raw":      secret,
+		"query":    url.QueryEscape(secret),
+		"path":     url.PathEscape(secret),
+		"userinfo": userinfo,
+	}
+	for name, f := range forms {
+		if name != "userinfo" && f == userinfo {
+			t.Fatalf("userinfo form equals the %s form: the test proves nothing", name)
+		}
+	}
+
+	old := strings.NewReplacer(forms["raw"], mask, forms["query"], mask, forms["path"], mask)
+	if got := old.Replace("log " + userinfo); !strings.Contains(got, userinfo) {
+		t.Fatalf("positive control: the old form set should leak the userinfo form, got %q", got)
+	}
+
+	r := NewRedactor()
+	r.Register(secret)
+	for name, f := range forms {
+		if got := r.String("x " + f + " y"); got != "x *** y" {
+			t.Errorf("%s form: got %q", name, got)
+		}
 	}
 }
 

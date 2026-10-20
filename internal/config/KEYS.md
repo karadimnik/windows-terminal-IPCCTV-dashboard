@@ -11,7 +11,7 @@ Types are strict: a JSON string is never accepted for a boolean or a number (Pow
 
 | Key | Default | Rule | Why kept |
 |---|---|---|---|
-| RootPath | `E:\cameras` (`/srv/cameras`) | non-blank string | archive root |
+| RootPath | `E:\cameras` (`/srv/cameras`) | non-blank string without `%` | archive root |
 | FfmpegPath | `C:\ffmpeg\bin\ffmpeg.exe` (`ffmpeg`) | string; empty = look up on PATH | recorder |
 | FfprobePath | `C:\ffmpeg\bin\ffprobe.exe` (`ffprobe`) | string | kept for diagnostics; cheap |
 | SegmentSeconds | 900 | whole number >= 1 | segment length |

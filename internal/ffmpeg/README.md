@@ -75,6 +75,8 @@ func RemoveEmptySegment(dir, container string, o EmptyOptions) EmptyResult
   file name; `archive.FormatSegmentPattern` already doubles it in the file name. With the doubling ffmpeg 8.x and the
   master build write `Cam%Y_20261020_....mkv` in folder `Cam%Y`. The PowerShell product has this defect for a root or a camera
   folder containing `%` (it would create the expanded folder, or fail when it does not exist).
+- **First segment after a (re)connect over RTSP**: it contains media starting 2 to 3 s before the clock instant in its name
+  (SP1 and W5); the name stays correct for archive and pruner purposes.
 - **`RemoveEmptySegment`** removes every regular file of zero length in the camera folder that passes the pruner's file gate:
   not a link or reparse point, the folder is a real directory directly under `Root` (when given) and does not start with `_`,
   and the name is a strict segment name of the folder's camera in the container (`archive.Matcher.IsSegmentOf`). Anything
