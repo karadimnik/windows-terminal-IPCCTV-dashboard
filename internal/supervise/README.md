@@ -112,7 +112,7 @@ is blocked (goroutine dump), so a woken goroutine acts at the virtual time it wa
   used 21 for "the loop threw").
 - The final rows keep LastPid and the counters (PowerShell keeps the entries); NextStartAt is null after the stop.
 - Not done here: the ffmpeg version check (it spawns a process outside the starter), `cli` Actions for start and stop
-  (W9, with the control API). The OS lock and process scope are wired by `NewProduction` (W8). `relay.ExitMessage` still truncates the seconds.
+  (W9, with the control API). The OS lock and process scope are wired by `NewProduction` (W8).
 
 # Manager (W7a: the child lifecycle manager)
 

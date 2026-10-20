@@ -2,6 +2,7 @@ package relay
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -20,9 +21,10 @@ type RestartPolicy struct {
 	KillWait     time.Duration
 }
 
-// ExitMessage is the LastError text after the relay exits.
+// ExitMessage is the LastError text after the relay exits. The seconds round half to even, like
+// PowerShell's [int] and ffmpeg.ExitInfo.Message.
 func ExitMessage(code int, ranFor time.Duration) string {
-	return fmt.Sprintf("mediamtx exited with code %d after %ds", code, int(ranFor.Seconds()))
+	return fmt.Sprintf("mediamtx exited with code %d after %ds", code, int64(math.RoundToEven(ranFor.Seconds())))
 }
 
 // ChildSpec is how to start one MediaMTX child; starting it belongs to the supervisor.

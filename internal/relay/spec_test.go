@@ -124,7 +124,18 @@ func TestReadinessPolicy(t *testing.T) {
 }
 
 func TestExitMessage(t *testing.T) {
-	if got := ExitMessage(1, 7400*time.Millisecond); got != "mediamtx exited with code 1 after 7s" {
-		t.Error(got)
+	for _, c := range []struct {
+		ran  time.Duration
+		want string
+	}{
+		{7400 * time.Millisecond, "after 7s"},
+		{7600 * time.Millisecond, "after 8s"}, // truncation would say 7
+		{2500 * time.Millisecond, "after 2s"}, // half to even
+		{3500 * time.Millisecond, "after 4s"},
+		{0, "after 0s"},
+	} {
+		if got := ExitMessage(1, c.ran); got != "mediamtx exited with code 1 "+c.want {
+			t.Errorf("%v: %s", c.ran, got)
+		}
 	}
 }
