@@ -27,7 +27,7 @@ Names are `[a-z0-9._-]{1,64}`; values are 1 to 4096 bytes of UTF-8. Errors: `Err
 `ErrNoKey`. No error text carries a value. Every successful `Get` and `Put` registers the value with
 `Config.Redactor`, so a secret that was read is masked in every later log record.
 
-## Config keys (the `secrets` section; the config package does not read them yet)
+## Config keys (the `secrets` section; read by the config package)
 
 | Key | Default | Meaning |
 |---|---|---|
