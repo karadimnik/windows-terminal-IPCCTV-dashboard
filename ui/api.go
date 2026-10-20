@@ -179,7 +179,7 @@ func (a *API) readStatus() (map[string]any, StatusFileInfo, error) {
 	info.ModifiedAt = stat.ModTime().Format(time.RFC3339)
 	info.AgeSeconds = roundTo(time.Since(stat.ModTime()).Seconds(), 1)
 
-	raw, err := os.ReadFile(a.cfg.StatusFile)
+	raw, err := readStatusFile(a.cfg.StatusFile)
 	if err != nil {
 		return nil, info, fmt.Errorf("read status file: %w", err)
 	}
