@@ -286,7 +286,7 @@ func TestHostWindowCloseStopsOnceWithoutRestart(t *testing.T) {
 				t.Error("the supervisor was killed although it stopped in time")
 			}
 			d := h.doc()
-			if d.StopKind != status.StopKindWindowClosed || d.State != status.StateStopped || d.LastWindowClose == nil || !strings.Contains(d.LastWindowClose.Reason, string(r)) {
+			if d.StopKind != status.StopKindWindowClosed || d.State != status.StateStopped || d.LastWindowClose == nil || !strings.Contains(d.LastWindowClose.Reason, string(r)) || d.LastWindowClose.DetectedBy != "nvr host" {
 				t.Fatalf("document %s/%s %+v", d.State, d.StopKind, d.LastWindowClose)
 			}
 			if got, want := h.validDoc(), goldenKeys(t, "patched-windowclose-over-running.json"); !reflect.DeepEqual(got, want) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"time"
 
 	"holocron/internal/config"
@@ -61,19 +62,31 @@ type DownResult struct {
 	Via           string // "api", "stop-file" or "" (nothing was running)
 	APIError      string
 	Report        *ctlapi.StopReport
+	Reaped        []osx.ReapVerdict // orphans found with no supervisor running, each killed or left alone
 	Elapsed       time.Duration
 }
 
 // OK: nothing of holocron is left for this root.
 func (r DownResult) OK() bool { return r.After.Count() == 0 }
 
-// Down is the orderly stop of everything for p, PROVED (G9): census before; the stop through the
+// Down is the orderly stop of everything for p, PROVED (G9): census before; with no supervisor
+// running, the provable orphans in the registry are reaped (ReapOrphans) and reported; the stop through the
 // control API (POST /v1/stop), or the stop-request file when the API is unreachable; then wait up
 // to StopTimeoutSeconds until the census is empty. It kills nothing (G7); survivors are reported.
 // With nothing running it removes a leftover stop request and succeeds (idempotent).
 func Down(ctx context.Context, p Paths, cfg config.Config, dial func(root string) (Stopper, error), in osx.Inspector) DownResult {
 	start := time.Now()
-	res := DownResult{Before: TakeCensus(p, in, cfg.StatusIntervalSeconds)}
+	var stuck []osx.ChildEntry
+	census := func() Census {
+		c := TakeCensus(p, in, cfg.StatusIntervalSeconds)
+		for _, e := range stuck {
+			if alive, _ := osx.Verify(e, in, runtime.GOOS); alive {
+				c.Children = append(c.Children, e)
+			}
+		}
+		return c
+	}
+	res := DownResult{Before: census()}
 	if res.Before.Count() == 0 {
 		_ = os.Remove(p.StopFile())
 		res.After = res.Before
@@ -83,6 +96,25 @@ func Down(ctx context.Context, p Paths, cfg config.Config, dial func(root string
 	timeout := time.Duration(cfg.StopTimeoutSeconds * float64(time.Second))
 	if timeout <= 0 {
 		timeout = 30 * time.Second
+	}
+	if res.Before.Supervisor == 0 && len(res.Before.Children) > 0 {
+		// no supervisor holds the lock: what the registry still lists is an orphan or a stranger
+		reaped, err := ReapOrphans(p, in, nil, res.Before.Host == nil)
+		res.Reaped = reaped
+		for _, v := range reaped { // the reap empties the registry: an orphan it could not kill must still count
+			if !v.Killed {
+				stuck = append(stuck, v.Entry)
+			}
+		}
+		if err != nil {
+			res.APIError = "orphan reap: " + err.Error()
+		}
+		if after := census(); after.Count() == 0 {
+			_ = os.Remove(p.StopFile())
+			res.After, res.Via = after, "reap"
+			res.Elapsed = time.Since(start)
+			return res
+		}
 	}
 	if res.Before.Supervisor != 0 {
 		var err error
@@ -108,7 +140,7 @@ func Down(ctx context.Context, p Paths, cfg config.Config, dial func(root string
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		res.After = TakeCensus(p, in, cfg.StatusIntervalSeconds)
+		res.After = census()
 		if res.After.Count() == 0 || time.Now().After(deadline) || ctx.Err() != nil {
 			break
 		}

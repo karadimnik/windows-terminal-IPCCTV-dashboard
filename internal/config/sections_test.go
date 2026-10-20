@@ -115,3 +115,28 @@ func TestAlertsAndSecretsValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestWebSection(t *testing.T) {
+	if w := Defaults(linP).Web; w != (Web{Enabled: true, Listen: "127.0.0.1:8787"}) {
+		t.Errorf("defaults %+v", w)
+	}
+	c, warns, err := Parse([]byte(`{"web":{"enabled":false,"listen":"127.0.0.1:18820","tlsListen":"192.168.1.50:8443","tlsDir":"/t","authDir":"/a","x":1}}`), linP)
+	if err != nil || len(warns) != 1 || c.Web != (Web{Enabled: false, Listen: "127.0.0.1:18820", TLSListen: "192.168.1.50:8443", TLSDir: "/t", AuthDir: "/a"}) {
+		t.Errorf("%+v %v %v", c.Web, warns, err)
+	}
+	for _, bad := range []struct{ doc, path, text string }{
+		{`{"web":[]}`, "web", "object"},
+		{`{"web":{"enabled":"yes"}}`, "web.enabled", "boolean"},
+		{`{"web":{"listen":"8787"}}`, "web.listen", "host:port"},
+		{`{"web":{"listen":"127.0.0.1:0"}}`, "web.listen", "1 to 65535"},
+		{`{"web":{"listen":"127.0.0.1:70000"}}`, "web.listen", "1 to 65535"},
+		{`{"web":{"listen":7}}`, "web.listen", "string"},
+		{`{"web":{"tlsListen":"192.168.1.50"}}`, "web.tlsListen", "IPv4:port"},
+	} {
+		_, _, err := Parse([]byte(bad.doc), linP)
+		var ve *ValidationError
+		if !errors.As(err, &ve) || ve.Problems[0].Path != bad.path || !strings.Contains(ve.Problems[0].Message, bad.text) {
+			t.Errorf("%s: %v", bad.doc, err)
+		}
+	}
+}

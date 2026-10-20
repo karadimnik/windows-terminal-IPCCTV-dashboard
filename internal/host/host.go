@@ -163,6 +163,7 @@ type Deps struct {
 	Console    Console                          // default OSConsole{}
 	Mode       Mode
 	Location   *time.Location // status.json timestamps; default time.Local
+	Aux        []Aux          // auxiliary children (the web role), started after the supervisor's first spawn
 }
 
 // Host runs the supervisor as a child process and restarts it in place after an unexpected stop
@@ -174,6 +175,8 @@ type Host struct {
 	log *slog.Logger
 
 	statusPath, stopPath string
+
+	aux *auxSet // set by Run
 }
 
 // New makes a host; nothing runs until Run.
@@ -300,6 +303,10 @@ func (h *Host) Run(ctx context.Context) (Result, error) {
 		res.Lives++
 		startedAt := h.clk.Mono()
 		proc, err := h.d.Spawner.Spawn(ctx)
+		if res.Lives == 1 && len(h.d.Aux) > 0 {
+			h.aux = h.startAux(ctx)
+			defer func() { h.aux.finish(h) }()
+		}
 		var cls classification
 		var pid int
 		if err != nil {
@@ -474,12 +481,13 @@ func (h *Host) recordUnexpected(pid int, reason string) {
 	h.log.Info("recorded StopKind 'unexpected' in status.json (the supervisor could not)", logx.Action("host.status"), logx.Actor("host"), logx.Target(h.statusPath), logx.Result(logx.ResultOK), logx.PID(pid))
 }
 
-// recordWindowClosed is Set-CamStatusWindowClosed. DetectedBy is the schema's only allowed value.
+// recordWindowClosed is Set-CamStatusWindowClosed. The host detects the close itself (no warden
+// process), so DetectedBy is "nvr host" (the schema accepts it besides the PowerShell "nvr warden").
 func (h *Host) recordWindowClosed(pid int, reason string) {
 	doc := h.baseDoc(pid)
 	at := h.now()
 	doc.State, doc.StopKind, doc.UpdatedAt = status.StateStopped, status.StopKindWindowClosed, at
-	doc.LastWindowClose = &status.WindowClose{At: at, Reason: reason, WindowTitle: h.cfg.WindowTitle, DetectedBy: "nvr warden"}
+	doc.LastWindowClose = &status.WindowClose{At: at, Reason: reason, WindowTitle: h.cfg.WindowTitle, DetectedBy: "nvr host"}
 	if err := h.d.Status.Write(doc); err != nil {
 		h.log.Error("could not record the window close in status.json: "+err.Error(), logx.Action("host.status"), logx.Actor("host"), logx.Target(h.statusPath), logx.Result(logx.ResultFail), logx.Err(err))
 		return
@@ -502,6 +510,7 @@ func (h *Host) closeKind(r osx.Reason) bool {
 // takes its children); otherwise (service stop, Ctrl+C, ctx) it waits StopTimeout and NEVER kills
 // the supervisor (G7): it reports it.
 func (h *Host) orderedStop(ctx context.Context, proc Proc, waitDone <-chan exitInfo, r osx.Reason, res Result) (Result, error) {
+	h.aux.requestStop() // the auxiliary children end alongside the supervisor
 	closed := h.closeKind(r)
 	budget := h.cfg.StopTimeout
 	if closed {

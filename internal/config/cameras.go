@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"holocron/internal/archive"
@@ -360,22 +361,37 @@ func (c *Cameras) Validate() error {
 	return nil
 }
 
-// validateHost accepts an IP literal or a plausible hostname; not a reachability test.
+// validateHost accepts an IP literal or a plausible hostname, optionally followed by a port
+// (host:port, [v6]:port; IR 2: the PowerShell product lets IP carry one). Not a reachability test.
 func validateHost(value string) string {
 	v := strings.TrimSpace(value)
 	if v == "" {
-		return "an address is required - the camera's IP or hostname"
+		return "an address is required - the camera's IP or hostname, optionally with :port"
 	}
 	if net.ParseIP(v) != nil {
 		return ""
 	}
-	if strings.ContainsAny(v, `/\@: `) {
-		return "an address is the host only - no scheme, port, path or credentials"
+	if strings.ContainsAny(v, `/\@ `) {
+		return "an address is the host and an optional port only - no scheme, path or credentials"
 	}
-	if len(v) > 253 {
+	host := v
+	if strings.Contains(v, ":") {
+		h, port, err := net.SplitHostPort(v)
+		if err != nil {
+			return "an address with a colon must be host:port (an IPv6 address needs [brackets] before a port)"
+		}
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 || strings.TrimLeft(port, "0123456789") != "" {
+			return fmt.Sprintf("the port %q must be a number from 1 to 65535", port)
+		}
+		host = h
+		if net.ParseIP(host) != nil {
+			return ""
+		}
+	}
+	if len(host) > 253 {
 		return "a hostname may be at most 253 characters"
 	}
-	for _, label := range strings.Split(strings.TrimSuffix(v, "."), ".") {
+	for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
 		if !hostLabel.MatchString(label) {
 			return "not a valid IP address or hostname"
 		}

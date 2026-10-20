@@ -30,6 +30,7 @@ var EditableKeys = []string{
 	"alerts.push.enabled", "alerts.push.server", "alerts.push.topic", "alerts.push.tokenName",
 	"alerts.desktop.enabled", "alerts.eventlog.enabled",
 	"secrets.backend",
+	"web.enabled",
 }
 
 // CanonicalKey matches key against the allow-list (case-insensitive) and returns its spelling;
@@ -288,7 +289,7 @@ func EffectiveConfig(cfg config.Config) (map[string]any, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
-	for _, k := range []string{"Logging", "Alerts", "Secrets"} {
+	for _, k := range []string{"Logging", "Alerts", "Secrets", "Web"} {
 		if v, ok := m[k]; ok {
 			delete(m, k)
 			m[strings.ToLower(k)] = v

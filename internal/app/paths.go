@@ -29,6 +29,7 @@ func (p Paths) Logs() string       { return filepath.Join(p.Root, "_logs") }
 func (p Paths) StatusFile() string { return filepath.Join(p.State(), "status.json") }
 func (p Paths) StopFile() string   { return filepath.Join(p.State(), "stop.request") }
 func (p Paths) HostFile() string   { return filepath.Join(p.State(), "host.json") }
+func (p Paths) AuxFile() string    { return filepath.Join(p.State(), "aux.json") } // the host's own children (the web role)
 func (p Paths) LockFile() string   { return osx.LockPath(p.State()) }
 
 // DefaultConfigPath is holocron.config.json in the platform's configuration folder.

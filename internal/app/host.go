@@ -17,6 +17,7 @@ import (
 type HostOptions struct {
 	Options
 	Service bool     // --service (detached / OS service): every OS stop is "requested"
+	NoWeb   bool     // --no-web (up --only host): the web role is not started
 	Exe     string   // the holocron executable to re-run as the supervisor; default os.Executable()
 	SupArgs []string // global flags passed on to the supervisor (--root, --config, -v)
 }
@@ -50,6 +51,10 @@ func RunHost(ctx context.Context, o HostOptions) int {
 		return 1
 	}
 	defer scope.Close()
+	var aux []host.Aux
+	if cfg.Web.Enabled && !o.NoWeb {
+		aux = append(aux, webAux(p, scope, exe, o.SupArgs, hl))
+	}
 	removeRecord, err := WriteHostRecord(p, osx.OSInspector{})
 	if err != nil {
 		hl.Warn("host.json not written ("+err.Error()+"): `holocron down` cannot count the host", logx.Action("host.start"))
@@ -78,7 +83,7 @@ func RunHost(ctx context.Context, o HostOptions) int {
 	}
 	stop := time.Duration(cfg.StopTimeoutSeconds*float64(time.Second)) + 10*time.Second
 	h := host.New(host.Config{StateDir: p.State(), WindowTitle: "holocron up", StopTimeout: stop},
-		host.Deps{Spawner: sp, Alerts: hostAlerts{disp}, Log: hl, Mode: mode})
+		host.Deps{Spawner: sp, Alerts: hostAlerts{disp}, Log: hl, Mode: mode, Aux: aux})
 	res, err := h.Run(ctx)
 	if err != nil {
 		hl.Error("host: "+err.Error(), logx.Action("host.stop"), logx.Result(logx.ResultFail), logx.Err(err))

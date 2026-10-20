@@ -28,7 +28,7 @@ var commands []*command
 
 func init() {
 	commands = []*command{
-		{path: "up", usage: "[--detach] [--only host]", about: "start everything (attached: closing the terminal stops it; --detach: in the background, waits for an honest start)", action: "nvr.up", mutating: true, run: cmdUp},
+		{path: "up", usage: "[--detach] [--only host]", about: "start everything: host, supervisor, relay, live relay and the web app (attached: closing the terminal stops it; --detach: in the background, waits for an honest start; --only host: no web app)", action: "nvr.up", mutating: true, run: cmdUp},
 		{path: "down", about: "stop everything in order and prove it (exit 1 and the survivors if anything remains)", action: "nvr.down", mutating: true, run: cmdDown},
 		{path: "restart", usage: "[--detach] [--only host]", about: "down, then up", action: "nvr.restart", mutating: true, run: cmdRestart},
 		{path: "status", usage: "[--json]", about: "roles, pids, cameras, disk, prune, live view, alerts; exit 0 running, 1 not", action: "nvr.status", run: cmdStatus},
@@ -59,11 +59,11 @@ func init() {
 		{path: "version", about: "build and spec versions", action: "version.show", noRoot: true, run: cmdVersion},
 		{path: "help", about: "this list", action: "help.show", noRoot: true, run: func(ctx context.Context, e *env) error { printHelp(e.out); return nil }},
 
+		{path: "web", usage: "[-listen H:P] [-tls-listen IP:P] [-tls-dir D] [-auth-dir D] [-tls-readonly true|false] [-config FILE] [-print-ca] [-set-password USER] [-unlock USER] [-version]", about: "run the web app alone (normally started by up): login page, Live grid, Footage, Settings; camui's flags and config file all work", action: "web.serve", run: cmdWeb},
 		{path: "host", action: "role.host", role: true, run: cmdRoleHost},
 		{path: "supervisor", action: "role.supervisor", role: true, run: cmdRoleSupervisor},
 	}
 	for _, nb := range []struct{ path, usage, about, action string }{
-		{"web", "[--listen ...] [--tls-listen ...]", "run only the web role", "web.serve"},
 		{"open", "[camera]", "open the Live grid in the browser", "web.open"},
 		{"user add", "<name>", "add a login user", "user.add"},
 		{"user remove", "<name>", "remove a login user", "user.remove"},

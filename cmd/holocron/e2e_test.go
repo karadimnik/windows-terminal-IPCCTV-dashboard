@@ -5,10 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -22,9 +25,13 @@ import (
 
 // The end-to-end run (HOLOCRON_IT=1): the real holocron executable, a t.TempDir() root, two lavfi
 // cameras published into a throwaway MediaMTX (a copy of HOLOCRON_IT_MEDIAMTX) on loopback ports
-// 18740-18779 only, credentials through the two environment variables with fake values:
-// up --detach -> running with both cameras recording -> cam disable one -> log level supervisor
-// debug -> config set -> down with 0 survivors. Everything this test starts is recorded by pid and
+// 18740-18779 only, credentials through the two environment variables with fake values, the web
+// app on one free loopback port of 18820-18839:
+// up --detach (supervisor AND web) -> running with both cameras recording -> GET /api/status
+// matches `status` -> the page's record toggle (POST /api/cameras/<name>/record) stops and restarts
+// a camera through the control API -> the web child killed by pid comes back after about 5 s while
+// recording goes on -> cam disable one -> log level supervisor debug -> config set -> down with
+// 0 survivors (web included). Everything this test starts is recorded by pid and
 // stopped by pid in t.Cleanup.
 //
 //	HOLOCRON_IT=1 HOLOCRON_IT_FFMPEG=... HOLOCRON_IT_MEDIAMTX=... [HOLOCRON_IT_EXE=<built holocron>]
@@ -33,6 +40,8 @@ const (
 	itRelayPort = 18741
 	itAPIPort   = 18742
 	itSegment   = 10
+	itWebFirst  = 18820 // the web app takes the first free port of 18820-18839
+	itWebLast   = 18839
 )
 
 type itRig struct {
@@ -46,6 +55,8 @@ type itRig struct {
 	seen                 map[int]osx.ChildEntry // holocron's processes, recorded while it ran
 	inspector            osx.Inspector
 	firstStatus, stopDur time.Duration
+	webPort              int
+	webRestart           time.Duration
 }
 
 func exeName(n string) string {
@@ -88,6 +99,7 @@ func TestEndToEnd(t *testing.T) {
 		"HOLOCRON_LOG=", "WSLENV=")
 	t.Cleanup(r.cleanup)
 
+	r.webPort = freePort(t, itWebFirst, itWebLast)
 	r.writeConfig()
 	r.startCameras()
 
@@ -113,6 +125,9 @@ func TestEndToEnd(t *testing.T) {
 	r.record()
 	t.Logf("recording: cam1 %d segments, cam2 %d segments", r.segments("cam1"), r.segments("cam2"))
 	r.checkListeners()
+
+	// 2b. the web app: status over HTTP matches `status`; the record toggle goes through the control API
+	r.webChecks()
 
 	// 3. cam disable cam2: it stops recording
 	out, code = r.holocron(30*time.Second, "cam", "disable", "cam2")
@@ -176,8 +191,11 @@ func TestEndToEnd(t *testing.T) {
 		}
 	}
 	r.leakScan()
-	t.Logf("NUMBERS: time to first valid status %.1fs; segments cam1 %d cam2 %d; stop %.1fs; survivors 0; holocron processes seen %d",
-		r.firstStatus.Seconds(), r.segments("cam1"), r.segments("cam2"), r.stopDur.Seconds(), len(r.seen))
+	if txt := r.logText(); strings.Contains(txt, "did not end within") || strings.Contains(txt, "killing it") {
+		t.Errorf("a host child had to be killed:\n%s", txt)
+	}
+	t.Logf("NUMBERS: time to first valid status %.1fs; web restart after kill %.1fs; segments cam1 %d cam2 %d; stop %.1fs; survivors 0; holocron processes seen %d",
+		r.firstStatus.Seconds(), r.webRestart.Seconds(), r.segments("cam1"), r.segments("cam2"), r.stopDur.Seconds(), len(r.seen))
 	// idempotent
 	if out, code = r.holocron(30*time.Second, "down"); code != 0 || !strings.Contains(out, "nothing is running") {
 		t.Errorf("second down (exit %d): %s", code, out)
@@ -205,13 +223,14 @@ func (r *itRig) writeConfig() {
 		"LiveViewEnabled": false, "LiveConfigPath": filepath.Join(r.scratch, "mtx", "mediamtx-live.yml"),
 		"LiveSecretPath":  filepath.Join(r.scratch, "local", "live_view_secret.txt"),
 		"LiveWhepAddress": "127.0.0.1:18743", "LiveUdpAddress": "127.0.0.1:18744",
+		"web":              map[string]any{"listen": fmt.Sprintf("127.0.0.1:%d", r.webPort), "authDir": filepath.Join(r.scratch, "auth"), "tlsDir": filepath.Join(r.scratch, "tls")},
 		"ReconcileSeconds": 2, "StatusIntervalSeconds": 2, "ArchiveScanSeconds": 3, "ReserveGB": 0, "PruneHysteresisGB": 0,
 		"StopTimeoutSeconds": 30, "RelayStartupWaitSeconds": 20,
 		"alerts": map[string]any{"desktop": map[string]any{"enabled": false}, "eventlog": map[string]any{"enabled": false}},
 	}
 	b, _ := json.MarshalIndent(cfg, "", "    ")
 	must(r.t, os.WriteFile(r.cfg, append([]byte("\xef\xbb\xbf"), b...), 0o644))
-	// IP carries the throwaway camera's port: written here, `cam add` would refuse it (host only)
+	// IP carries the throwaway camera's port (host:port, as `cam add --ip` accepts)
 	cams := fmt.Sprintf(`[{"Name":"cam1","IP":"127.0.0.1:%d","Quality":"cam1","Record":true,"Note":"kept"},{"Name":"cam2","IP":"127.0.0.1:%d","Quality":"cam2","Record":true}]`, itCamPort, itCamPort)
 	must(r.t, os.WriteFile(filepath.Join(filepath.Dir(r.cfg), "cameras.json"), []byte(cams), 0o644))
 }
@@ -371,9 +390,11 @@ func (r *itRig) record() {
 			note(int(*d.Restreamer.Pid), "relay")
 		}
 	}
-	entries, _ := osx.NewRegistry(osx.RegistryPath(p.State())).Load()
-	for _, e := range entries {
-		r.seen[e.Pid] = e
+	for _, path := range []string{osx.RegistryPath(p.State()), p.AuxFile()} {
+		entries, _ := osx.NewRegistry(path).Load()
+		for _, e := range entries {
+			r.seen[e.Pid] = e
+		}
 	}
 }
 
@@ -453,4 +474,147 @@ func (r *itRig) cleanup() {
 		_ = c.Process.Kill() // ours; an exited one just reports an error
 	}
 	time.Sleep(500 * time.Millisecond)
+}
+
+// freePort returns the first port of lo..hi nothing listens on.
+func freePort(t *testing.T, lo, hi int) int {
+	t.Helper()
+	for p := lo; p <= hi; p++ {
+		l, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", p))
+		if err == nil {
+			l.Close()
+			return p
+		}
+	}
+	t.Fatalf("no free port in %d-%d", lo, hi)
+	return 0
+}
+
+// web is one request to the web app on its loopback port.
+func (r *itRig) web(method, path, body string) (int, []byte) {
+	req, err := http.NewRequest(method, fmt.Sprintf("http://127.0.0.1:%d%s", r.webPort, path), strings.NewReader(body))
+	must(r.t, err)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	c := &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+	resp, err := c.Do(req)
+	if err != nil {
+		return 0, []byte(err.Error())
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
+}
+
+type webStatusBody struct {
+	Controller string
+	Status     struct {
+		Cameras []struct {
+			Name      string
+			Record    bool
+			Alive     bool
+			InputMode string
+		}
+	}
+	Supervisor struct{ Running bool }
+}
+
+func (r *itRig) webPid() int {
+	out, code := r.holocron(30*time.Second, "status", "--json")
+	var rep struct{ Web webReport }
+	if code != 0 || json.Unmarshal([]byte(out), &rep) != nil {
+		return 0
+	}
+	return rep.Web.Pid
+}
+
+// webChecks: GET /api/status over HTTP is valid JSON whose camera rows match `holocron status`;
+// POST /api/cameras/cam2/record disables then re-enables the camera through the ctlapi; killing the
+// web child by pid brings it back after about 5 s while the recording is untouched.
+func (r *itRig) webChecks() {
+	t := r.t
+	if !r.waitFor(30*time.Second, func() bool { code, _ := r.web("GET", "/api/status", ""); return code == 200 }) {
+		r.dumpLog()
+		t.Fatal("the web app does not answer on its port")
+	}
+	r.record()
+	pid0 := r.webPid()
+	if pid0 == 0 {
+		t.Fatal("`holocron status` does not show the web role")
+	}
+	code, raw := r.web("GET", "/api/status", "")
+	var ws webStatusBody
+	if code != 200 || json.Unmarshal(raw, &ws) != nil || !ws.Supervisor.Running || ws.Controller != "api" {
+		t.Fatalf("GET /api/status: %d controller %q: %s", code, ws.Controller, raw)
+	}
+	out, _ := r.holocron(30*time.Second, "status", "--json")
+	var cli struct{ Status *status.Document }
+	must(t, json.Unmarshal([]byte(out), &cli))
+	if cli.Status == nil || len(cli.Status.Cameras) != len(ws.Status.Cameras) || len(ws.Status.Cameras) != 2 {
+		t.Fatalf("camera rows differ: web %+v, status %+v", ws.Status.Cameras, cli.Status)
+	}
+	for i, c := range cli.Status.Cameras {
+		w := ws.Status.Cameras[i]
+		if w.Name != c.Name || w.Record != c.Record || w.Alive != c.Alive || w.InputMode != c.InputMode {
+			t.Errorf("camera %d: web %+v, holocron status %s record=%v alive=%v mode=%s", i, w, c.Name, c.Record, c.Alive, c.InputMode)
+		}
+	}
+	t.Logf("GET /api/status: %d bytes, controller %s, %d camera rows equal to `holocron status`", len(raw), ws.Controller, len(ws.Status.Cameras))
+
+	// the page's record toggle -> control API -> the supervisor stops, then restarts, the camera
+	t1 := time.Now()
+	code, raw = r.web("POST", "/api/cameras/cam2/record", `{"enabled":false}`)
+	if code != 200 || !strings.Contains(string(raw), `"ok":true`) || !strings.Contains(string(raw), "POST /v1/cameras") {
+		t.Fatalf("record toggle off: %d %s", code, raw)
+	}
+	if !r.waitFor(20*time.Second, func() bool { st := r.status(); return st != nil && !cameraAlive(st, "cam2") && cameraAlive(st, "cam1") }) {
+		t.Fatalf("the supervisor did not stop cam2 after the web toggle: %+v", r.status())
+	}
+	t.Logf("web toggle off: cam2 stopped %.1fs after the request, response %s", time.Since(t1).Seconds(), strings.TrimSpace(string(raw)))
+	if b, _ := os.ReadFile(filepath.Join(filepath.Dir(r.cfg), "cameras.json")); !regexp.MustCompile(`"Name":\s*"cam2"[^}]*"Record":\s*false`).Match(b) {
+		t.Errorf("cameras.json does not show cam2 off: %s", b)
+	}
+	if !r.waitFor(10*time.Second, func() bool { return strings.Contains(r.logText(), "actor=web:loopback") }) {
+		t.Error("the supervisor's records do not carry the actor web:loopback")
+	}
+	code, raw = r.web("POST", "/api/cameras/cam2/record", `{"enabled":true}`)
+	if code != 200 || !r.waitFor(40*time.Second, func() bool { st := r.status(); return st != nil && cameraAlive(st, "cam2") }) {
+		t.Fatalf("record toggle on: %d %s %+v", code, raw, r.status())
+	}
+
+	// kill the web child by pid: it comes back after about 5 s, the recording does not notice
+	sup0 := r.status().SupervisorPid
+	n1 := r.segments("cam1")
+	p, err := os.FindProcess(pid0)
+	must(t, err)
+	killedAt := time.Now()
+	must(t, p.Kill())
+	var pid1 int
+	if !r.waitFor(40*time.Second, func() bool {
+		if pid1 = r.webPid(); pid1 == 0 || pid1 == pid0 {
+			return false
+		}
+		code, _ := r.web("GET", "/api/status", "")
+		return code == 200
+	}) {
+		r.dumpLog()
+		t.Fatalf("the web app was not restarted (pid %d)", pid1)
+	}
+	r.webRestart = time.Since(killedAt)
+	r.record()
+	if r.webRestart < 4*time.Second || r.webRestart > 25*time.Second {
+		t.Errorf("web restart took %.1fs, want about 5 s", r.webRestart.Seconds())
+	}
+	if st := r.status(); st == nil || st.SupervisorPid != sup0 || !cameraAlive(st, "cam1") || !cameraAlive(st, "cam2") {
+		t.Errorf("the recording was disturbed by the web crash: %+v", st)
+	}
+	r.waitFor(time.Duration(itSegment+5)*time.Second, func() bool { return r.segments("cam1") > n1 })
+	if r.segments("cam1") <= n1 {
+		t.Errorf("cam1 stopped writing segments during the web restart (%d)", n1)
+	}
+	if !strings.Contains(r.logText(), "restarting it in") {
+		t.Error("no WARN for the web restart")
+	}
+	t.Logf("web child pid %d killed -> pid %d answering again after %.1fs; supervisor pid %d unchanged", pid0, pid1, r.webRestart.Seconds(), sup0)
 }
