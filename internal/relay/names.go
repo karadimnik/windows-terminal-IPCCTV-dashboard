@@ -11,7 +11,7 @@ import (
 // PathName is Get-CamRelayPathName over Get-CamSafeName: the camera's safe name lowercased with
 // every character outside [a-z0-9] removed. The name must stay alphanumeric: MediaMTX reads a
 // path's source from MTX_PATHS_<NAME>_SOURCE and cuts the key at the first underscore, so
-// workshop_entrance silently becomes a stray "workshop" plus an offline path (mediamtx.template.yml).
+// a name with an underscore silently becomes a stray path plus an offline one (mediamtx.template.yml).
 //
 // Lowercasing is ASCII only, as .NET's ToLowerInvariant is for the characters that matter: it leaves
 // U+0130 and the Kelvin sign alone, where Go's unicode.ToLower would turn them into i and k.

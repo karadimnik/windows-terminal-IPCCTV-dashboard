@@ -66,7 +66,7 @@ func TestPathNameMatchesTheCorpus(t *testing.T) {
 }
 
 func TestUnderscoreNeverReachesAPathName(t *testing.T) {
-	for _, n := range []string{"workshop_entrance", "Workshop Entrance", "workshop-entrance", "_workshop_"} {
+	for _, n := range []string{"side_door", "Side Door", "side-door", "_sidedoor_"} {
 		p, err := PathName(n)
 		if err != nil || strings.ContainsAny(p, "_- ") {
 			t.Errorf("%q -> %q, %v", n, p, err)

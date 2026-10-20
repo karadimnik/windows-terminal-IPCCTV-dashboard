@@ -11,7 +11,7 @@ import (
 func TestSourceEnv(t *testing.T) {
 	cameras := []config.Camera{
 		{Name: "Camera One", IP: "192.0.2.11", Quality: "stream1"},
-		{Name: "Workshop_Entrance", IP: "cam.lan", Quality: ""},
+		{Name: "Side_Door", IP: "cam.lan", Quality: ""},
 	}
 	got, err := SourceEnv(cameras, fixedCreds{"fakeuser", "fakepass"})
 	if err != nil {
@@ -19,7 +19,7 @@ func TestSourceEnv(t *testing.T) {
 	}
 	want := []string{
 		"MTX_PATHS_CAMERAONE_SOURCE=rtsp://fakeuser:fakepass@192.0.2.11/stream1",
-		"MTX_PATHS_WORKSHOPENTRANCE_SOURCE=rtsp://fakeuser:fakepass@cam.lan/stream1",
+		"MTX_PATHS_SIDEDOOR_SOURCE=rtsp://fakeuser:fakepass@cam.lan/stream1",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v want %v", got, want)
@@ -32,7 +32,7 @@ func TestSourceEnv(t *testing.T) {
 	// the sub stream, and no variable for Gate: it records stream2 so it has only a main path
 	want = []string{
 		"MTX_PATHS_CAMERAONESUB_SOURCE=rtsp://fakeuser:fakepass@192.0.2.11/stream2",
-		"MTX_PATHS_WORKSHOPENTRANCESUB_SOURCE=rtsp://fakeuser:fakepass@cam.lan/stream2",
+		"MTX_PATHS_SIDEDOORSUB_SOURCE=rtsp://fakeuser:fakepass@cam.lan/stream2",
 	}
 	if !reflect.DeepEqual(live, want) {
 		t.Errorf("live: got %v want %v", live, want)
