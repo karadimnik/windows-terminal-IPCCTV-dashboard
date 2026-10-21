@@ -11,7 +11,9 @@ the code, the embedded `static/` and the tests are the ones that were there. Sec
     func Main(args) int                     // camui.exe's whole main (cmd/camui): the above, text records on stdout, SIGINT/SIGTERM
     type Options struct{ Config; Logs cli.LogSource; Controller; Launch *HolocronLaunch; GoSystem bool; StopFile string; ... }
     func LoginUsers(authDir) (int, error)   // `holocron status`: does a login exist
-    func Users(authDir, *slog.Logger) *UserAdmin   // `holocron user`: Add, SetPassword, Remove, List (no hashes), Unlock (admin.go); ErrUserExists, ErrNoSuchUser, IsInputError
+    func Users(authDir, *slog.Logger) *UserAdmin   // `holocron user`: Add, AddRole, SetPassword, SetRole, Remove, List (no hashes), Unlock (admin.go); ErrUserExists, ErrNoSuchUser, ErrLastAdmin, IsInputError
+    type AdminTools interface{ ConfigKeys; SetConfigKey; CameraLogin; SetCameraLogin; PrunePreview; ArchiveStats; LogLevels; SetLogLevel; Autostart; SetAutostart }  // Options.Admin (admin_api.go)
+    func CAIfPresent(tlsDir) (CAInfo, bool, error)  // the CA without creating one
     func CAFor(tlsDir) (CAInfo, error); CACertificatePEM(tlsDir); WriteCAInstructions(w, CAInfo); RotateCA(tlsDir)   // `holocron tls`
     type SettingsWriter interface{ PutCameras(ctx, path, []CameraPut); PutConfig(ctx, path, map[string]any) }  // Options.Settings
 
@@ -35,6 +37,27 @@ first, the address check is the writer's so `host:port` is accepted, and a blank
 answer 422 with the fields, an `ErrRefused` 422, any other error 500, nothing written), and answer 501 only when no writer was
 supplied; `camui.exe` keeps the PowerShell script; `Config.CamerasPath` / `Config.ConfigPath` point the readers at `cameras.json` and
 `holocron.config.json`.
+
+## Roles and the access table (`access.go`)
+
+Users are `admin` or `viewer` (a record without a role is an admin). `routeAccess` gives every registered pattern a class:
+public (the sign-in page), viewer (the page, status, Live, Footage, `/api/tls/*`, sign-out) or admin (everything else: controls,
+record toggles, acknowledgements, Settings reads and writes, `/admin.js`, `/api/admin/*`). `authService.gate` asks the mux which
+pattern the request will run (`mux.Handler`), so path tricks are judged as their target; no session 401, a viewer on an admin
+route 403 `forbidden: admins only` plus an audited `access.denied` record, an unclassified pattern 403 for everybody. The role is
+re-read from `users.json` on every request. The loopback listener and the token mode have no roles: admin. Tests:
+`TestEveryRouteHasAnAccessClass` (source scan both ways, run-time refusal), `TestRoleMatrixOverEveryRoute` (every route of
+`roRoutes` against no session, viewer, admin, view-only viewer and admin, loopback, token), `TestRoleGateSeesThroughPathTricks`,
+`TestDemotionTakesEffectOnTheNextRequest`.
+
+## The Admin tab (`admin_api.go`, `static/admin.js`)
+
+`/api/admin/*`, each a `web.admin.*` Action through `handleAction` (GETs too, so reads leave records; `Audit` for changes and for
+`users.list`, `tls.ca`, `tls.print`, `secret.status`, `autostart.status`). Users and TLS use `UserAdmin` and the TLS facade of
+this package directly (with `Run` sharing one `authService` between both listeners when `TLSListen` is set, so lockouts are
+visible and an unlock applies at once); the rest goes to `Options.Admin` (`AdminTools`, supplied by `cmd/holocron`'s
+`webAdmin`; nil: 501). Key, camera-login, CA and autostart changes take the one-at-a-time lock of Settings and the controls (409 while another runs); user changes are serialised by `UserAdmin` itself. `admin.js` (and so the tab's
+markup) is served to admins only; `index.html` holds an empty placeholder.
 
 ## Rule R2 (`actions.go`)
 
