@@ -86,9 +86,9 @@ func init() {
 		{path: "autostart enable", usage: "[--dry-run] [--" + oldTasksFlag + "]", about: "switch the installed autostart entry on", action: "autostart.enable", mutating: true, run: func(ctx context.Context, e *env) error { return cmdAutostartSet(ctx, e, true) }},
 		{path: "autostart disable", usage: "[--dry-run]", about: "switch it off without removing it", action: "autostart.disable", mutating: true, run: func(ctx context.Context, e *env) error { return cmdAutostartSet(ctx, e, false) }},
 		{path: "autostart status", usage: "[--json]", about: "installed, enabled, what it runs and whether that executable exists; the PowerShell system's tasks (read only)", action: "autostart.status", audit: true, run: cmdAutostartStatus},
-		{path: "host", action: "role.host", role: true, run: cmdRoleHost},
-		{path: "supervisor", action: "role.supervisor", role: true, run: cmdRoleSupervisor},
-		{path: "service", action: "role.service", role: true, run: cmdRoleService},
+		{path: "host", about: "internal role: the host process that `up` starts; not for direct use", action: "role.host", role: true, run: cmdRoleHost},
+		{path: "supervisor", about: "internal role: the supervisor that the host starts; not for direct use", action: "role.supervisor", role: true, run: cmdRoleSupervisor},
+		{path: "service", about: "internal role: the Windows service entry point; not for direct use", action: "role.service", role: true, run: cmdRoleService},
 	}
 	for _, c := range commands {
 		c := c

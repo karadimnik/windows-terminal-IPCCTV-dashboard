@@ -152,6 +152,9 @@ func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int 
 		return exitUsage
 	}
 	rest := g.Args()
+	if *help && len(rest) > 0 { // holocron --help <command>
+		rest, *help = append([]string{"help"}, rest...), false
+	}
 	if *help || len(rest) == 0 {
 		printHelp(out)
 		if len(rest) == 0 && !*help {
@@ -164,6 +167,21 @@ func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int 
 		fmt.Fprintf(errw, "holocron: unknown command %q\n\n", strings.Join(rest, " "))
 		printHelp(errw)
 		return exitUsage
+	}
+	if cmd.path == "help" && len(args) > 0 && !wantsHelp(args) { // holocron help <command>
+		target, extra := matchCommand(args)
+		if target == nil || len(extra) > 0 {
+			fmt.Fprintf(errw, "holocron: unknown command %q\n\n", strings.Join(args, " "))
+			printHelp(errw)
+			return exitUsage
+		}
+		cmd, args = target, []string{"--help"}
+	}
+	if wantsHelp(args) {
+		printCommandHelp(out, cmd)
+		if cmd.path != "web" { // web goes on: its flag list comes from its own flag set
+			return exitOK
+		}
 	}
 	if s == nil {
 		s = &seams{}
@@ -260,9 +278,27 @@ func targetOf(c *command, args []string) string {
 	return ""
 }
 
+// wantsHelp: -h, -help or --help among a command's arguments. Nothing of the command runs then.
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		if a == "-h" || a == "-help" || a == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+// printCommandHelp prints one command from the registry: its description, its usage line (the
+// flags and arguments) and a pointer to the global flags.
+func printCommandHelp(w io.Writer, c *command) {
+	fmt.Fprintf(w, "holocron %s - %s\n\nusage: holocron [global flags] %s\n", c.path, c.about, strings.TrimSpace(c.path+" "+c.usage))
+	fmt.Fprintln(w, "\nglobal flags: --root DIR, --config FILE, -v, -vv, --json (holocron --help); nothing of the command runs for --help")
+}
+
 func printHelp(w io.Writer) {
 	fmt.Fprintf(w, "holocron %s - the one executable of the Holocron NVR\n\n", version)
 	fmt.Fprintln(w, "usage: holocron [--root DIR] [--config FILE] [-v|-vv] [--json] <command> [arguments]")
+	fmt.Fprintln(w, "       holocron help <command>   or   holocron <command> --help   (one command: description and usage)")
 	fmt.Fprintln(w, "\ncommands:")
 	var lines []string
 	width := 0
