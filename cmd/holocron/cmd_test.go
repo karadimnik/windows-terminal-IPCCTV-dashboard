@@ -102,7 +102,16 @@ const rigCameras = "\xef\xbb\xbf[{\"Name\":\"Front\",\"IP\":\"192.0.2.10\",\"Rec
 func newRig(t *testing.T) *rig {
 	dir := t.TempDir()
 	r := &rig{t: t, root: filepath.Join(dir, "root"), cfg: filepath.Join(dir, "cfg", "holocron.config.json"), ctl: &fakeCtl{}, tools: autostart.NewFakeTools(), exe: "/nonexistent/holocron"}
-	r.auto = &autostart.Env{GOOS: "linux", Exec: r.tools.Exec, Home: filepath.Join(dir, "home"), User: "alice", UID: "1000", TempDirs: []string{"/tmp"}, SystemRoot: `C:\Windows`}
+	r.auto = &autostart.Env{GOOS: "linux", Exec: r.tools.Exec, Home: filepath.Join(dir, "home"), User: "alice", UID: "1000", TempDirs: []string{"/tmp"}, SystemRoot: `C:\Windows`,
+		TempFile: func(content []byte) (string, func(), error) { // the task XML a logon install hands schtasks
+			f, err := os.CreateTemp(dir, "task-*.xml")
+			if err != nil {
+				return "", nil, err
+			}
+			f.Write(content)
+			f.Close()
+			return f.Name(), func() { os.Remove(f.Name()) }, nil
+		}}
 	os.MkdirAll(filepath.Dir(r.cfg), 0o755)
 	os.WriteFile(r.cfg, []byte(strings.Replace(rigConfig, "%AUTH%", filepath.ToSlash(filepath.Join(dir, "auth")), 1)), 0o644)
 	os.WriteFile(r.cameras(), []byte(rigCameras), 0o644)

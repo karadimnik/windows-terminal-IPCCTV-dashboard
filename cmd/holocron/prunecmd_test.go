@@ -25,6 +25,9 @@ func (r *rig) seedArchive(recent, old int) (oldFiles []string) {
 			r.t.Fatal(err)
 		}
 		os.Truncate(path, int64(size)) // sparse: sizes are what the statistics read
+		if err := setCreated(path, start); err != nil {
+			r.t.Fatal(err)
+		}
 		end := start.Add(10 * time.Minute)
 		if end.After(now) {
 			end = now
