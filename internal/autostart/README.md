@@ -49,6 +49,8 @@ service only marked for deletion, accounts).
 Verified for real (2026-10-21): systemd user unit `holocron-TEST-*` in WSL2 (install, status, enable, disable,
 second install unchanged, `systemd-analyze --user verify` clean, uninstall); Windows logon task `Holocron-TEST-*`
 created disabled without elevation from a path with a space and `&`, read back equal; Microsoft Defender then blocked
-the unsigned test binary (`Behavior:Win32/Persistence.A!ml`), so enable, disable, the second install and the uninstall
-through holocron were not run on Windows (the test task was deleted with `schtasks /Delete`). UNVERIFIED: the Windows
+that unsigned test binary in `C:\Windows\Temp` (`Behavior:Win32/Persistence.A!ml`). W12b, same day, from a permanent
+folder under the user profile: install `--window visible`, update to `--window hidden`, enable (trigger stayed off),
+disable, second install unchanged, uninstall, all through holocron; no Defender detection (8 before, 8 after), the exe
+kept running. UNVERIFIED: the Windows
 service (needs elevation), macOS.

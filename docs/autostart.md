@@ -163,8 +163,13 @@ with holocron's own name but no record (for example after the record was deleted
 
 On 2026-10-21 Microsoft Defender's behaviour monitoring flagged an unsigned test build of `holocron.exe`
 that had just created a (disabled) logon task as `Behavior:Win32/Persistence.A!ml` and blocked the file;
-that build ran from `C:\Windows\Temp`. Expect the same for an unsigned build until it is signed or
-Defender is told otherwise; whether a build in its permanent folder is flagged too is not known yet.
+that build ran from `C:\Windows\Temp`. The same day an unsigned build from `build-holocron.sh` in a
+permanent folder under the user profile (`%USERPROFILE%\holocron-defender-test`) created a disabled test task
+with `--window visible`, replaced it with `--window hidden` (`conhost.exe --headless`), switched it on
+and off, reinstalled it unchanged and uninstalled it, with 3 minutes of quiet after each of the first two
+steps: Defender raised nothing and the binary kept running. So the temporary folder, not
+`conhost --headless`, is the likely trigger; install from the folder `holocron.exe` will live in. This is one
+machine and one day, not a guarantee: a signed binary is the durable fix.
 
 ## For tests
 
