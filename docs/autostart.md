@@ -7,7 +7,7 @@ must never both start at logon, and `holocron` never changes the old tasks (it o
 Installing the autostart is a `holocron` command like every other (rule R1): there is no script.
 
 ```
-holocron install [--mode logon|service|systemd|launchd] [--dry-run] [--allow-temp]
+holocron install [--mode logon|service|systemd|launchd] [--window visible|hidden] [--dry-run] [--allow-temp]
                  [--i-know-old-tasks-are-enabled] [--yes] [--account A]
 holocron autostart status [--json]
 holocron autostart disable [--dry-run]
@@ -19,7 +19,7 @@ holocron uninstall [--dry-run] [--force]
 
 | OS | Mode (default first) | Entry | It runs |
 |---|---|---|---|
-| Windows | `logon` | Scheduled Task `Holocron` for the current user, trigger "at log on of" that user, limited token, no admin needed | `C:\Windows\System32\conhost.exe --headless "C:\Holocron\holocron.exe" --config "C:\Holocron\holocron.config.json" up --detach` in the configuration's folder |
+| Windows | `logon` | Scheduled Task `Holocron` for the current user, trigger "at log on of" that user, limited token, no admin needed | `--window visible` (default): `C:\Holocron\holocron.exe --config C:\Holocron\holocron.config.json up` (attached, in a console window on your desktop); `--window hidden`: `C:\Windows\System32\conhost.exe --headless C:\Holocron\holocron.exe --config ... up --detach`; both in the configuration's folder |
 | Windows | `service` (opt-in, admin) | Windows service `Holocron` ("Holocron NVR"), automatic (delayed) start, LocalSystem unless `--account` | `"C:\Holocron\holocron.exe" --config ... service` |
 | Linux | `systemd` | user unit `~/.config/systemd/user/holocron.service` (`$XDG_CONFIG_HOME` honoured), `WantedBy=default.target` | `holocron --config ... host --service` |
 | macOS | `launchd` | agent `~/Library/LaunchAgents/com.holocron.nvr.plist`, `RunAtLoad`, `KeepAlive` with `SuccessfulExit=false` | `holocron --config ... host --service`, output to `~/Library/Logs/com.holocron.nvr.log` |
@@ -29,10 +29,20 @@ Every entry passes `--config` with the absolute path of the configuration `insta
 
 - **Logon task settings:** no execution time limit, not stopped or held back on battery, a second start
   is ignored (`IgnoreNew`; the instance lock protects as well), started late when the logon was missed,
-  priority 5 (normal; the Task Scheduler's default 7 is below normal and `ffmpeg` would inherit it). The
-  task is visible in the Task Scheduler window. `conhost.exe --headless` is there because a console
-  program that the Task Scheduler starts in your session otherwise opens a console window; the task's
-  own "hidden" setting only hides the task in the Task Scheduler list.
+  priority 5 (normal; the Task Scheduler's default 7 is below normal and `ffmpeg` would inherit it). It
+  runs only while you are logged on (interactive token), which is what puts the console on your desktop.
+  The task itself is listed in the Task Scheduler window (its "hidden" setting is off; that setting only
+  hides the task in the list, never a console window).
+- **The console window (`--window`, Windows logon task only):**
+  - `visible` (default): at logon the attached `holocron up` opens in a console window. That window IS
+    the system, as with `holocron up` typed by hand: **closing it stops everything in order**. That is the
+    "window closed" stop (`StopKind` `window-closed`, one alert 103), not an outage: nothing restarts it
+    until the next logon, `holocron up`, or `holocron up --detach`. Ctrl+C in it is an ordinary stop.
+  - `hidden`: `conhost.exe --headless` runs `holocron up --detach`, so there is no window to close by
+    accident; `holocron down` stops it.
+  - A first `install` is `visible`; a later `install` without `--window` keeps the recorded choice, and
+    `--window` with the other value is an update (reported, recorded in `install.json`, shown by
+    `autostart status` and its `--json` key `window`). Other modes refuse `--window` (exit 2).
 - **Who restarts what:** the host inside `holocron` restarts the supervisor in place (5 times in
   30 minutes); the OS entry only starts `holocron` and restarts it as a last resort: systemd
   `Restart=on-failure` after 10 s but never after exit 20 (another supervisor holds the archive) or 21

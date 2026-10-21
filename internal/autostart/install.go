@@ -71,6 +71,9 @@ func diff(want, cur Entry) []string {
 	if want.File != "" && want.Content != cur.Content {
 		d = append(d, "content of "+want.File)
 	}
+	if want.Window != cur.Window {
+		d = append(d, fmt.Sprintf("console window: %s -> %s", orNone(cur.Window), orNone(want.Window)))
+	}
 	if want.Enabled != cur.Enabled {
 		d = append(d, fmt.Sprintf("enabled: %v -> %v", cur.Enabled, want.Enabled))
 	}
@@ -104,7 +107,7 @@ func Install(o *Ops, s Spec, version string) (Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("cannot read the current %s %s: %w", kind(s.Mode), s.Name, err)
 	}
-	rec := Record{Mode: s.Mode, Name: s.Name, Exe: s.Exe, Command: want.Command(), File: want.File, InstalledAt: time.Now(), Version: version}
+	rec := Record{Mode: s.Mode, Name: s.Name, Exe: s.Exe, Command: want.Command(), File: want.File, Window: want.Window, InstalledAt: time.Now(), Version: version}
 	if cur != nil {
 		res.Changes = diff(want, *cur)
 		if len(res.Changes) == 0 {
@@ -268,7 +271,7 @@ func Status(env Env, m Mode, name string) State {
 		return s
 	}
 	s.Mode, s.Name, s.Installed, s.Enabled = m, name, true, cur.Enabled
-	s.Command, s.Exe, s.File = cur.Command(), cur.Exe, cur.File
+	s.Command, s.Exe, s.File, s.Window = cur.Command(), cur.Exe, cur.File, cur.Window
 	s.ExeExists = cur.Exe != "" && env.stat(cur.Exe)
 	return s
 }

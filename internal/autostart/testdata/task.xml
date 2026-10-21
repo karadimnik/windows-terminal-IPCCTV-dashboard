@@ -2,7 +2,7 @@
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>holocron install</Author>
-    <Description>Holocron NVR: starts the recorder, relay, live view and web app at logon (holocron up --detach). Created by holocron install; holocron uninstall removes it, holocron autostart disable switches it off.</Description>
+    <Description>Holocron NVR: starts the recorder, relay, live view and web app at logon. Created by holocron install; holocron uninstall removes it, holocron autostart disable switches it off.</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -38,8 +38,8 @@
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>C:\Windows\System32\conhost.exe</Command>
-      <Arguments>--headless C:\Holocron\holocron.exe --config C:\Holocron\holocron.config.json up --detach</Arguments>
+      <Command>C:\Holocron\holocron.exe</Command>
+      <Arguments>--config C:\Holocron\holocron.config.json up</Arguments>
       <WorkingDirectory>C:\Holocron</WorkingDirectory>
     </Exec>
   </Actions>

@@ -40,6 +40,28 @@ const (
 	TestInfix = "-TEST-"
 )
 
+// Console window of the Windows logon task.
+const (
+	// WindowVisible (default): the task runs the attached `holocron up` in a console window on the
+	// desktop; closing that window is the "window closed" stop (alert 103), not an outage.
+	WindowVisible = "visible"
+	// WindowHidden: `conhost.exe --headless` runs `holocron up --detach`; no window at all.
+	WindowHidden = "hidden"
+)
+
+// CheckWindow accepts --window only for the Windows logon task.
+func CheckWindow(w string, m Mode) error {
+	switch {
+	case w == "":
+		return nil
+	case m != Logon:
+		return usage("--window is for the Windows logon task only (--mode logon), not --mode %s", m)
+	case w != WindowVisible && w != WindowHidden:
+		return usage("--window %q: visible or hidden", w)
+	}
+	return nil
+}
+
 // OldTasks are the PowerShell system's Scheduled Tasks: only ever queried, never changed.
 var OldTasks = []string{"IPCCTV-Recorder", "IPCCTV-Dashboard", "IPCCTV-Ui"}
 
@@ -156,6 +178,7 @@ type Spec struct {
 	Disabled bool   // create it switched off (tests: an entry that can never fire)
 	Account  string // service mode: the service account ("" = LocalSystem)
 	Record   string // the install record file; "" = RecordPath(WorkDir())
+	Window   string // logon mode: WindowVisible ("" = visible) or WindowHidden
 }
 
 // RecordFile is where the install record of s goes.
@@ -189,6 +212,7 @@ type Entry struct {
 	Exe     string   // the holocron executable among them
 	WorkDir string
 	Key     string // the settings that are compared besides the command (trigger, policies, account)
+	Window  string // logon mode: visible or hidden
 	Enabled bool
 	Service *osx.ServiceConfig
 }
@@ -207,6 +231,7 @@ type State struct {
 	Exe       string `json:"exe,omitempty"`
 	ExeExists bool   `json:"exeExists"`
 	File      string `json:"file,omitempty"`
+	Window    string `json:"window,omitempty"` // logon mode: visible or hidden
 	Recorded  bool   `json:"recorded"`
 	Detail    string `json:"detail,omitempty"`
 }
@@ -225,6 +250,9 @@ func (s State) Summary() string {
 		on = "DISABLED"
 	}
 	t := fmt.Sprintf("%s %s, %s", kind(s.Mode), s.Name, on)
+	if s.Window != "" {
+		t += ", console window " + s.Window
+	}
 	if s.Running != "" {
 		t += ", " + s.Running
 	}
@@ -384,6 +412,7 @@ type Record struct {
 	Exe         string    `json:"exe"`
 	Command     string    `json:"command"`
 	File        string    `json:"file,omitempty"`
+	Window      string    `json:"window,omitempty"`
 	InstalledAt time.Time `json:"installedAt"`
 	Version     string    `json:"version"`
 }
