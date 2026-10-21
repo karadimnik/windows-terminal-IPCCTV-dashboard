@@ -106,7 +106,7 @@ jobs:
         if: always()
         run: |
           [ -f .ci-race.txt ] || exit 0
-          awk '/^(--- FAIL|FAIL|panic:)/{p=1} /^(=== |--- PASS|--- SKIP|ok |PASS)/{p=0} p' .ci-race.txt | cut -c1-230 | sed 's/%/%25/g' > .ci-fail.txt || true
+          awk '/^=== /{buf=""} {buf=buf $0 "\n"} /^[[:space:]]*--- FAIL/{printf "%s", buf; buf=""} /^(FAIL|panic:)/{print}' .ci-race.txt | cut -c1-230 | sed 's/%/%25/g' > .ci-fail.txt || true
           [ -s .ci-fail.txt ] || exit 0
           split -l 14 .ci-fail.txt .ci-fail-part-
           n=0
