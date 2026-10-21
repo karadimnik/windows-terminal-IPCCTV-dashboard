@@ -154,7 +154,9 @@ within the tolerances, `1` differences (the report is printed), `2` usage (a mis
 
 What it does, per camera (every camera folder of `--new`, or the `--camera` names; a name with a space is accepted):
 
-- **Closed segments only.** A file written within the last 90 seconds is open and is skipped, and listed as such.
+- **Closed segments only.** A file written within the last 90 seconds is open and is skipped, and listed as such. So is the newest
+  segment of each camera folder until it is a segment length and a minute old, because on Windows the time a directory listing
+  shows for a file that is still being written can lag (so a recorder that was stopped less than that ago has its last file skipped).
 - **The window** is the overlap of the two archives: from the later of the two first starts to the earlier of the two last ends,
   both taken from closed segments. `--since` moves the start later. The two recorders start their first partial segment at
   different instants, so the part of the older archive before the shadow existed is never compared.

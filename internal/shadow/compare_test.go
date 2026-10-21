@@ -212,13 +212,35 @@ func TestOpenSegmentsAreSkippedAndNeverProbed(t *testing.T) {
 	if len(sb.fp.log) != 6 {
 		t.Errorf("probed %d files, want 6 (once each)", len(sb.fp.log))
 	}
-	// a file written 91 s ago is closed
-	sb2 := newSandbox(t)
-	sb2.put(sb2.old, camera, spec{start: at(17, 45, 0), mod: testNow.Add(-91 * time.Second)})
-	sb2.put(sb2.new, camera, spec{start: at(17, 45, 0), mod: testNow.Add(-91 * time.Second)})
-	rep, _ = Compare(context.Background(), sb2.options())
-	if rep.Cameras[0].Old.Closed != 1 {
-		t.Errorf("a 91 s old file should be closed: %+v", rep.Cameras[0].Old)
+}
+
+func TestOpenRules(t *testing.T) {
+	closedOf := func(mods ...time.Duration) (closed int, open []string) {
+		sb := newSandbox(t)
+		for i, ago := range mods {
+			sb.put(sb.old, camera, spec{start: at(16, 0, 0).Add(time.Duration(i) * 15 * time.Minute), mod: testNow.Add(-ago)})
+		}
+		sb.put(sb.new, camera, spec{start: at(12, 0, 0)})
+		sb.put(sb.new, camera, spec{start: at(12, 15, 0)})
+		rep, err := Compare(context.Background(), sb.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rep.Cameras[0].Old.Closed, rep.Cameras[0].Old.Open
+	}
+	// not the newest: the 90 second rule alone decides
+	if c, o := closedOf(89*time.Second, 2*time.Hour); c != 1 || len(o) != 1 {
+		t.Errorf("89 s on an older file is open: closed %d open %v", c, o)
+	}
+	if c, o := closedOf(91*time.Second, 2*time.Hour); c != 2 || len(o) != 0 {
+		t.Errorf("91 s on an older file is closed: closed %d open %v", c, o)
+	}
+	// the newest file of a folder stays open for a segment and a minute even when its time looks old
+	if c, o := closedOf(2*time.Hour, 5*time.Minute); c != 1 || len(o) != 1 {
+		t.Errorf("newest written 5 min ago: closed %d open %v", c, o)
+	}
+	if c, o := closedOf(2*time.Hour, 17*time.Minute); c != 2 || len(o) != 0 {
+		t.Errorf("newest written 17 min ago (900 s + 60 s have passed): closed %d open %v", c, o)
 	}
 }
 

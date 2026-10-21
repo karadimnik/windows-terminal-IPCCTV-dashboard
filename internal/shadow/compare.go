@@ -30,7 +30,7 @@ type Options struct {
 	DurationTolerance time.Duration // ffprobe durations of a pair; 2 s
 	GapTolerance      time.Duration // a gap is longer than this; 2 s
 	SizeMin, SizeMax  float64       // new/old size ratio of a comparable pair; 0.9 and 1.1
-	Quiet             time.Duration // files written within this long are still open and skipped; 90 s
+	Quiet             time.Duration // files written within this long are still open and skipped; 90 s (the newest of a folder: one segment and a minute)
 	Container         string        // ".mkv"
 	Audio             string        // expected audio "codec:rate:channels" or "any"; pcm_alaw:8000:1
 
@@ -312,7 +312,10 @@ func list(o *Options, root, folder string) (listing, error) {
 			continue
 		}
 		_, start, _ := archive.ParseSegment(name)
-		fi, err := e.Info()
+		// os.Stat, not DirEntry.Info: on Windows the listing's times and sizes of a file that is
+		// being written can be stale
+		path := filepath.Join(dir, name)
+		fi, err := os.Stat(path)
 		if err != nil {
 			continue
 		}
@@ -320,7 +323,7 @@ func list(o *Options, root, folder string) (listing, error) {
 			l.open = append(l.open, name)
 			continue
 		}
-		l.closed = append(l.closed, &seg{name: name, path: filepath.Join(dir, name), start: start, size: fi.Size(), mod: fi.ModTime()})
+		l.closed = append(l.closed, &seg{name: name, path: path, start: start, size: fi.Size(), mod: fi.ModTime()})
 	}
 	sort.Slice(l.closed, func(i, j int) bool {
 		a, b := l.closed[i], l.closed[j]
@@ -329,6 +332,15 @@ func list(o *Options, root, folder string) (listing, error) {
 		}
 		return a.name < b.name
 	})
+	// The newest segment of a folder may still be written even when its time looks old (a writer's
+	// time can lag), so it counts as open while it is younger than one segment plus a minute.
+	if n := len(l.closed); n > 0 {
+		last := l.closed[n-1]
+		if o.Now.Sub(last.mod) < time.Duration(o.SegmentSeconds)*time.Second+time.Minute {
+			l.open = append(l.open, last.name)
+			l.closed = l.closed[:n-1]
+		}
+	}
 	sort.Strings(l.open)
 	sort.Strings(l.other)
 	return l, nil
