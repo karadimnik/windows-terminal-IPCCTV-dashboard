@@ -8,60 +8,61 @@ Update this file in the same push as each merge: `git log --first-parent --merge
 
 | Merge | Date | Task and summary | Note |
 |---|---|---|---|
-| 946fef4 | 2026-10-14 | Merge executor/recording-feature: 24/7 NVR with audio, relay, pruner, alerting, CLI and control UI | |
-| de1cbb3 | 2026-10-14 | Merge executor/prune-safety: prune only recorder segments inside a root the recorder owns | |
-| 8fe5717 | 2026-10-14 | Merge executor/nvr-start-regression: an orderly stop then start always brings the NVR back | |
-| 52fb73c | 2026-10-14 | Merge executor/prune-alert-breaker: alert when pruning is blocked, circuit breaker on the age rule | |
-| 75d4116 | 2026-10-14 | Merge executor/install-uninstall: cam.ps1 -Install and -Uninstall, one command each | |
-| 1313752 | 2026-10-14 | Merge executor/readme-split: README becomes a front door, reference moves to docs/ | |
-| d109291 | 2026-10-15 | Merge executor/runtime-a: log rotation never stops the recorder, empty-segment cleanup after a crash, four runtime checks | |
-| b6318d9 | 2026-10-15 | Merge executor/runtime-b: stall watchdog, loop retention and alerts exercised; the logger can never throw | |
-| e59c032 | 2026-10-15 | Merge executor/dst-utc: every interval, age and deadline on one UTC clock | |
-| 752527d | 2026-10-15 | Merge master into portable-nvr: start Stage 1 on the current original system | |
-| 26acb81 | 2026-10-15 | Merge master into portable-nvr: the camui request guard ([91]) for Stage 1 to build on | |
-| 15e4bb3 | 2026-10-16 | Merge Stage 1A: a dedicated, login-protected live-view MediaMTX (portable project, not for master) | |
-| b8749e3 | 2026-10-16 | Merge Stage 1B: the Live screen and the same-origin WHEP proxy | |
-| 87871d0 | 2026-10-16 | Merge Stage 2a: tile diagnostics, LiveAdvertiseHosts and a LAN media address | |
-| 97fd3fe | 2026-10-16 | Merge Stage 2b: camui over HTTPS on the LAN with a local CA and a token | |
-| 1e05dd8 | 2026-10-16 | Merge Stage 2b.1: the HTTPS listener is view-only by default | |
-| e15dbb4 | 2026-10-16 | Merge Stage 2c prep: demo -Tls for a phone test with fake cameras | |
-| 3fa1979 | 2026-10-16 | Merge live grid and modal: a screen-filling grid, a camera modal with an instant picture, diagnostics v2 | |
-| 748ae72 | 2026-10-16 | Merge plan: cross-cutting stray-process guard tasks S1 to S6 (not built) | |
-| 629bb5e | 2026-10-17 | Merge live robustness: hidden grace period, stall detection, recovery without a reload | |
-| 436b363 | 2026-10-17 | Merge live grid Fit/Fill toggle | |
-| 6890b24 | 2026-10-17 | Merge docs: live grace settings and Firefox verified | |
-| f90b987 | 2026-10-17 | Merge master into portable-nvr: alert 110 floor (todo [92]); tests lists and the synthetic camera's encoder arguments keep both sides | |
-| d4c73eb | 2026-10-17 | Merge plan: status board, gap analysis, portable todo | |
-| a88b08a | 2026-10-17 | Merge OS-independent design: Holocron (one executable, levelled logging), inventories, high-level and low-level plans | |
-| 54ce1d3 | 2026-10-17 | Merge Holocron Go module skeleton | |
-| 59237bd | 2026-10-17 | Merge login page with brute-force protection: replaces the LAN token | |
-| 0bfacb5 | 2026-10-17 | Merge Holocron logging (logx) and the action contract (cli) | |
-| 29dd4ef | 2026-10-17 | Merge Holocron W0: status.json contract (schema, types, conformance) and golden files from the PowerShell product | |
-| ce57193 | 2026-10-17 | Merge Holocron spikes SP1, SP1b, SP4, SP6, SP7: findings and experiment programs | |
-| 497d38d | 2026-10-17 | Merge LLD spike decisions | |
-| cd0a977 | 2026-10-20 | Merge Holocron W2: clock, config, archive, osx first slice, logx audit follow-ups | |
-| c2edde3 | 2026-10-20 | Merge Holocron W4: status reader, atomic writer, carry-forward, liveness verdict; camui share-delete status read | |
-| 62278b5 | 2026-10-20 | Merge Holocron W6: relay package (both MediaMTX configs byte-identical, env sources, secrets, API client, child specs) | |
-| e433dbe | 2026-10-20 | Merge Holocron W5: ffmpeg package (exact arguments, version and TZ rules, credential-free direct input, redacted child, empty-segment cleanup) | |
-| 15c2ff2 | 2026-10-20 | Merge Holocron hardening: complete owner-only ACLs, userinfo-escaped redaction, config helper export and root percent rule, doc corrections | |
-| aa05daf | 2026-10-20 | Merge Holocron W3: pruner (pure planner, guarded executor, sandbox guard) with PowerShell differential goldens | |
-| d1dee7e | 2026-10-20 | Merge Holocron W7a: child lifecycle manager (backoff, stall, relay-or-direct, down alert, status rows) | |
-| 06d45fb | 2026-10-20 | Merge Holocron W10: alerts (non-blocking dispatcher, log/webhook/push/desktop/event-log channels) | |
-| 7f16cf1 | 2026-10-20 | Merge Holocron W7b: supervisor (loop, relay and live children, status assembly, ordered stop, panic handling) | |
-| 247359f | 2026-10-20 | Merge Holocron spikes SP2 and SP3: console close and process lifetime findings | |
-| f237a52 | 2026-10-20 | Merge Holocron W8: process lifetime (job objects, locked starter, instance lock, child registry, console close) and the host | |
-| a94e307 | 2026-10-20 | Merge Holocron W11: secrets store (env, encrypted file, Windows Credential Manager) and the legacy camera_creds.xml importer | |
-| f0ce424 | 2026-10-20 | Merge Holocron W9a: control API and the single holocron command tree (up, down, status, cam, config, live, logs, log level, alert test, doctor, version) | |
-| 18749a2 | 2026-10-21 | Merge Holocron W9b1: the web app is part of the holocron module (web role, managed by up, control through the API) | |
-| fec055e | 2026-10-21 | Merge Holocron W9c: user, tls, secret, open, prune, archive stats commands and Go-side settings writes | |
-| 3aff33c | 2026-10-21 | Merge Holocron W12: install, uninstall, autostart (logon task, systemd, launchd, Windows service) | |
-| 0ad7f7f | 2026-10-21 | Merge Holocron W12b: install --window visible/hidden (visible console by default), Defender test result | |
-| 22943e7 | 2026-10-21 | Merge Holocron W9d: viewer role and the Admin tab in the web app | |
-| 0e80374 | 2026-10-21 | Merge Holocron W13: shadow rig runbook and holocron archive compare | |
-| ebe5fe5 | 2026-10-21 | Merge Holocron W13b: RelayExternal mode and live size of the open segment | |
-| 55d0dbb | 2026-10-21 | Merge Holocron W14: GitHub Actions CI (Linux, Windows, macOS best effort) | |
-| 8093a96 | 2026-10-21 | Merge Holocron W15: cutover and rollback runbooks | |
-| ccd36bd | 2026-10-21 | Merge Holocron W14b: suite green natively on Windows; CheckRoot follows junctions and 8.3 names | |
+| 946fef4 | 2026-10-14 | Merge executor/recording-feature: 24/7 NVR with audio, relay, pruner, alerting, CLI and control UI |  |
+| de1cbb3 | 2026-10-14 | Merge executor/prune-safety: prune only recorder segments inside a root the recorder owns |  |
+| 8fe5717 | 2026-10-14 | Merge executor/nvr-start-regression: an orderly stop then start always brings the NVR back |  |
+| 52fb73c | 2026-10-14 | Merge executor/prune-alert-breaker: alert when pruning is blocked, circuit breaker on the age rule |  |
+| 75d4116 | 2026-10-14 | Merge executor/install-uninstall: cam.ps1 -Install and -Uninstall, one command each |  |
+| 1313752 | 2026-10-14 | Merge executor/readme-split: README becomes a front door, reference moves to docs/ |  |
+| d109291 | 2026-10-15 | Merge executor/runtime-a: log rotation never stops the recorder, empty-segment cleanup after a crash, four runtime checks |  |
+| b6318d9 | 2026-10-15 | Merge executor/runtime-b: stall watchdog, loop retention and alerts exercised; the logger can never throw |  |
+| e59c032 | 2026-10-15 | Merge executor/dst-utc: every interval, age and deadline on one UTC clock |  |
+| 752527d | 2026-10-15 | Merge master into portable-nvr: start Stage 1 on the current original system |  |
+| 26acb81 | 2026-10-15 | Merge master into portable-nvr: the camui request guard ([91]) for Stage 1 to build on |  |
+| 15e4bb3 | 2026-10-16 | Merge Stage 1A: a dedicated, login-protected live-view MediaMTX (portable project, not for master) |  |
+| b8749e3 | 2026-10-16 | Merge Stage 1B: the Live screen and the same-origin WHEP proxy |  |
+| 87871d0 | 2026-10-16 | Merge Stage 2a: tile diagnostics, LiveAdvertiseHosts and a LAN media address |  |
+| 97fd3fe | 2026-10-16 | Merge Stage 2b: camui over HTTPS on the LAN with a local CA and a token |  |
+| 1e05dd8 | 2026-10-16 | Merge Stage 2b.1: the HTTPS listener is view-only by default |  |
+| e15dbb4 | 2026-10-16 | Merge Stage 2c prep: demo -Tls for a phone test with fake cameras |  |
+| 3fa1979 | 2026-10-16 | Merge live grid and modal: a screen-filling grid, a camera modal with an instant picture, diagnostics v2 |  |
+| 748ae72 | 2026-10-16 | Merge plan: cross-cutting stray-process guard tasks S1 to S6 (not built) |  |
+| 629bb5e | 2026-10-17 | Merge live robustness: hidden grace period, stall detection, recovery without a reload |  |
+| 436b363 | 2026-10-17 | Merge live grid Fit/Fill toggle |  |
+| 6890b24 | 2026-10-17 | Merge docs: live grace settings and Firefox verified |  |
+| f90b987 | 2026-10-17 | Merge master into portable-nvr: alert 110 floor (todo [92]); tests lists and the synthetic camera's encoder arguments keep both sides |  |
+| d4c73eb | 2026-10-17 | Merge plan: status board, gap analysis, portable todo |  |
+| a88b08a | 2026-10-17 | Merge OS-independent design: Holocron (one executable, levelled logging), inventories, high-level and low-level plans |  |
+| 54ce1d3 | 2026-10-17 | Merge Holocron Go module skeleton |  |
+| 59237bd | 2026-10-17 | Merge login page with brute-force protection: replaces the LAN token |  |
+| 0bfacb5 | 2026-10-17 | Merge Holocron logging (logx) and the action contract (cli) |  |
+| 29dd4ef | 2026-10-17 | Merge Holocron W0: status.json contract (schema, types, conformance) and golden files from the PowerShell product |  |
+| ce57193 | 2026-10-17 | Merge Holocron spikes SP1, SP1b, SP4, SP6, SP7: findings and experiment programs |  |
+| 497d38d | 2026-10-17 | Merge LLD spike decisions |  |
+| cd0a977 | 2026-10-20 | Merge Holocron W2: clock, config, archive, osx first slice, logx audit follow-ups |  |
+| c2edde3 | 2026-10-20 | Merge Holocron W4: status reader, atomic writer, carry-forward, liveness verdict; camui share-delete status read |  |
+| 62278b5 | 2026-10-20 | Merge Holocron W6: relay package (both MediaMTX configs byte-identical, env sources, secrets, API client, child specs) |  |
+| e433dbe | 2026-10-20 | Merge Holocron W5: ffmpeg package (exact arguments, version and TZ rules, credential-free direct input, redacted child, empty-segment cleanup) |  |
+| 15c2ff2 | 2026-10-20 | Merge Holocron hardening: complete owner-only ACLs, userinfo-escaped redaction, config helper export and root percent rule, doc corrections |  |
+| aa05daf | 2026-10-20 | Merge Holocron W3: pruner (pure planner, guarded executor, sandbox guard) with PowerShell differential goldens |  |
+| d1dee7e | 2026-10-20 | Merge Holocron W7a: child lifecycle manager (backoff, stall, relay-or-direct, down alert, status rows) |  |
+| 06d45fb | 2026-10-20 | Merge Holocron W10: alerts (non-blocking dispatcher, log/webhook/push/desktop/event-log channels) |  |
+| 7f16cf1 | 2026-10-20 | Merge Holocron W7b: supervisor (loop, relay and live children, status assembly, ordered stop, panic handling) |  |
+| 247359f | 2026-10-20 | Merge Holocron spikes SP2 and SP3: console close and process lifetime findings |  |
+| f237a52 | 2026-10-20 | Merge Holocron W8: process lifetime (job objects, locked starter, instance lock, child registry, console close) and the host |  |
+| a94e307 | 2026-10-20 | Merge Holocron W11: secrets store (env, encrypted file, Windows Credential Manager) and the legacy camera_creds.xml importer |  |
+| f0ce424 | 2026-10-20 | Merge Holocron W9a: control API and the single holocron command tree (up, down, status, cam, config, live, logs, log level, alert test, doctor, version) |  |
+| 18749a2 | 2026-10-21 | Merge Holocron W9b1: the web app is part of the holocron module (web role, managed by up, control through the API) |  |
+| fec055e | 2026-10-21 | Merge Holocron W9c: user, tls, secret, open, prune, archive stats commands and Go-side settings writes |  |
+| 3aff33c | 2026-10-21 | Merge Holocron W12: install, uninstall, autostart (logon task, systemd, launchd, Windows service) |  |
+| 0ad7f7f | 2026-10-21 | Merge Holocron W12b: install --window visible/hidden (visible console by default), Defender test result |  |
+| 22943e7 | 2026-10-21 | Merge Holocron W9d: viewer role and the Admin tab in the web app |  |
+| 0e80374 | 2026-10-21 | Merge Holocron W13: shadow rig runbook and holocron archive compare |  |
+| ebe5fe5 | 2026-10-21 | Merge Holocron W13b: RelayExternal mode and live size of the open segment |  |
+| 55d0dbb | 2026-10-21 | Merge Holocron W14: GitHub Actions CI (Linux, Windows, macOS best effort) |  |
+| 8093a96 | 2026-10-21 | Merge Holocron W15: cutover and rollback runbooks |  |
+| ccd36bd | 2026-10-21 | Merge Holocron W14b: suite green natively on Windows; CheckRoot follows junctions and 8.3 names |  |
+| eeae710 | 2026-10-22 | Merge Holocron W16: Phone tab for viewers, osx test race, external-relay text, doctor port check, per-command help, shadow web recipe |  |
 
 ## Direct commits on the integration branch (advisor, one concern each)
 
@@ -101,3 +102,8 @@ Update this file in the same push as each merge: `git log --first-parent --merge
 | c01b90a | 2026-10-21 | ci: failed-test annotations in chunks, never fail the step |
 | 236e49e | 2026-10-21 | ci: annotate only the output of failed tests, not passing test logs |
 | 45e9587 | 2026-10-21 | ci: annotate the output printed before each failing test |
+| 6e371a7 | 2026-10-21 | docs: D5 shadow window ends 22 Oct 2026 10:00 Athens |
+| 985884e | 2026-10-21 | docs: commission ledger of every merge into portable-nvr |
+| 6478ee1 | 2026-10-21 | web: pin the Content-Type of .js and .css whatever the host says |
+| bda60ae | 2026-10-21 | web: the owner-only ACL test accepts SYSTEM and Administrators entries |
+| baf78b0 | 2026-10-22 | ci: run the real-process and real-ffmpeg step with -race |
