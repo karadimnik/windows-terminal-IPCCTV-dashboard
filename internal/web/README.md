@@ -56,7 +56,7 @@ re-read from `users.json` on every request. The loopback listener and the token 
 `users.list`, `tls.ca`, `tls.print`, `secret.status`, `autostart.status`). Users and TLS use `UserAdmin` and the TLS facade of
 this package directly (with `Run` sharing one `authService` between both listeners when `TLSListen` is set, so lockouts are
 visible and an unlock applies at once); the rest goes to `Options.Admin` (`AdminTools`, supplied by `cmd/holocron`'s
-`webAdmin`; nil: 501). Key, camera-login, CA and autostart changes take the one-at-a-time lock of Settings and the controls (409 while another runs); user changes are serialised by `UserAdmin` itself. `admin.js` (and so the tab's
+`webAdmin`; nil: 501). Key, camera-login, CA and autostart changes take the one-at-a-time lock of Settings and the controls (409 while another runs); role changes and removals are serialised inside `UserAdmin` with their last-admin check. `admin.js` (and so the tab's
 markup) is served to admins only; `index.html` holds an empty placeholder.
 
 ## Rule R2 (`actions.go`)
