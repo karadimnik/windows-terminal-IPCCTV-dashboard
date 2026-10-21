@@ -1,0 +1,159 @@
+# Holocron CI. Lives on portable-nvr only. No secrets, read-only token, no fork pull requests, no schedule.
+# What runs and how to read it: docs/ci.md
+name: ci
+
+on:
+  push:
+    branches: [portable-nvr]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local # use the Go that setup-go installed, never download another
+  CGO_ENABLED: "1" # -race needs cgo (gcc is on all three hosted images)
+  HOLOCRON_SKIP_POWERSHELL: "1" # the PowerShell harness is not part of CI (docs/ci.md)
+
+jobs:
+  lint-vet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # no dependencies, so no go.sum to key a cache on
+      - name: gofmt
+        run: |
+          out="$(gofmt -l cmd internal)"
+          if [ -n "$out" ]; then echo "$out"; echo "gofmt: files above need formatting"; exit 1; fi
+      - name: go vet for linux, windows and darwin
+        run: |
+          for os in linux windows darwin; do
+            echo "::group::go vet GOOS=$os"
+            GOOS=$os go vet ./...
+            echo "::endgroup::"
+          done
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    continue-on-error: ${{ matrix.experimental }} # macOS is paper-only today: it reports, it does not fail the run
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, experimental: false }
+          - { os: windows-latest, experimental: false }
+          - { os: macos-latest, experimental: true }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Keep line endings as committed (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Install ffmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends ffmpeg
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install ffmpeg --version 9.0.2 --no-progress -y
+      - name: Install ffmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Locate tools and print versions
+        id: ff
+        run: |
+          ff="$(command -v ffmpeg)"
+          fp="$(command -v ffprobe)"
+          if [ "$RUNNER_OS" = Windows ]; then
+            # the real binaries, not Chocolatey's shims: the real-process tests track the ffmpeg pid
+            real="$(find /c/ProgramData/chocolatey/lib/ffmpeg -name ffmpeg.exe 2>/dev/null | sed -n 1p)"
+            [ -n "$real" ] && ff="$real" && fp="$(dirname "$real")/ffprobe.exe"
+            ff="$(cygpath -m "$ff")"
+            fp="$(cygpath -m "$fp")"
+          fi
+          echo "ffmpeg=$ff" >> "$GITHUB_OUTPUT"
+          echo "ffprobe=$fp" >> "$GITHUB_OUTPUT"
+          go version
+          go env GOOS GOARCH CGO_ENABLED CC
+          gcc --version | sed -n 1p
+          git --version
+          "$ff" -version | sed -n 1p
+          "$fp" -version | sed -n 1p
+      - name: go test -race
+        run: go test -race -count=1 -p 1 -v ./... 2>&1 | tee .ci-race.txt
+      - name: ffmpeg-dependent tests ran and passed
+        run: |
+          for t in TestRealMediaScenarios TestFFprobeFailures; do
+            grep -qE "^--- PASS: $t " .ci-race.txt || { echo "::error::$t did not pass (skipped or absent)"; exit 1; }
+          done
+      # Opt-in suites (real processes, real ffmpeg). Without -race: the real-process tests in internal/osx have a data
+      # race in the test code (docs/ci.md). Blocking on Linux, where they are proven; report-only elsewhere until a run says otherwise.
+      - name: Real-process and real-ffmpeg tests (no -race)
+        continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
+        env:
+          HOLOCRON_OSX_REAL: "1"
+          HOLOCRON_HOST_REAL: "1"
+          HOLOCRON_IT: "1"
+          HOLOCRON_IT_FFMPEG: ${{ steps.ff.outputs.ffmpeg }}
+          HOLOCRON_IT_FFPROBE: ${{ steps.ff.outputs.ffprobe }}
+        run: |
+          go test -count=1 -p 1 -v ./internal/ffmpeg ./internal/osx ./internal/host 2>&1 | tee .ci-real.txt
+          for t in TestRealFfmpeg TestFullChainHostSupervisorFfmpeg; do
+            grep -qE "^--- PASS: $t " .ci-real.txt || { echo "::error::$t did not pass (skipped or absent)"; exit 1; }
+          done
+      - name: Test and skip counts
+        if: always()
+        run: |
+          for f in .ci-race.txt .ci-real.txt; do
+            [ -f "$f" ] || continue
+            {
+              echo "### $RUNNER_OS: $f"
+              echo "pass $(grep -cE '^ *--- PASS' "$f"), fail $(grep -cE '^ *--- FAIL' "$f"), skip $(grep -cE '^ *--- SKIP' "$f") (subtests included)"
+              echo
+              echo '```'
+              grep -E '^ *--- SKIP' "$f" | sed -E 's/^ *--- SKIP: ([^ ]+).*/\1/' | sort | uniq -c
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [windows/amd64, linux/amd64, linux/arm64, darwin/arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Cross-build holocron and camui
+        env:
+          TARGET: ${{ matrix.target }}
+          CGO_ENABLED: "0"
+        run: GOOS="${TARGET%/*}" GOARCH="${TARGET#*/}" go build ./cmd/holocron ./cmd/camui
