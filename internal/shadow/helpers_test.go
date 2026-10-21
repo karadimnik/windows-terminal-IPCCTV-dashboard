@@ -26,6 +26,7 @@ type spec struct {
 	dur     float64 // seconds (0: 900)
 	size    int64   // 0: 150000 bytes per second
 	noAudio bool
+	noDur   bool // readable but never finalized
 	audio   *Stream
 	mod     time.Time // zero: the end of the segment
 }
@@ -108,6 +109,9 @@ func (s *sandbox) put(root, folder string, sp spec) string {
 		if sp.audio != nil {
 			p.Audio = sp.audio
 		}
+	}
+	if sp.noDur {
+		p.Duration, p.NoDuration = 0, true
 	}
 	s.fp.m[path] = p
 	return path

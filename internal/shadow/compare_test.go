@@ -174,6 +174,29 @@ func TestCompareTable(t *testing.T) {
 	}
 }
 
+func TestUnfinalizedFiles(t *testing.T) {
+	// the shadow was stopped 14 s into the 12:45 file: ffmpeg was killed, the file has no duration
+	sb := newSandbox(t)
+	sb.putAll(sb.old, camera, series(at(12, 0, 0), 5, 900, 0))
+	sb.putAll(sb.new, camera, series(at(12, 0, 1), 3, 900, 0))
+	sb.put(sb.new, camera, spec{start: at(12, 45, 1), dur: 14, noDur: true})
+	rep, _ := Compare(context.Background(), sb.options())
+	c := rep.Cameras[0]
+	if !c.Equal || len(c.Pairs) != 4 || c.Pairs[3].Kind != "partial_end" || c.Pairs[3].NewDurSec != 14 || len(c.Notes) != 1 || !strings.Contains(c.Notes[0], "was not finalized") {
+		t.Fatalf("%q %q %+v", c.Differences, c.Notes, c.Pairs)
+	}
+	// in the middle of a side it is a fault
+	sb2 := newSandbox(t)
+	sb2.putAll(sb2.old, camera, series(at(12, 0, 0), 4, 900, 0))
+	n := series(at(12, 0, 0), 4, 900, 0)
+	n[1].noDur = true
+	sb2.putAll(sb2.new, camera, n)
+	rep, _ = Compare(context.Background(), sb2.options())
+	if rep.Equal || !hasDiff(rep.Cameras[0], "has no duration: its recorder was killed inside it") {
+		t.Fatalf("%q", rep.Cameras[0].Differences)
+	}
+}
+
 func TestPartialLastIsPartialEnd(t *testing.T) {
 	sb := newSandbox(t)
 	sb.putAll(sb.old, camera, series(at(12, 0, 0), 3, 900, 0))

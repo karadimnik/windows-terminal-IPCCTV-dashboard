@@ -22,11 +22,14 @@ type Stream struct {
 
 // Probe is what ffprobe says about one closed segment.
 type Probe struct {
-	Duration float64 // seconds, format=duration
-	Video    *Stream // first video stream, nil when none
-	Audio    *Stream // first audio stream, nil when none
-	Videos   int
-	Audios   int
+	Duration float64 // seconds, format=duration; 0 with NoDuration
+	// NoDuration: the streams are readable but the file has no duration, because its writer was killed
+	// before it finalized the file (a recorder stopped inside a segment).
+	NoDuration bool
+	Video      *Stream // first video stream, nil when none
+	Audio      *Stream // first audio stream, nil when none
+	Videos     int
+	Audios     int
 }
 
 // Prober reads the layout of a media file. The production one runs ffprobe; tests inject a fake.
@@ -82,10 +85,14 @@ func ParseProbe(b []byte) (Probe, error) {
 		return Probe{}, fmt.Errorf("ffprobe: unreadable output: %v", err)
 	}
 	d, err := strconv.ParseFloat(strings.TrimSpace(j.Format.Duration), 64)
-	if err != nil || d <= 0 {
-		return Probe{}, fmt.Errorf("ffprobe: no duration (%q)", j.Format.Duration)
+	noDuration := err != nil || d <= 0
+	if noDuration && len(j.Streams) == 0 {
+		return Probe{}, fmt.Errorf("ffprobe: no duration and no stream (%q)", j.Format.Duration)
 	}
-	p := Probe{Duration: d}
+	p := Probe{Duration: d, NoDuration: noDuration}
+	if noDuration {
+		p.Duration = 0
+	}
 	for _, s := range j.Streams {
 		st := &Stream{Codec: s.CodecName, Width: s.Width, Height: s.Height, Channels: s.Channels}
 		st.SampleRate, _ = strconv.Atoi(s.SampleRate)

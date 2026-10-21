@@ -151,6 +151,14 @@ func TestFFprobeFailures(t *testing.T) {
 	}
 }
 
+func TestParseProbeWithoutADuration(t *testing.T) {
+	// a Matroska file whose writer was killed: streams and size, no duration
+	p, err := ParseProbe([]byte(`{"streams":[{"codec_type":"video","codec_name":"h264","width":2560,"height":1440},{"codec_type":"audio","codec_name":"pcm_alaw","sample_rate":"8000","channels":1}],"format":{"size":"2097152"}}`))
+	if err != nil || !p.NoDuration || p.Duration != 0 || p.Video == nil || p.Audio == nil {
+		t.Fatalf("%+v %v", p, err)
+	}
+}
+
 func TestParseProbe(t *testing.T) {
 	p, err := ParseProbe([]byte(`{"streams":[{"codec_type":"video","codec_name":"h264","width":2560,"height":1440},{"codec_type":"audio","codec_name":"pcm_alaw","sample_rate":"8000","channels":1}],"format":{"duration":"900.521000"}}`))
 	if err != nil || p.Duration != 900.521 || p.Video.Width != 2560 || p.Audio.SampleRate != 8000 || p.Videos != 1 || p.Audios != 1 {

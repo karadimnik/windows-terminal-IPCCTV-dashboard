@@ -189,7 +189,8 @@ type seg struct {
 	mod   time.Time
 	probe *Probe
 	perr  string
-	dur   float64 // seconds: ffprobe, or the estimate until probed
+	dur   float64 // seconds: ffprobe, or the estimate until probed (and when the file has no duration)
+	noDur bool    // readable, but never finalized
 }
 
 func (s *seg) end() time.Time { return s.start.Add(time.Duration(s.dur * float64(time.Second))) }
@@ -434,6 +435,9 @@ func compareCamera(ctx context.Context, o *Options, folder string) (CameraReport
 				continue
 			}
 			s.probe, s.dur = &p, p.Duration
+			if p.NoDuration {
+				s.noDur, s.dur = true, s.estimate(segSec).Sub(s.start).Seconds()
+			}
 			if i%50 == 49 {
 				o.Progress(fmt.Sprintf("%s: %s %d/%d segments probed", folder, side.label, i+1, len(side.segs)))
 			}
@@ -441,6 +445,8 @@ func compareCamera(ctx context.Context, o *Options, folder string) (CameraReport
 	}
 
 	c.names(oldW, newW)
+	c.unfinalized("old", oldW)
+	c.unfinalized("new", newW)
 	c.pairing(oldW, newW, we)
 	c.boundaries("old", oldW)
 	c.boundaries("new", newW)
@@ -488,6 +494,21 @@ func absDur(d time.Duration) time.Duration {
 		return -d
 	}
 	return d
+}
+
+// unfinalized: a segment whose recorder was killed inside it has no duration (the writer never
+// closed the file). That is expected for the last file of a side (a recorder stopped inside it; its
+// length is then estimated from its write time) and a fault anywhere else.
+func (c *camCmp) unfinalized(label string, segs []*seg) {
+	for i, s := range segs {
+		switch {
+		case !s.noDur:
+		case i == len(segs)-1:
+			c.rep.Notes = append(c.rep.Notes, fmt.Sprintf("%s %s was not finalized (no duration; its recorder was stopped inside it); its length is estimated from its write time", label, s.name))
+		default:
+			c.diff("%s %s has no duration: its recorder was killed inside it, and the next segment follows", label, s.name)
+		}
+	}
 }
 
 // names checks the name pattern: the camera prefix is the folder (checked by the listing), the
