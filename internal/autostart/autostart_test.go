@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -81,7 +82,7 @@ func TestGeneratedEntriesGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	golden(t, "holocron.service", e.Content)
-	if e.File != filepath.Join(r.env.Home, ".config", "systemd", "user", "holocron.service") {
+	if e.File != path.Join(r.env.Home, ".config", "systemd", "user", "holocron.service") {
 		t.Errorf("unit file %s", e.File)
 	}
 	r.env.ConfigHome = "/xdg"
