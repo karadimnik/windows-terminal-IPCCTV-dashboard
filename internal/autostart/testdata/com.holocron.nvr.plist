@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Created by holocron install; holocron uninstall removes it and the next install rewrites it. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.holocron.nvr</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/holocron/holocron</string>
+		<string>--config</string>
+		<string>/home/alice/.config/holocron/holocron.config.json</string>
+		<string>host</string>
+		<string>--service</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/home/alice/.config/holocron</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/alice/Library/Logs/com.holocron.nvr.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/alice/Library/Logs/com.holocron.nvr.log</string>
+</dict>
+</plist>

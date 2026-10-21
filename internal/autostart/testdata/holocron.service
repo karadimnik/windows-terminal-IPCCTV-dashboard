@@ -1,0 +1,15 @@
+# Created by holocron install; holocron uninstall removes it and the next install rewrites it.
+[Unit]
+Description=Holocron NVR (recorder, relay, live view, web app)
+
+[Service]
+Type=simple
+WorkingDirectory=/home/alice/.config/holocron
+ExecStart=/opt/holocron/holocron --config /home/alice/.config/holocron/holocron.config.json host --service
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=20 21
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

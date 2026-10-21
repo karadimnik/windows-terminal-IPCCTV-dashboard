@@ -1,6 +1,9 @@
 package osx
 
-import "sync"
+import (
+	"errors"
+	"sync"
+)
 
 // Fake is a Platform for tests. The zero value is a Linux-style platform with no free space data.
 type Fake struct {
@@ -57,3 +60,103 @@ func NewFake(goos string, e Env) *Fake {
 }
 
 var _ Platform = (*Fake)(nil)
+
+// FakeSCM is an in-memory ServiceManager. Fail maps an operation ("query", "create", "update",
+// "setstart", "delete") to the error it returns; Calls lists "op:name" for every call.
+type FakeSCM struct {
+	mu       sync.Mutex
+	Services map[string]ServiceConfig
+	Running  map[string]bool
+	Fail     map[string]error
+	Calls    []string
+}
+
+func (f *FakeSCM) note(op, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, op+":"+name)
+	if f.Services == nil {
+		f.Services = map[string]ServiceConfig{}
+	}
+	return f.Fail[op]
+}
+
+func (f *FakeSCM) Query(name string) (ServiceState, error) {
+	if err := f.note("query", name); err != nil {
+		return ServiceState{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.Services[name]
+	if !ok {
+		return ServiceState{}, nil
+	}
+	st := ServiceState{Exists: true, Config: c, Running: f.Running[name], State: "stopped"}
+	if st.Running {
+		st.State = "running"
+	}
+	return st, nil
+}
+
+func (f *FakeSCM) Create(c ServiceConfig) error {
+	if err := f.note("create", c.Name); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.Services[c.Name]; ok {
+		return errors.New("CreateService: the specified service already exists")
+	}
+	f.Services[c.Name] = c
+	return nil
+}
+
+func (f *FakeSCM) Update(c ServiceConfig) error {
+	if err := f.note("update", c.Name); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.Services[c.Name]; !ok {
+		return errors.New("OpenService: the specified service does not exist")
+	}
+	f.Services[c.Name] = c
+	return nil
+}
+
+func (f *FakeSCM) SetStart(name string, start ServiceStart, delayed bool) error {
+	if err := f.note("setstart", name); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.Services[name]
+	if !ok {
+		return errors.New("OpenService: the specified service does not exist")
+	}
+	c.Start, c.Delayed = start, delayed && start == StartAuto
+	f.Services[name] = c
+	return nil
+}
+
+func (f *FakeSCM) Delete(name string) error {
+	if err := f.note("delete", name); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.Services[name]; !ok {
+		return errors.New("OpenService: the specified service does not exist")
+	}
+	delete(f.Services, name)
+	return nil
+}
+
+// CallList returns a copy of Calls.
+func (f *FakeSCM) CallList() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.Calls...)
+}
+
+var _ ServiceManager = (*FakeSCM)(nil)
