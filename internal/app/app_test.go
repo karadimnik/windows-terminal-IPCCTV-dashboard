@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -577,4 +578,64 @@ func TestWebAuxArgsStopFileAndStaleReap(t *testing.T) {
 	if _, err := os.Stat(p.WebStopFile()); err != nil {
 		t.Errorf("Stop wrote no stop file: %v", err)
 	}
+}
+
+func TestEveryEditableKeyHasARule(t *testing.T) {
+	for _, k := range EditableKeys {
+		if editableRules[k] == "" {
+			t.Errorf("%s has no rule for the Admin tab", k)
+		}
+	}
+	if len(editableRules) != len(EditableKeys) {
+		t.Errorf("%d rules for %d keys", len(editableRules), len(EditableKeys))
+	}
+}
+
+func TestEditableKeyInfos(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "holocron.config.json")
+	os.WriteFile(path, []byte("\xef\xbb\xbf{\"SegmentSeconds\": 600, \"logging\": {\"levels\": {\"Web\": \"debug\"}}, \"alerts\": {\"webhook\": {\"url\": \"https://u:hunter2@hooks.example.org/x\"}}}"), 0o644)
+	cfg, _, err := config.Parse(mustRead(t, path), plat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	infos, err := EditableKeyInfos(path, cfg, plat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	by := map[string]KeyInfo{}
+	for _, i := range infos {
+		by[i.Key] = i
+	}
+	if s := by["SegmentSeconds"]; !s.Set || s.Value != float64(600) || s.Default != float64(900) || !s.Restart || s.Rule == "" {
+		t.Errorf("SegmentSeconds: %+v", s)
+	}
+	if r := by["ReserveGB"]; r.Set || r.Value != r.Default {
+		t.Errorf("ReserveGB: %+v", r)
+	}
+	if l := by["LiveViewEnabled"]; l.Restart {
+		t.Error("LiveViewEnabled is applied by a reload")
+	}
+	if c := by["logging.levels.web"]; !c.Set || c.Value != "debug" {
+		t.Errorf("component row: %+v", c)
+	}
+	if p := by["logging.levels.*"]; !p.Pattern {
+		t.Errorf("pattern row: %+v", p)
+	}
+	for _, k := range []string{"secrets.file", "secrets.keyFile", "secrets.backend"} {
+		if by[k].Warning == "" {
+			t.Errorf("%s has no warning", k)
+		}
+	}
+	if fmt.Sprint(by["alerts.webhook.url"].Value) == "" || strings.Contains(fmt.Sprint(by["alerts.webhook.url"].Value), "hunter2") {
+		t.Errorf("the URL's password is shown: %v", by["alerts.webhook.url"].Value)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
