@@ -34,7 +34,7 @@ var keptKeys = []string{
 	"ReconcileSeconds", "StatusIntervalSeconds", "ArchiveScanSeconds", "CameraDownAlertMinutes", "CameraDownRepeatHours",
 	"StopTimeoutSeconds", "BackoffStartSeconds", "BackoffMaxSeconds", "HealthyResetSeconds", "StallFactor", "LogMaxBytes",
 	"LogRepeatSuppressSeconds", "StatusEventCount",
-	"RestreamerEnabled", "RestreamerExePath", "RestreamerConfigPath", "RelayBase", "RelayApiBase", "RelayProbeTimeoutMs",
+	"RestreamerEnabled", "RelayExternal", "RestreamerExePath", "RestreamerConfigPath", "RelayBase", "RelayApiBase", "RelayProbeTimeoutMs",
 	"RelayStartupWaitSeconds", "RelayReadyWaitSeconds", "StartStaggerMs",
 	"LiveViewEnabled", "LiveExePath", "LiveConfigPath", "LiveWhepAddress", "LiveUdpAddress", "LiveAdvertiseHosts", "LiveSubStream", "LiveCloseAfterSeconds", "LiveSecretPath",
 	"logging", "alerts", "secrets", "web",
@@ -287,6 +287,7 @@ func (d *decoder) run(c *Config) {
 	d.integer("StatusEventCount", &c.StatusEventCount, 0)
 
 	d.boolean("RestreamerEnabled", &c.RestreamerEnabled)
+	d.boolean("RelayExternal", &c.RelayExternal)
 	d.str("RestreamerExePath", &c.RestreamerExePath)
 	d.str("RestreamerConfigPath", &c.RestreamerConfigPath)
 	d.str("RelayBase", &c.RelayBase)
@@ -532,6 +533,9 @@ func (d *decoder) crossChecks(c *Config) {
 	}
 	if c.BackoffMaxSeconds < c.BackoffStartSeconds && !d.hasProblemUnder("Backoff") {
 		d.problem("BackoffMaxSeconds", "must not be less than BackoffStartSeconds (%d), got %d", c.BackoffStartSeconds, c.BackoffMaxSeconds)
+	}
+	if c.RelayExternal && c.RestreamerEnabled && !d.hasProblemUnder("RestreamerEnabled") {
+		d.problem("RelayExternal", "needs RestreamerEnabled false: with an external relay Holocron starts no MediaMTX of its own (RestreamerEnabled defaults to true, so set it to false)")
 	}
 	for _, k := range []string{"RelayBase", "RelayApiBase"} {
 		if v := c.value(k); strings.TrimSpace(v) != "" {

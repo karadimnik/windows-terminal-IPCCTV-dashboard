@@ -119,7 +119,7 @@ func (m *mtxChild) run() {
 		}
 		if m.live {
 			if s.relayM == nil {
-				m.say(slog.LevelWarn, "live view needs the recording relay: RestreamerEnabled is false, so it is not started")
+				m.say(slog.LevelWarn, "live view needs the recording relay this supervisor runs (RestreamerEnabled true, RelayExternal false), so it is not started")
 				if !m.sleep(time.Second) {
 					return
 				}

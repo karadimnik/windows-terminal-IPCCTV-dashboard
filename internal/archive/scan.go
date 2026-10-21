@@ -46,6 +46,10 @@ const openGrace = 60 * time.Second
 // (the pruner's clock-sanity tolerance, IR 5.2 step 7).
 const futureTolerance = 60 * time.Second
 
+// newestSize reads the live size of the newest segment; a test replaces it to stand in for a
+// listing that is stale (NTFS while the writer's handle is open).
+var newestSize = liveSize
+
 // Scan reads one camera directory with DefaultMatcher. See Matcher.Scan.
 func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, error) {
 	return DefaultMatcher.Scan(dir, container, now, segmentSeconds)
@@ -54,8 +58,12 @@ func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, er
 // Scan reads one camera directory. The directory name is the camera's safe name and container is
 // the configured extension (".mkv"); both decide which files are strict-pattern segments. A missing
 // directory is an empty scan, not an error. This replaces NTFS creation time as the "which file is
-// open" signal (HLD section 6); os.Stat of a file being written is live on every OS (SP4), so sizes
-// need no special read.
+// open" signal (HLD section 6). The listing's size of the file being written is stale on Windows
+// (NTFS updates a directory entry when the writer closes its handle), so the newest segment's size
+// is read live through an open handle (liveSize, as Get-CamLiveFileLength); a refused open keeps the
+// listing's size. Closed files are fresh in the listing. Only the size is re-read, as in PowerShell:
+// the open file's listing mtime may lag too, but never before its creation, and a healthy segment is
+// closed before it is SegmentSeconds+60 s old, so Recent is not changed by the lag.
 //
 // Deviation from the task text: container is an extra parameter, because "matches the strict
 // pattern" depends on the configured container.
@@ -112,6 +120,10 @@ func (m Matcher) Scan(dir, container string, now time.Time, segmentSeconds int) 
 		scan.Newest = newest.Name()
 		scan.NewestMTime = newestM
 		scan.NewestBytes = newest.Size()
+		if n, err := newestSize(filepath.Join(dir, newest.Name())); err == nil {
+			scan.Bytes += n - scan.NewestBytes
+			scan.NewestBytes = n
+		}
 		age := now.Sub(newestM)
 		scan.Recent = age <= time.Duration(segmentSeconds)*time.Second+openGrace
 		scan.Anomaly = -age > futureTolerance

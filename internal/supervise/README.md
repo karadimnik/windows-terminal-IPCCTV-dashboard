@@ -80,6 +80,7 @@ func FileChildLogs(maxBytes int64, red *logx.Redactor) func(component, path stri
 | Exit backoff 3, 6, 12, 24 s visible in the rows (count, LastError, NextStartAt) | R:3941-3961 | `TestSupervisorBackoffVisibleInRows` |
 | Stall kill after SegmentSeconds x StallFactor, counted; a writing child never killed | R:3981-4010 | `TestSupervisorStalledChildKilled` |
 | Hold 15 s, direct through the list file (no password in argv), move to the relay uncounted | R:3963-4036, SP1b | `TestSupervisorDirectThenRelay` |
+| RelayExternal (W13b): no relay or live process, no MediaMTX config, no relay/live/camera login read; the golden relay vector; refused relay retried on it with the backoff; with RestreamerEnabled a ConfigFault | brief | `TestInputChoiceRelayExternal`, `TestSupervisorRelayExternal`, `TestSupervisorRelayExternalWithOwnRelayIsAConfigFault` |
 | Alert 110 once per episode, recovery line, second episode | R:4074-4099 | `TestSupervisorDownAlertEpisode` |
 | Heartbeat independent of a 20 s relay start (readiness wait or process start) | IS 1.1 | `TestSupervisorHeartbeatNotBlockedByRelayStart` |
 | Pruner at start and every PruneIntervalSeconds; alerts from the result | R:4117-4121 | `TestSupervisorPrunerSchedule` |
@@ -113,6 +114,13 @@ is blocked (goroutine dump), so a woken goroutine acts at the virtual time it wa
   start, like the live config in PowerShell; PowerShell rewrote the relay file only when its login block was stale.
   While running, a config whose login block no longer matches is rewritten and the relay restarted (not counted).
 - The ready set is fetched once per 1 s tick (PowerShell: on a status tick or when a start is due) and shared.
+- `RelayExternal` (new, no PowerShell counterpart): `setup` creates no relay `mtxChild`, and `relayView` answers
+  `RelayView{Alive: true, Ready: relay.DeniedReadySet()}` (Denied counts every path as ready) without a process or an API.
+  The Manager's `RelayEnabled` is `RestreamerEnabled || RelayExternal`, so Plan's existing relay-or-direct choice picks the
+  relay input for every camera with a relay path, with no hold. An unreachable external relay is the production case of
+  a relay that reports a path ready but cannot be read: ffmpeg exits, the exit backoff applies, the next start is on the
+  relay again. There is no fallback to the direct camera input (it would open a camera session the external relay already
+  holds). `status.json` `Restreamer.Enabled` stays false (this supervisor runs none); the rows say `InputMode` `relay`.
 - At a cold start the cameras are held (as if the relay were young) until the relay's first start attempt ends.
 - `holocron.config.json` is re-read every ReconcileSeconds only to log a change once; the running values stay (PowerShell
   reads it once). The one exception is `LiveViewEnabled`, which `Reload` (the control API's `POST /v1/reload` and
@@ -212,6 +220,13 @@ hold, stagger, repeat, blind gap, 300 s reset, [int] rounding, denied) each fail
 - **Open segment**: its first-seen time (`archive.Tracker`) counts only while the scan says `Recent`; PowerShell
   counts NTFS creation time of the newest-created file. Without a scan the stall marker is StartedAt (PowerShell
   enumerates the folder).
+- **Open segment size** (W13b): `CurrentSegmentBytes` and `ArchiveBytes` take the newest segment's live size
+  (`archive` reads it through an open handle, as `Get-CamLiveFileLength`); a Windows listing shows the size at creation
+  (0) while ffmpeg holds the file. The stall watchdog and alert 110 never read a size: their markers are StartedAt, the
+  newest CLOSED write (fresh in the listing: NTFS updates an entry when its handle closes) and the open segment's
+  first-seen time, so the stale size changed neither decision. `SecondsSinceLastClosedSegment` is the age of the newest
+  closed write and is correct as listed: with 900 s segments it runs from 0 to about 900 s while the current segment is
+  open (865 s means the current segment is 865 s old).
 - **Restarts** are a ring (last hour, at most 4096); PowerShell keeps every stamp for the process life.
 - **Reconcile stops** are handed out as Kill and the replacing entry of the same folder waits for the old child to exit.
 - `LastError` rounds the run time like PowerShell's `[int]` (half to even), as `ffmpeg.ExitInfo.Message` now does.

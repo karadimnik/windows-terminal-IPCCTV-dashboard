@@ -40,8 +40,12 @@ Naming, scanning and root-safety rules. The pruner planner/executor (W3) builds 
 - **Newest / Recent** (HLD 6 as amended by spike SP4): `Newest` is the newest strict-pattern file (configured container, prefix = the directory
   name) ordered by mtime, ties by later name; name order is wrong across a fall-back. The PRUNER always protects `Newest`. `Recent` = its mtime is
   within segmentSeconds+60 s of now (a future mtime counts as recent); only the stall watchdog and the down alert use it. `Anomaly` = mtime more than
-  60 s in the future (clock skew). `Files`/`Bytes` count every non-directory entry, as `Get-CamDirScan`; sizes come from os.Stat (no
-  `Get-CamLiveFileLength` port). A missing directory is an empty scan.
+  60 s in the future (clock skew). `Files`/`Bytes` count every non-directory entry, as `Get-CamDirScan`; sizes come from the listing, except
+  `Newest`, whose size is read through an open handle (`liveSize`, the `Get-CamLiveFileLength` port: on NTFS the listing shows the open
+  segment's size as of its creation until ffmpeg closes it; Windows opens it read-only sharing read, write and delete, elsewhere a stat;
+  a refused open keeps the listing's size). `NewestBytes` and `Bytes` use it; closed files are fresh in the listing. Proved on Windows by
+  `TestLiveSizeOfAFileAnotherProcessWrites` (a child writer holds the file open: listing 0 bytes, live 1 MiB). A missing directory is an
+  empty scan.
 - **Marker**: `MarkerValid` also compares the `RootPath` inside the file with the root (PowerShell only checks `Owner`, so a copied marker
   satisfied it). A copied/moved archive is re-claimed by `ClaimRoot` when it holds only recorder files. The marker is written atomically
   (temp in `_state`, `Sync`, owner-only via `Platform.SetOwnerOnly`, rename); a failed owner-only restriction fails the claim (fail closed).

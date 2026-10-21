@@ -32,6 +32,7 @@ Types are strict: a JSON string is never accepted for a boolean or a number (Pow
 | LogRepeatSuppressSeconds | 60 | number >= 0 (**Go**) | repeat collapse | no |
 | StatusEventCount | 20 | whole number >= 0 (**Go**) | events in status.json | no |
 | RestreamerEnabled | true | JSON boolean | relay on/off | no |
+| RelayExternal | false | JSON boolean; true needs RestreamerEnabled false (**Go**: a problem otherwise, because RestreamerEnabled defaults to true) | NEW in holocron: record from a relay this supervisor does not run, at `RelayBase` (the shadow beside the PowerShell system). No MediaMTX is started, stopped or configured and no relay or live login is read; the relay counts as alive and serving every path, so each camera with a relay path starts on the production relay input (`-rtsp_transport ... -timeout ... -i RelayBase/<path>`); a camera that cannot read it exits and is restarted on it with the exit backoff (never moved to its direct input). A name without letters or digits has no relay path and starts direct, as with Holocron's own relay. Live view needs Holocron's own relay and is not started | no |
 | RestreamerExePath, RestreamerConfigPath | `C:\mediamtx\...` | string | relay | no |
 | RelayBase, RelayApiBase | `rtsp://127.0.0.1:8554`, `http://127.0.0.1:9997` | string; if set, needs a host:port | relay | no |
 | RelayProbeTimeoutMs | 1500 | whole number; below 100 is raised to 100 with a warning (PowerShell clamped at use) | relay probe | no |

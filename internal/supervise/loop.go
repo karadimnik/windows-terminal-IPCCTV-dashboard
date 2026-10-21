@@ -176,9 +176,15 @@ func (s *Supervisor) scanArchive(ls *loopState) {
 }
 
 // relayView fetches the ONE ready set of this cycle (IR 11 risk 8) and feeds the login watch
-// (alert 130 once per episode).
+// (alert 130 once per episode). An external relay (RelayExternal) has no process and no API here: it
+// is alive and serves every path, as a relay whose API denies the login (Denied counts as ready), so
+// every camera with a relay path starts on the relay input; one that cannot read it exits and is
+// restarted on it with the exit backoff.
 func (s *Supervisor) relayView() RelayView {
 	if s.relayM == nil {
+		if s.cfg.RelayExternal {
+			return RelayView{Alive: true, Ready: relay.DeniedReadySet()}
+		}
 		return RelayView{}
 	}
 	alive, startedMono := s.relayM.aliveSince()

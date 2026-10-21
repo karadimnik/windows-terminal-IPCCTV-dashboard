@@ -361,6 +361,10 @@ func (s *Supervisor) Run(ctx context.Context) (StopReport, error) {
 	s.log.Info(fmt.Sprintf("supervisor starting: pid %d, container %s, segments %ds, root %s, reconcile %gs, reserve %g GB",
 		s.d.Pid, cfg.Container, cfg.SegmentSeconds, cfg.RootPath, cfg.ReconcileSeconds, cfg.ReserveGB),
 		logx.Action("supervisor.start"), logx.Result(logx.ResultOK), logx.PID(int(s.d.Pid)))
+	if cfg.RelayExternal {
+		s.rlog.Info(fmt.Sprintf("RelayExternal: the cameras record from the relay at %s, which this supervisor does not start, stop or configure", cfg.RelayBase),
+			logx.Action("relay.external"), logx.Target(cfg.RelayBase))
+	}
 	st := SettingsFrom(cfg)
 	if lim, conf := DownAlertSeconds(st), cfg.CameraDownAlertMinutes*60; lim > conf {
 		s.log.Info(fmt.Sprintf("camera-down alert 110: configured %g min, effective %.1f min (%d s) - a healthy camera is up to one segment (%d s) plus the keyframe wait and a status tick past its newest file, so a lower limit would alert on it",
@@ -424,6 +428,9 @@ func (s *Supervisor) setup(cfg config.Config) error {
 	if cfg.SegmentSeconds <= 0 || cfg.StatusIntervalSeconds <= 0 || cfg.ReconcileSeconds <= 0 || cfg.PruneIntervalSeconds <= 0 {
 		return &ConfigFault{errors.New("SegmentSeconds, StatusIntervalSeconds, ReconcileSeconds and PruneIntervalSeconds must be positive")}
 	}
+	if cfg.RelayExternal && cfg.RestreamerEnabled {
+		return &ConfigFault{errors.New("RelayExternal needs RestreamerEnabled false: with an external relay no MediaMTX of its own is started")}
+	}
 	s.cfg, s.profile = cfg, prof
 	d := &s.d
 	if d.StatusPath == "" {
@@ -463,7 +470,7 @@ func (s *Supervisor) setup(cfg config.Config) error {
 	}
 	s.writer = d.Status
 	s.stopFile = filepath.Join(cfg.RootPath, "_state", "stop.request")
-	if cfg.RestreamerEnabled {
+	if cfg.RestreamerEnabled && !cfg.RelayExternal {
 		s.relayM = &mtxChild{s: s, name: "restreamer", label: "restreamer", log: s.rlog, logPath: filepath.Join(cfg.RootPath, "_logs", "restreamer.log")}
 	}
 	if cfg.LiveViewEnabled {

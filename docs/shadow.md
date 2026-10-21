@@ -22,21 +22,22 @@ and deleted at any time without touching the real archive.
 The PowerShell recorder reads `RelayBase/<path>`, where `<path>` is the camera's safe name in lowercase letters and digits
 (`Front Door` becomes `frontdoor`; `Get-CamRelayPathName`). Holocron's own way of doing the same is to start its own
 MediaMTX, which here would fight the PowerShell relay for port 8554, rewrite its config and use its API login. So the shadow
-does not use `RestreamerEnabled`. It uses the input Holocron already has for a camera it reads directly, and points that
-"camera" at the relay: `IP` is `127.0.0.1:8554` and `Quality` (the stream name) is the relay path. With
-`RestreamerEnabled` false Holocron never touches `C:\mediamtx`, the relay's API login or anything in `%LOCALAPPDATA%\IPCCTV`.
+sets `RelayExternal` true and `RestreamerEnabled` false: a relay that Holocron does not run already serves every camera path
+at `RelayBase` (`rtsp://127.0.0.1:8554`, the default). Holocron then starts, stops and configures no MediaMTX, never touches
+`C:\mediamtx`, the relay's API login or anything in `%LOCALAPPDATA%\IPCCTV`, treats the relay as alive and serving every path,
+and records each camera with the production relay input, the same vector the PowerShell recorder uses:
+`-rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://127.0.0.1:8554/<path>` followed by the segment
+output. (`RelayExternal` with `RestreamerEnabled` true is refused by `config validate` and at start.)
 
-Two consequences, both deliberate:
+Two consequences:
 
-- **A camera login is still required to start.** The relay needs none, so use made-up values, in the environment of the
-  shell that runs `holocron up` (`HOLOCRON_CAMERA_USER`, `HOLOCRON_CAMERA_PASSWORD`). They are never sent anywhere that matters:
-  the relay's own rule `user: any` accepts any login. Do not store them (`holocron secret set`), and never put a real camera
-  login there.
-- **The input differs a little from the relay input.** A direct input goes through an `ffconcat` list file (so the password stays
-  off the command line): `-f concat -safe 0 -i <list>` with `option rtsp_transport tcp` and `option timeout` in the list,
-  instead of `-rtsp_transport tcp -timeout N -i rtsp://...`. Everything after the input, which decides names, boundaries and the
-  container, is the same vector. The comparison below is what shows whether the output is equal anyway. A proper "use an existing
-  relay" mode in the supervisor (relay input without starting MediaMTX) would remove the difference; it is not part of the shadow.
+- **A camera login is still required to start, and is never used.** No camera with a relay path reads anything but the relay,
+  so use made-up values, in the environment of the shell that runs `holocron up` (`HOLOCRON_CAMERA_USER`,
+  `HOLOCRON_CAMERA_PASSWORD`). Do not store them (`holocron secret set`), and never put a real camera login there.
+- **No fallback to the camera.** If the relay cannot be read (below) the camera's `ffmpeg` exits and is restarted on the relay
+  with the backoff; Holocron never switches it to the camera's own address, which would open a third RTSP session. Only a camera
+  whose name has no letter or digit (no relay path) would start on its direct input, as with Holocron's own relay; the
+  `cameras.json` below points even that at the relay.
 
 ## The shadow root, its size and its cap
 
@@ -84,6 +85,7 @@ is not in the repository.
      "FfprobePath": "C:\\ffmpeg\\bin\\ffprobe.exe",
      "SegmentSeconds": 900,
      "RestreamerEnabled": false,
+     "RelayExternal": true,
      "LiveViewEnabled": false,
      "MaxRetentionDays": 1.5,
      "ReserveGB": 100,
@@ -107,7 +109,8 @@ is not in the repository.
    ]
    ```
 
-   Every `IP` must read `127.0.0.1:8554` (the relay). An `IP` that is a camera's address would open a third RTSP session.
+   With `RelayExternal` the cameras read `RelayBase/<path>` and `IP` and `Quality` are not used; keep `IP` at `127.0.0.1:8554`
+   and `Quality` at the relay path anyway, so nothing in the shadow's files is a camera's address.
 
 5. Check, then start:
 
@@ -132,13 +135,16 @@ if anything remains).
 ## Checking on it
 
 ```powershell
-& $h --config $c status --json       # cameras alive, current segment, input mode "direct", disk, prune
+& $h --config $c status --json       # cameras alive, current segment, input mode "relay", disk, prune
 & $h --config $c archive stats       # segments and GB per camera, GB per day
 & $h --config $c logs --since 30m
 ```
 
-`status` should show both cameras alive with `InputMode` `direct` (that is the relay, see above), and the segment names should
-be the same shape as the PowerShell system's, `Front_Door_20261021_183001+0300.mkv`.
+`status` should show both cameras alive with `InputMode` `relay` and the `Restreamer` section with `Enabled` false (Holocron runs
+no relay of its own), and the segment names should be the same shape as the PowerShell system's,
+`Front_Door_20261021_183001+0300.mkv`. `CurrentSegmentBytes` grows during the segment (the open file's size is read through
+an open handle; a Windows directory listing shows 0 until ffmpeg closes it) and `SecondsSinceLastClosedSegment` is the age of
+the current segment, 0 to about 900. `doctor` reports the relay as off: that is Holocron's own relay.
 
 ## Comparing
 
@@ -210,10 +216,10 @@ Per camera: `camera` (folder), `equal`, `window` (`from`, `to`, `seconds`, or `n
 The relay is shared. If the PowerShell system is restarted (`cam.ps1 -Stop` and `-Start`, a reboot, a crash of its MediaMTX) the
 relay disappears for a while and every reader of it gets a closed connection: the PowerShell recorder's `ffmpeg` and the
 shadow's alike. The shadow does nothing special and needs nothing from you: its `ffmpeg` exits or fails to connect, the
-supervisor restarts it with its backoff (3 s, doubling to 60 s, reset after a healthy 300 s) and it records again as soon as the
+supervisor restarts it on the relay with its backoff (3 s, doubling to 60 s, reset after a healthy 300 s) and it records again as soon as the
 path is served. It does not crash-loop and the supervisor stays up (proved by `TestShadowRigSurvivesARelayThatIsGoneAndRecovers`
-in `internal/app`: against a relay that refuses, a few starts in seven seconds and a running supervisor; recording resumes
-by itself when the relay returns). The gap this leaves is a gap in the PowerShell system's archive too, and `compare` reports it
+in `internal/app`, with `RelayExternal`: the relay input vector, against a relay that refuses a few starts in seven seconds
+and a running supervisor; recording resumes by itself when the relay returns). The gap this leaves is a gap in the PowerShell system's archive too, and `compare` reports it
 as a shared note, not a difference. If the shadow itself was down while the PowerShell system recorded, the same gap is a
 difference, which is correct.
 

@@ -43,7 +43,10 @@ type Config struct {
 	StatusEventCount         int
 
 	// Relay (MediaMTX)
-	RestreamerEnabled       bool
+	RestreamerEnabled bool
+	// RelayExternal: a relay Holocron does not run already serves every camera path at RelayBase;
+	// the cameras record from it and no MediaMTX is started (needs RestreamerEnabled false).
+	RelayExternal           bool
 	RestreamerExePath       string
 	RestreamerConfigPath    string
 	RelayBase               string

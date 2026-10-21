@@ -18,5 +18,6 @@
     func (*Cameras) Save(path string) error          // atomic; BOM follows the file on disk
     func (*Cameras) Find(name string) int; Validate() error; Collisions() []Collision
 
+Cross-key rules are in KEYS.md (for example `RelayExternal` true needs `RestreamerEnabled` false).
 A load error of type `*ValidationError` still leaves the (partially read) list filled so a caller can report and continue.
 Folder collisions use `archive.FolderKey` (case-insensitive; NFC/NFD pairs are not detected, see archive/README.md).

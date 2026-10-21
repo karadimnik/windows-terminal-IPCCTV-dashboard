@@ -28,3 +28,5 @@ Production wiring of holocron, shared by the command line (`cmd/holocron`) and t
 
 The camera login: the two environment variables when both are set, else the secrets store (`secrets.CameraLogin`); the store is
 opened on first use and every value read is registered with the logger's redactor.
+With `RelayExternal` (the shadow, docs/shadow.md) the login is still required at start but never used: every camera with a relay
+path reads the external relay (`TestShadowRigSurvivesARelayThatIsGoneAndRecovers` proves the vector, the backoff and the recovery).

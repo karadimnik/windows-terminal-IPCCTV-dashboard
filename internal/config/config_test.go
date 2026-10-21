@@ -226,6 +226,9 @@ func TestValidationClasses(t *testing.T) {
 		{"backoff inverted", `{"BackoffStartSeconds":30,"BackoffMaxSeconds":10}`, "BackoffMaxSeconds", "less than BackoffStartSeconds"},
 		{"transport typo", `{"RtspTransport":"tpc"}`, "RtspTransport", "one of tcp"},
 		{"relay url without host", `{"RelayBase":"rtsp://"}`, "RelayBase", "no host:port"},
+		{"external relay with the default own relay", `{"RelayExternal":true}`, "RelayExternal", "needs RestreamerEnabled false"},
+		{"external relay with an own relay", `{"RelayExternal":true,"RestreamerEnabled":true}`, "RelayExternal", "needs RestreamerEnabled false"},
+		{"external relay as string", `{"RelayExternal":"true","RestreamerEnabled":false}`, "RelayExternal", "JSON boolean"},
 		{"container missing", `{"Container":"avi"}`, "Container", "not defined in ContainerProfiles"},
 		{"profile no extension", `{"ContainerProfiles":{"mkv":{"SegmentFormat":"matroska"}}}`, "ContainerProfiles.mkv.Extension", "required"},
 		{"profile bad extension", `{"ContainerProfiles":{"mkv":{"Extension":"mkv","SegmentFormat":"matroska"}}}`, "ContainerProfiles.mkv.Extension", "dot"},
@@ -300,6 +303,24 @@ func TestAllProblemsAtOnce(t *testing.T) {
 	for _, key := range []string{"SegmentSeconds", "StallFactor", "RootPath", "RestreamerEnabled", "MaxAgePruneFraction", "LiveSubStream"} {
 		if !strings.Contains(err.Error(), key+": ") {
 			t.Errorf("%s missing from %q", key, err.Error())
+		}
+	}
+}
+
+// RelayExternal defaults to false; with RestreamerEnabled false it is accepted as is.
+func TestRelayExternal(t *testing.T) {
+	if Defaults(winP).RelayExternal || Defaults(linP).RelayExternal {
+		t.Error("RelayExternal must default to false")
+	}
+	for _, doc := range []string{`{"RelayExternal":true,"RestreamerEnabled":false}`, `{"RelayExternal":false}`, `{"RelayExternal":false,"RestreamerEnabled":false}`} {
+		c, warns, err := Parse([]byte(doc), linP)
+		if err != nil || len(warns) != 0 {
+			t.Errorf("%s: %v %v", doc, err, warns)
+			continue
+		}
+		want := strings.Contains(doc, `"RelayExternal":true`)
+		if c.RelayExternal != want || (want && c.RestreamerEnabled) {
+			t.Errorf("%s: RelayExternal %v RestreamerEnabled %v", doc, c.RelayExternal, c.RestreamerEnabled)
 		}
 	}
 }
