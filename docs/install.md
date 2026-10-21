@@ -2,7 +2,8 @@
 
 Most readers never need this page. The system autostarts at logon, and the normal state is that you
 touch nothing - see [the README](../README.md) for the running system. This is the first-time setup
-on a new machine.
+on a new machine. The Go system (`holocron.exe`) installs its own autostart with `holocron install`:
+see [autostart.md](autostart.md).
 
 ## Prerequisites
 
