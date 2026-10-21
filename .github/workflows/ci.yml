@@ -101,6 +101,16 @@ jobs:
           "$fp" -version | sed -n 1p
       - name: go test -race
         run: go test -race -count=1 -p 1 -v ./... 2>&1 | tee .ci-race.txt
+      # Failures as one annotation, readable without a login (job logs need one).
+      - name: Failed tests as an annotation
+        if: always()
+        run: |
+          for f in .ci-race.txt; do
+            [ -f "$f" ] || continue
+            msg=$(grep -nE '^(--- FAIL|FAIL|panic:|ok )|^\s+[A-Za-z0-9_./-]+_test\.go:[0-9]+:|^\s+--- FAIL' "$f" | grep -v '^[0-9]*:ok ' | head -80 | sed 's/%/%25/g' | awk '{printf "%s%%0A",$0}')
+            [ -n "$msg" ] && echo "::error title=failed tests::$msg"
+          done
+          exit 0
       - name: ffmpeg-dependent tests ran and passed
         run: |
           for t in TestRealMediaScenarios TestFFprobeFailures; do
