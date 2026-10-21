@@ -13,7 +13,7 @@
   const TEMPLATE = `
   <div class="panel apanel" id="aUsersPanel">
     <header><h2>Users</h2><span class="muted" id="aUsersCount"></span></header>
-    <div class="ascroll"><table>
+    <div class="ascroll"><table class="ausers">
       <thead><tr><th>Name</th><th>Role</th><th>Created</th><th>Locked out</th><th></th></tr></thead>
       <tbody id="aUsers"></tbody>
     </table></div>
@@ -118,7 +118,7 @@
   let built = false;
   let users = { users: [], self: "" };
 
-  const text = (v) => (v === null || v === undefined ? "" : typeof v === "string" ? v : JSON.stringify(v));
+  const text = (v) => (v === undefined ? "" : typeof v === "string" ? v : JSON.stringify(v));
   const day = (iso) => (iso ? String(iso).slice(0, 10) : "-");
 
   function say(id, cls, message) {
@@ -157,7 +157,7 @@
       const other = u.role === "admin" ? "viewer" : "admin";
       const me = u.username === users.self ? ' <span class="muted">(you)</span>' : "";
       const lock = users.lockoutsKnown ? (u.locked ? "locked" : "-") : "unknown here";
-      return "<tr><td>" + esc(u.username) + me + "</td><td>" + esc(u.role) + "</td><td>" + esc(day(u.createdAt)) + "</td><td>" + esc(lock) + "</td>" +
+      return "<tr><td>" + esc(u.username) + me + '</td><td data-label="Role">' + esc(u.role) + '</td><td data-label="Created">' + esc(day(u.createdAt)) + '</td><td data-label="Locked out">' + esc(lock) + "</td>" +
         '<td class="abtns"><button class="btn small" data-u="' + esc(u.username) + '" data-act="role" data-to="' + other + '">Make ' + other + "</button>" +
         '<button class="btn small" data-u="' + esc(u.username) + '" data-act="unlock">Unlock</button>' +
         '<button class="btn small danger" data-u="' + esc(u.username) + '" data-act="remove">Remove</button></td></tr>';
@@ -232,7 +232,7 @@
     el("aKeys").innerHTML = payload.keys.map((k, i) => {
       const id = "aK" + i;
       const keyCell = k.pattern
-        ? '<input id="' + id + 'c" class="akeyin" placeholder="component" aria-label="Component for logging.levels" spellcheck="false">'
+        ? "<code>logging.levels.&lt;component&gt;</code>" + '<input id="' + id + 'c" class="akeyin" placeholder="component" aria-label="Component for logging.levels" spellcheck="false">'
         : "<code>" + esc(k.key) + "</code>";
       const notes = (k.restart ? '<span class="hint">applies at the next start</span>' : '<span class="hint">applied at once when running</span>') +
         (k.warning ? '<span class="hint awarn">' + esc(k.warning) + "</span>" : "");
@@ -240,7 +240,7 @@
         "<td>" + keyCell + "</td>" +
         '<td><input id="' + id + '" class="akeyin" aria-label="Value of ' + esc(k.key) + '" spellcheck="false" value="' + esc(k.pattern ? "" : text(k.value)) + '">' +
         '<span class="formnote" id="' + id + 'n"></span></td>' +
-        "<td><code>" + esc(text(k.default)) + "</code></td><td>" + esc(k.rule) + notes + "</td>" +
+        '<td data-label="Default"><code>' + esc(text(k.default)) + '</code></td><td data-label="Rule">' + esc(k.rule) + notes + "</td>" +
         '<td class="abtns"><button class="btn small" data-kact="set">Save</button>' +
         (k.set ? '<button class="btn small" data-kact="unset">Default</button>' : "") + "</td></tr>";
     }).join("");
@@ -277,6 +277,7 @@
     try {
       const t = await getJSON("api/admin/tls");
       el("aTlsDownload").classList.toggle("hide", !t.present);
+      el("aTlsFp").parentElement.classList.toggle("hide", !t.present);
       if (!t.present) {
         el("aTlsState").textContent = "There is no local CA yet: it is made when the web app starts with web.tlsListen set (or by holocron tls ca).";
         el("aTlsFp").textContent = "";

@@ -369,9 +369,12 @@ body.authpage{display:grid;place-items:center;min-height:100vh;padding:18px}
 /* ---------- Admin tab (admin.js) ---------- */
 .apanel{margin-bottom:16px}
 .apanel h3{font-size:13px;color:var(--ink-2)}
+.apanel .form{grid-template-columns:minmax(0,1fr)}
+.apanel .events .t{white-space:normal;overflow-wrap:anywhere}
+.apanel>header .muted{overflow-wrap:anywhere;text-align:right}
 .apad{padding:12px var(--pad) 0}
 .ascroll{overflow-x:auto}
-.aform{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));align-items:end;border-top:1px solid var(--line-soft)}
+.aform{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));align-items:start;border-top:1px solid var(--line-soft)}
 .aform>h3,.aform>.actions,.aform>.acheck{grid-column:1/-1}
 .form .aform{padding:0;border-top:0}
 .abtns{display:flex;flex-wrap:wrap;gap:6px}
@@ -385,4 +388,9 @@ body.authpage{display:grid;place-items:center;min-height:100vh;padding:18px}
 @media(max-width:760px){
   .aform{grid-template-columns:1fr}
   .abtns .btn{min-height:36px}
+  /* the users and keys tables become one card per row on a phone */
+  .akeys thead,.ausers thead{display:none}
+  .akeys tr,.ausers tr{display:block;padding:8px 0;border-bottom:1px solid var(--line-soft)}
+  .akeys td,.ausers td{display:block;border:0;padding:4px var(--pad)}
+  .akeys td[data-label]::before,.ausers td[data-label]::before{content:attr(data-label) ": ";font-size:11px;color:var(--ink-3)}
 }
