@@ -217,7 +217,7 @@ func gapCase(t *testing.T, suspend string) (surv, grand []int) {
 	t.Cleanup(func() { t.Logf("sweep killed %v", sw.run(t)) })
 	w := newWatch(t, all)
 	t.Cleanup(w.close)
-	hardKill(t, h)
+	hardKill(t, h.Cmd)
 	surv = w.survivors(5 * time.Second)
 	t.Logf("suspend=%s children %v grandchildren %v tree %v survivors %v", suspend, st.Children, st.Grand, all, surv)
 	return surv, st.Grand
