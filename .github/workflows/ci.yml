@@ -120,9 +120,9 @@ jobs:
           for t in TestRealMediaScenarios TestFFprobeFailures; do
             grep -qE "^--- PASS: $t " .ci-race.txt || { echo "::error::$t did not pass (skipped or absent)"; exit 1; }
           done
-      # Opt-in suites (real processes, real ffmpeg). Without -race: the real-process tests in internal/osx have a data
-      # race in the test code (docs/ci.md). Blocking on Linux, where they are proven; report-only elsewhere until a run says otherwise.
-      - name: Real-process and real-ffmpeg tests (no -race)
+      # Opt-in suites (real processes, real ffmpeg), with -race since W16 fixed the Cmd.Wait race in the osx test helpers.
+      # Blocking on Linux, where they are proven; report-only elsewhere until a run says otherwise.
+      - name: Real-process and real-ffmpeg tests
         continue-on-error: ${{ matrix.os != 'ubuntu-latest' }}
         env:
           HOLOCRON_OSX_REAL: "1"
@@ -131,7 +131,7 @@ jobs:
           HOLOCRON_IT_FFMPEG: ${{ steps.ff.outputs.ffmpeg }}
           HOLOCRON_IT_FFPROBE: ${{ steps.ff.outputs.ffprobe }}
         run: |
-          go test -count=1 -p 1 -v ./internal/ffmpeg ./internal/osx ./internal/host 2>&1 | tee .ci-real.txt
+          go test -race -count=1 -p 1 -v ./internal/ffmpeg ./internal/osx ./internal/host 2>&1 | tee .ci-real.txt
           for t in TestRealFfmpeg TestFullChainHostSupervisorFfmpeg; do
             grep -qE "^--- PASS: $t " .ci-real.txt || { echo "::error::$t did not pass (skipped or absent)"; exit 1; }
           done

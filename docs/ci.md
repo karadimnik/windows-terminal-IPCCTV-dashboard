@@ -15,7 +15,7 @@ Go comes from `go.mod` (`go-version-file`), so the runner builds with the same m
 
 ### The opt-in tests
 
-Some tests only run when asked (`HOLOCRON_OSX_REAL`, `HOLOCRON_HOST_REAL`, `HOLOCRON_IT`, `HOLOCRON_IT_FFMPEG`; see their skip messages). The second test step sets them and runs `./internal/ffmpeg ./internal/osx ./internal/host` **without** `-race`, because the real-process tests in `internal/osx` have a data race in the test code itself (two goroutines call `Cmd.Wait` on one command). It is blocking on Linux, where it was run clean, and report-only on Windows and macOS until a run says they are green; flip `continue-on-error` in the workflow when they are. Tests that need MediaMTX (`HOLOCRON_IT_MEDIAMTX`) are not run in CI.
+Some tests only run when asked (`HOLOCRON_OSX_REAL`, `HOLOCRON_HOST_REAL`, `HOLOCRON_IT`, `HOLOCRON_IT_FFMPEG`; see their skip messages). The second test step sets them and runs `./internal/ffmpeg ./internal/osx ./internal/host` with `-race` (the `Cmd.Wait` race in the `internal/osx` test helpers was fixed in W16). It is blocking on Linux, where it was run clean, and report-only on Windows and macOS until a run says they are green; flip `continue-on-error` in the workflow when they are. Tests that need MediaMTX (`HOLOCRON_IT_MEDIAMTX`) are not run in CI.
 
 ## How to read a run
 
