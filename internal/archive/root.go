@@ -160,12 +160,33 @@ func CheckRoot(path string, p osx.Platform) string {
 	if IsReparse(fi) {
 		return fmt.Sprintf("RootPath '%s' is a symbolic link or reparse point; point RootPath at the real folder", path)
 	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil && resolved != filepath.Clean(path) {
+	// A protected path is compared in its real form too: a resolved root (a long name, /private/var)
+	// would not match a protected one spelled differently (an 8.3 name in %TEMP%, /var).
+	protected = withRealPaths(protected)
+	if problem := s.pathProblem(path, protected); problem != "" {
+		return problem
+	}
+	if resolved, err := realPath(path); err == nil && resolved != filepath.Clean(path) {
 		if problem := s.pathProblem(resolved, protected); problem != "" {
 			return fmt.Sprintf("RootPath '%s' resolves to %s", path, strings.TrimPrefix(problem, "RootPath "))
 		}
 	}
 	return ""
+}
+
+// withRealPaths adds the real form of each existing protected path where it differs. Mount points
+// are left as they are (already real, and reading a stale network mount can hang).
+func withRealPaths(protected []osx.Protected) []osx.Protected {
+	out := append([]osx.Protected(nil), protected...)
+	for _, pr := range protected {
+		if pr.Why == osx.WhyMount || strings.TrimSpace(pr.Path) == "" {
+			continue
+		}
+		if r, err := realPath(pr.Path); err == nil && r != filepath.Clean(pr.Path) {
+			out = append(out, osx.Protected{Path: r, Why: pr.Why})
+		}
+	}
+	return out
 }
 
 // IsReparse reports whether a file or folder (from os.Lstat or DirEntry.Info) is a symbolic link,
