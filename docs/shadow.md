@@ -48,7 +48,8 @@ The pruner can cap the shadow by age or by free space on the drive. Free space c
 
 ```
 per camera: 12 to 16 GB per day (15-minute segments of 120 to 170 MB); two cameras: 24 to 32 GB per day
-MaxRetentionDays 1.5  ->  36 to 48 GB at most, about 40 GB on the two measured cameras (26.5 GB per day)
+measured in the pilot, two different cameras (2560x1440 at 15 fps, 2304x1296 at 25 fps): 28.55 GB per day
+MaxRetentionDays 1.5  ->  36 to 48 GB at most, 42.8 GB with the measured rate
 ```
 
 Nothing is pruned for the first 1.5 days; after that the pruner deletes segments older than 1.5 days, a few at a time, and the
@@ -119,7 +120,9 @@ is not in the repository.
    & $h --config $c status
    ```
 
-   `up --detach` waits for an honest start and prints the pids. `doctor` reports `warn` for ffmpeg being a development build and
+   `up --detach` waits for an honest start and prints the pids. Started from a WSL shell or another job that forbids breakaway it
+   warns that the background copy "may end with the terminal"; in the pilot it did not (it ran 31 minutes after the shell
+   returned), but start it from a normal PowerShell window for the long run. `doctor` reports `warn` for ffmpeg being a development build and
    for the root not yet claimed; both are expected. The supervisor claims the root (writes the ownership marker
    `_state\archive-owner.json`) at its first start.
 
@@ -131,7 +134,7 @@ if anything remains).
 ```powershell
 & $h --config $c status --json       # cameras alive, current segment, input mode "direct", disk, prune
 & $h --config $c archive stats       # segments and GB per camera, GB per day
-Get-Content D:\holocron-shadow\_logs\holocron.log -Tail 30
+& $h --config $c logs --since 30m
 ```
 
 `status` should show both cameras alive with `InputMode` `direct` (that is the relay, see above), and the segment names should
@@ -220,12 +223,12 @@ shadow (it is a different process tree, started and stopped by `holocron` alone)
 & $h --config $c status        # not running
 ```
 
-To abort and delete everything the shadow wrote, stop it first, then remove exactly its two folders. Check the paths in the
-command before you press Enter; they are the shadow's only:
+To abort and delete everything the shadow wrote, stop it first, then remove exactly its two folders (File Explorer does as
+well). Check the paths in the commands before you press Enter; they are the shadow's only:
 
-```powershell
-Remove-Item -LiteralPath D:\holocron-shadow -Recurse -Force
-Remove-Item -LiteralPath D:\holocron-shadow-bin -Recurse -Force
+```
+cmd /c rmdir /s /q D:\holocron-shadow
+cmd /c rmdir /s /q D:\holocron-shadow-bin
 ```
 
 The pruner is the only part of Holocron that deletes footage, and only inside the shadow root. `holocron prune --dry-run` shows
