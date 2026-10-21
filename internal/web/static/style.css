@@ -365,3 +365,24 @@ body.authpage{display:grid;place-items:center;min-height:100vh;padding:18px}
 .authcard .actions .btn{width:100%;padding:10px 14px}
 .authcard .formnote{margin:0;min-height:1.4em}
 .authcard .hint{margin:0;font-size:12px;color:var(--ink-3)}
+
+/* ---------- Admin tab (admin.js) ---------- */
+.apanel{margin-bottom:16px}
+.apanel h3{font-size:13px;color:var(--ink-2)}
+.apad{padding:12px var(--pad) 0}
+.ascroll{overflow-x:auto}
+.aform{grid-template-columns:repeat(auto-fill,minmax(220px,1fr));align-items:end;border-top:1px solid var(--line-soft)}
+.aform>h3,.aform>.actions,.aform>.acheck{grid-column:1/-1}
+.form .aform{padding:0;border-top:0}
+.abtns{display:flex;flex-wrap:wrap;gap:6px}
+.akeys td{vertical-align:top}
+.akeyin{background:var(--surface-2);border:1px solid var(--line);border-radius:8px;color:var(--ink);padding:7px 9px;font:inherit;font-size:13px;width:100%;min-width:9em}
+.akeys .hint{display:block;font-size:11px;color:var(--ink-3);margin-top:4px}
+.akeys .formnote{display:block;margin-top:4px}
+.awarn{color:#f0c27a !important}
+.abreak{word-break:break-all}
+.acheck{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--ink-2)}
+@media(max-width:760px){
+  .aform{grid-template-columns:1fr}
+  .abtns .btn{min-height:36px}
+}

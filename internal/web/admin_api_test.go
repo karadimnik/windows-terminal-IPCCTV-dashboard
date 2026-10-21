@@ -445,3 +445,45 @@ func TestEveryAdminRouteIsAnAuditedAction(t *testing.T) {
 		}
 	}
 }
+
+// The Admin tab's markup and code live in admin.js, which only an admin receives; the page every
+// user gets has none of it, and loads admin.js only for an admin.
+func TestAdminBundleOnlyForAdmins(t *testing.T) {
+	a := newAdminRig(t)
+	a.addViewer(t)
+	viewer := a.loginAs(t, viewerUser, viewerPassword)
+	js := a.do(tlsReq{path: "/admin.js", cookie: a.cookie})
+	if js.Code != 200 || !strings.Contains(js.Body.String(), "api/admin/users") || !strings.HasPrefix(js.Header().Get("Content-Type"), "text/javascript") {
+		t.Fatalf("admin: %d %q", js.Code, js.Header().Get("Content-Type"))
+	}
+	if rec := a.do(tlsReq{path: "/admin.js", cookie: viewer}); !isAdminRefusal(rec) || strings.Contains(rec.Body.String(), "api/admin") {
+		t.Errorf("viewer: %d", rec.Code)
+	}
+	if rec := a.do(tlsReq{path: "/admin.js"}); rec.Code != 401 {
+		t.Errorf("no session: %d", rec.Code)
+	}
+	// every password field is a new-password field; no secret is ever put back into a field
+	src := js.Body.String()
+	for _, m := range regexp.MustCompile(`<input id="(a\w*Pass\w*)"[^>]*>`).FindAllStringSubmatch(src, -1) {
+		if !strings.Contains(m[0], `type="password"`) || !strings.Contains(m[0], `autocomplete="new-password"`) {
+			t.Errorf("%s: %s", m[1], m[0])
+		}
+	}
+	if n := strings.Count(src, `type="password"`); n != 3 {
+		t.Errorf("%d password fields, want 3 (new user, set password, camera)", n)
+	}
+	for _, page := range []string{"/", "/app.js", "/live.js", "/style.css"} {
+		rec := a.do(tlsReq{path: page, cookie: viewer})
+		if rec.Code != 200 || strings.Contains(rec.Body.String(), "api/admin/") || strings.Contains(rec.Body.String(), `type="password"`) {
+			t.Errorf("%s as a viewer: %d, carries admin markup", page, rec.Code)
+		}
+	}
+	page := a.do(tlsReq{path: "/", cookie: viewer}).Body.String()
+	if !regexp.MustCompile(`<section data-tab="admin" class="hide">\s*</section>`).MatchString(page) || !strings.Contains(page, `id="adminTab"`) {
+		t.Error("the page's admin section is not the empty, hidden placeholder")
+	}
+	app := a.do(tlsReq{path: "/app.js", cookie: viewer}).Body.String()
+	if !strings.Contains(app, `script.src = "admin.js"`) || !strings.Contains(app, "if (!viewer && !readOnly) await loadAdmin()") {
+		t.Error("app.js does not load admin.js for admins only")
+	}
+}

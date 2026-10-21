@@ -18,9 +18,11 @@
 const POLL_MS = 5000;
 
 // True when this page is served by the HTTPS LAN listener in its default view-only
-// mode: api/tls/info (a 404 on the loopback listener) says readOnly. Everything that
-// changes state is hidden or inert then, and the server refuses it anyway.
+// mode (api/tls/info, a 404 on the loopback listener, says readOnly), or to a signed-in
+// viewer (api/auth/me says the role). Everything that changes state is hidden or inert
+// then, and the server refuses it anyway.
 let viewOnly = false;
+let role = "admin"; // the loopback listener's owner is an admin; the LAN says per user
 
 const el = (id) => document.getElementById(id);
 
@@ -1201,16 +1203,48 @@ el("fSegs").onclick = (event) => {
 // showTab is driven by the URL fragment, so a screen can be linked to and
 // opened directly - #foot goes straight to the footage browser. An unknown
 // fragment falls back to the first tab.
-async function detectViewOnly() {
+async function detectAccess() {
+  let readOnly = false;
   try {
-    viewOnly = (await getJSON("api/tls/info")).readOnly === true;
+    readOnly = (await getJSON("api/tls/info")).readOnly === true;
   } catch (err) {
-    viewOnly = false;
+    readOnly = false;
   }
+  try {
+    role = (await getJSON("api/auth/me")).role || "admin";
+  } catch (err) {
+    role = "viewer"; // unknown: show the least
+  }
+  const viewer = role !== "admin";
+  viewOnly = readOnly || viewer;
   document.body.classList.toggle("viewonly", viewOnly);
-  el("viewOnly").classList.toggle("hide", !viewOnly);
+  el("viewOnly").classList.toggle("hide", !readOnly || viewer);
+  el("viewerNote").classList.toggle("hide", !viewer);
   // inert: not focusable, not clickable, hidden from assistive technology as editable.
   for (const panel of document.querySelectorAll('section[data-tab="set"] > .panel:not(#tlsPanel)')) panel.inert = viewOnly;
+  // Settings are the admins'; the Admin tab also needs a listener that is not view-only.
+  document.querySelector('nav.tabs button[data-t="set"]').classList.toggle("hide", viewer);
+  el("adminTab").classList.toggle("hide", viewer || readOnly);
+  if (!viewer && !readOnly) await loadAdmin();
+  if (roleTab(location.hash.slice(1))) showTab(location.hash.slice(1));
+}
+
+// roleTab: a screen that waits for detectAccess (Settings and Admin are the admins').
+const roleTab = (fragment) => /^(set|admin)(\/|$)/.test(fragment);
+
+// admin.js is fetched only for an admin (the server refuses it to anyone else).
+let adminLoaded = null;
+function loadAdmin() {
+  if (!adminLoaded) {
+    adminLoaded = new Promise((resolve) => {
+      const script = document.createElement("script");
+      script.src = "admin.js";
+      script.onload = resolve;
+      script.onerror = resolve;
+      document.body.appendChild(script);
+    });
+  }
+  return adminLoaded;
 }
 
 // The "Connect a phone" panel exists only on the HTTPS LAN listener: api/tls/info is
@@ -1232,7 +1266,7 @@ function showTab(fragment) {
   let arg;
   try { arg = slash < 0 ? undefined : decodeURIComponent(fragment.slice(slash + 1)) || undefined; } catch (err) { arg = undefined; }
   const tabs = [...el("tabs").children];
-  const button = tabs.find((tab) => tab.dataset.t === name) || tabs[0];
+  const button = tabs.find((tab) => tab.dataset.t === name && !tab.classList.contains("hide")) || tabs[0];
   for (const tab of tabs) tab.removeAttribute("aria-current");
   button.setAttribute("aria-current", "page");
   for (const section of document.querySelectorAll("section[data-tab]")) {
@@ -1246,6 +1280,7 @@ function showTab(fragment) {
   // Re-read on every visit: a recording camera has new segments by now, and
   // the pruner may have taken the oldest away.
   if (button.dataset.t === "foot") loadFootage();
+  if (button.dataset.t === "admin" && window.Admin) window.Admin.show();
   Live.onTab(button.dataset.t, arg);
 }
 
@@ -1257,7 +1292,7 @@ el("tabs").onclick = (event) => {
 };
 
 window.addEventListener("hashchange", () => showTab(location.hash.slice(1)));
-showTab(location.hash.slice(1) || "dash");
+showTab(roleTab(location.hash.slice(1)) ? "dash" : location.hash.slice(1) || "dash");
 
 // ---------------------------------------------------------------------------
 // Polling
@@ -1276,7 +1311,7 @@ async function poll() {
   }
 }
 
-detectViewOnly();
+detectAccess();
 
 // "Sign out" exists only where there is a login: api/auth/me says loginRequired on
 // the HTTPS LAN listener and not on loopback.
