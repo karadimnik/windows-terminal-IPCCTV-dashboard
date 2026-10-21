@@ -16,6 +16,7 @@ import (
 
 	"holocron/internal/alerts"
 	"holocron/internal/app"
+	"holocron/internal/autostart"
 	"holocron/internal/osx"
 	"holocron/internal/status"
 	"holocron/internal/web"
@@ -200,7 +201,7 @@ type statusReport struct {
 	Root      string           `json:"root"`
 	Host      *osx.ChildEntry  `json:"host"`
 	Alerts    map[string]bool  `json:"alerts"`
-	Autostart string           `json:"autostart"`
+	Autostart autostart.State  `json:"autostart"`
 	Status    *status.Document `json:"status"`
 	Web       webReport        `json:"web"`
 }
@@ -253,7 +254,7 @@ func cmdStatus(ctx context.Context, e *env) error {
 	if errors.Is(readErr(e), status.ErrNoStatus) {
 		why = "no status file has been written yet"
 	}
-	rep := statusReport{Running: running, Reason: why, Root: e.paths.Root, Alerts: alertChannels(e.cfg.Alerts), Autostart: "not built yet", Status: doc, Web: webStatus(e)}
+	rep := statusReport{Running: running, Reason: why, Root: e.paths.Root, Alerts: alertChannels(e.cfg.Alerts), Autostart: e.autostartState(), Status: doc, Web: webStatus(e)}
 	if h, ok := app.ReadHostRecord(e.paths); ok {
 		if alive, _ := osx.Verify(h, e.inspector, goos()); alive {
 			rep.Host = &h
@@ -294,7 +295,7 @@ func printStatus(e *env, r statusReport) {
 	}
 	printWeb(w, r.Web)
 	if d == nil {
-		fmt.Fprintf(w, "alerts: %s\nautostart: %s\n", channelText(r.Alerts), r.Autostart)
+		fmt.Fprintf(w, "alerts: %s\nautostart: %s\n", channelText(r.Alerts), r.Autostart.Summary())
 		return
 	}
 	fmt.Fprintf(w, "cameras (%d):\n", len(d.Cameras))
@@ -346,7 +347,7 @@ func printStatus(e *env, r statusReport) {
 	if p := d.Prune; p != nil {
 		fmt.Fprintf(w, "prune: last run %s, deleted %d, freed %.2f GB, blocked %v%s\n", stamp(p.LastRunAt), p.DeletedTotal, p.FreedGBTotal, p.Blocked, errText(p.LastMessage))
 	}
-	fmt.Fprintf(w, "alerts: %s\nautostart: %s\n", channelText(r.Alerts), r.Autostart)
+	fmt.Fprintf(w, "alerts: %s\nautostart: %s\n", channelText(r.Alerts), r.Autostart.Summary())
 }
 
 func printWeb(w io.Writer, r webReport) {

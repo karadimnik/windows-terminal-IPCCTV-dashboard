@@ -336,6 +336,7 @@ func cmdDoctor(ctx context.Context, e *env) error {
 	default:
 		add("warn", "status", "not running: %s (last state %s %s)", why, doc.State, doc.StopKind)
 	}
+	cs = append(cs, autostartChecks(e)...)
 	fails := 0
 	for _, c := range cs {
 		if c.verdict == "fail" {

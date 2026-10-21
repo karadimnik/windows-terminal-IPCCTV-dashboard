@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"holocron/internal/app"
+	"holocron/internal/autostart"
 	"holocron/internal/cli"
 	"holocron/internal/config"
 	"holocron/internal/ctlapi"
@@ -68,6 +69,7 @@ type env struct {
 	lg        *logx.Logger
 	stdin     io.Reader              // secrets are read from here and nowhere else
 	opener    func(url string) error // opens a browser (a fake in tests)
+	auto      autostart.Env          // the OS tools of install / uninstall / autostart (fakes in tests)
 }
 
 type envKey struct{}
@@ -103,9 +105,6 @@ func quietFail(format string, a ...any) error {
 	return &exitError{code: exitFailure, err: fmt.Errorf(format, a...), quiet: true}
 }
 
-// ErrNotBuilt: the command belongs to a later task.
-var ErrNotBuilt = errors.New("not built yet")
-
 // codeOf maps an action's error to the exit code.
 func codeOf(err error) int {
 	var ee *exitError
@@ -134,6 +133,7 @@ type seams struct {
 	getenv    func(string) string
 	stdin     io.Reader
 	opener    func(url string) error
+	auto      *autostart.Env
 }
 
 func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int {
@@ -189,6 +189,11 @@ func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int 
 	}
 	if e.stdin == nil {
 		e.stdin = os.Stdin
+	}
+	if s.auto != nil {
+		e.auto = *s.auto
+	} else {
+		e.auto = autostart.RealEnv()
 	}
 	var lg *logx.Logger
 	if cmd.noRoot {
@@ -281,11 +286,7 @@ func printHelp(w io.Writer) {
 		if c.usage != "" {
 			u += " " + c.usage
 		}
-		about := c.about
-		if c.notBuilt {
-			about += " (not built yet)"
-		}
-		lines = append(lines, fmt.Sprintf("  %-*s  %s", width, u, about))
+		lines = append(lines, fmt.Sprintf("  %-*s  %s", width, u, c.about))
 	}
 	for _, l := range lines {
 		fmt.Fprintln(w, l)

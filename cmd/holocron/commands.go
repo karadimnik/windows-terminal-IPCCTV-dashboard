@@ -21,7 +21,6 @@ type command struct {
 	audit    bool // read-only but security-relevant: also in the audit stream
 	role     bool // hidden internal role (host, supervisor)
 	noRoot   bool // touches no root (no log file either)
-	notBuilt bool
 	run      func(ctx context.Context, e *env) error
 }
 
@@ -80,21 +79,13 @@ func init() {
 
 		{path: "prune", usage: "[--dry-run | --now --yes] [--json]", about: "show the pruner's decision (default), or run it now when no supervisor is running", action: "prune.run", mutating: true, run: cmdPrune},
 		{path: "archive stats", usage: "[--json]", about: "per camera: segments, size, oldest and newest; GB per day, free space, projected days", action: "archive.stats", run: cmdArchiveStats},
+		{path: "install", usage: "[--mode logon|service|systemd|launchd] [--dry-run] [--allow-temp] [--" + oldTasksFlag + "] [--yes] [--account A]", about: "create the autostart entry for this OS (logon task, Windows service, systemd user unit, launchd agent) and verify it; idempotent; never touches the PowerShell system's tasks", action: "install.run", mutating: true, run: cmdInstall},
+		{path: "uninstall", usage: "[--dry-run] [--force]", about: "remove exactly what install created and recorded", action: "uninstall.run", mutating: true, run: cmdUninstall},
+		{path: "autostart enable", usage: "[--dry-run] [--" + oldTasksFlag + "]", about: "switch the installed autostart entry on", action: "autostart.enable", mutating: true, run: func(ctx context.Context, e *env) error { return cmdAutostartSet(ctx, e, true) }},
+		{path: "autostart disable", usage: "[--dry-run]", about: "switch it off without removing it", action: "autostart.disable", mutating: true, run: func(ctx context.Context, e *env) error { return cmdAutostartSet(ctx, e, false) }},
+		{path: "autostart status", usage: "[--json]", about: "installed, enabled, what it runs and whether that executable exists; the PowerShell system's tasks (read only)", action: "autostart.status", audit: true, run: cmdAutostartStatus},
 		{path: "host", action: "role.host", role: true, run: cmdRoleHost},
 		{path: "supervisor", action: "role.supervisor", role: true, run: cmdRoleSupervisor},
-	}
-	for _, nb := range []struct{ path, usage, about, action string }{
-		{"install", "[--mode logon|service|systemd|launchd] [--dry-run]", "create the autostart entry", "install.run"},
-		{"uninstall", "[--dry-run]", "remove what install created", "uninstall.run"},
-		{"autostart enable", "", "switch the autostart entry on", "autostart.enable"},
-		{"autostart disable", "", "switch the autostart entry off", "autostart.disable"},
-		{"autostart status", "", "autostart state", "autostart.status"},
-	} {
-		nb := nb
-		commands = append(commands, &command{path: nb.path, usage: nb.usage, about: nb.about, action: nb.action, notBuilt: true,
-			run: func(context.Context, *env) error {
-				return failed("holocron %s: %v (it arrives with a later task of the OS-independent track)", nb.path, ErrNotBuilt)
-			}})
 	}
 	for _, c := range commands {
 		c := c

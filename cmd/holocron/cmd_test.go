@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"holocron/internal/app"
+	"holocron/internal/autostart"
 	"holocron/internal/cli"
 	"holocron/internal/config"
 	"holocron/internal/ctlapi"
@@ -90,6 +91,9 @@ type rig struct {
 	noCtl     bool      // no supervisor answers on the control endpoint
 	opened    []string
 	insp      osx.Inspector
+	tools     *autostart.FakeTools // schtasks / systemctl / launchctl
+	auto      *autostart.Env
+	exe       string // this executable as the commands see it
 }
 
 const rigConfig = "\xef\xbb\xbf{\n    \"SegmentSeconds\":  60,\n    \"HealthStripHeightPx\":  -1,\n    \"Unknown\":  {\"x\": 1},\n    \"StopTimeoutSeconds\":  1,\n    \"alerts\": {\"desktop\": {\"enabled\": false}, \"eventlog\": {\"enabled\": false}},\n    \"web\": {\"authDir\": \"%AUTH%\", \"listen\": \"127.0.0.1:18821\"}\n}\n"
@@ -97,7 +101,8 @@ const rigCameras = "\xef\xbb\xbf[{\"Name\":\"Front\",\"IP\":\"192.0.2.10\",\"Rec
 
 func newRig(t *testing.T) *rig {
 	dir := t.TempDir()
-	r := &rig{t: t, root: filepath.Join(dir, "root"), cfg: filepath.Join(dir, "cfg", "holocron.config.json"), ctl: &fakeCtl{}}
+	r := &rig{t: t, root: filepath.Join(dir, "root"), cfg: filepath.Join(dir, "cfg", "holocron.config.json"), ctl: &fakeCtl{}, tools: autostart.NewFakeTools(), exe: "/nonexistent/holocron"}
+	r.auto = &autostart.Env{GOOS: "linux", Exec: r.tools.Exec, Home: filepath.Join(dir, "home"), User: "alice", UID: "1000", TempDirs: []string{"/tmp"}, SystemRoot: `C:\Windows`}
 	os.MkdirAll(filepath.Dir(r.cfg), 0o755)
 	os.WriteFile(r.cfg, []byte(strings.Replace(rigConfig, "%AUTH%", filepath.ToSlash(filepath.Join(dir, "auth")), 1)), 0o644)
 	os.WriteFile(r.cameras(), []byte(rigCameras), 0o644)
@@ -124,7 +129,8 @@ func (r *rig) run(args ...string) (string, string, int) {
 			return r.ctl, nil
 		},
 		inspector: r.inspector(),
-		exe:       "/nonexistent/holocron",
+		exe:       r.exe,
+		auto:      r.auto,
 		stdin: func() io.Reader {
 			if r.stdinR != nil {
 				return r.stdinR
@@ -266,15 +272,12 @@ func TestExitCodes(t *testing.T) {
 	}{
 		{[]string{"nope"}, 2}, {[]string{"cam"}, 2}, {[]string{"cam", "show"}, 2}, {[]string{"cam", "add", "--name", "x"}, 2},
 		{[]string{"config", "set", "SegmentSeconds"}, 2}, {[]string{"status", "--bogus"}, 2}, {[]string{"up", "--only", "x"}, 2},
-		{[]string{"web", "-tls-readonly", "maybe"}, 2}, {[]string{"user", "add", "x"}, 2}, {[]string{"install"}, 1}, {[]string{"status"}, 1}, {[]string{"version"}, 0},
+		{[]string{"web", "-tls-readonly", "maybe"}, 2}, {[]string{"user", "add", "x"}, 2}, {[]string{"install", "--mode", "bogus"}, 2}, {[]string{"status"}, 1}, {[]string{"version"}, 0},
 		{[]string{"cam", "show", "Nope"}, 1}, {[]string{"logs", "--level", "loud"}, 2}, {[]string{"logs", "--since", "yesterday"}, 2},
 	} {
 		if _, errw, code := r.run(c.args...); code != c.code {
 			t.Errorf("%v: exit %d want %d (%s)", c.args, code, c.code, errw)
 		}
-	}
-	if _, errw, _ := r.run("install"); !strings.Contains(errw, "not built yet") {
-		t.Errorf("not-built message: %s", errw)
 	}
 	var out, errw bytes.Buffer
 	if code := run(context.Background(), []string{"--root", "/", "status"}, &out, &errw, nil); code != 2 || !strings.Contains(errw.String(), "sandbox") {
@@ -295,7 +298,7 @@ func TestCommandsLogBeginAndResult(t *testing.T) {
 		{"cam", "set", "Side", "--record", "true"}, {"cam", "disable", "Side"}, {"cam", "enable", "Side"}, {"cam", "remove", "Side"},
 		{"config", "get", "SegmentSeconds"}, {"config", "set", "ReserveGB", "5"}, {"config", "unset", "ReserveGB"}, {"config", "validate"},
 		{"config", "show"}, {"live", "status"}, {"live", "enable"}, {"live", "disable"}, {"log", "level", "all", "info", "--save"},
-		{"logs"}, {"down"}, {"alert", "test", "log"}, {"install"}, {"config", "set", "RootPath", "/x"},
+		{"logs"}, {"down"}, {"alert", "test", "log"}, {"install", "--mode", "bogus"}, {"config", "set", "RootPath", "/x"},
 	}
 	for _, a := range runs {
 		r.run(a...)
@@ -375,7 +378,7 @@ func TestJSONOutputsAreValid(t *testing.T) {
 	}
 	out, _, code := r.run("status", "--json")
 	var st statusReport
-	if json.Unmarshal([]byte(out), &st); code != 0 || !st.Running || st.Status == nil || st.Autostart != "not built yet" || st.Alerts["desktop"] {
+	if json.Unmarshal([]byte(out), &st); code != 0 || !st.Running || st.Status == nil || st.Autostart.Installed || st.Autostart.Mode != autostart.Systemd || st.Alerts["desktop"] {
 		t.Errorf("status --json: exit %d %+v", code, st)
 	}
 }
@@ -638,7 +641,7 @@ func TestWebCommandFlags(t *testing.T) {
 		t.Errorf("guard: %d %s", code, errw)
 	}
 	help, _, _ := r.run("--help")
-	if !strings.Contains(help, "web ") || strings.Contains(help, "not built yet)\n  up") {
+	if !strings.Contains(help, "web ") || strings.Contains(help, "not built yet") {
 		t.Errorf("--help: %s", help)
 	}
 }

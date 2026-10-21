@@ -320,7 +320,11 @@ func (o *Ops) removeFile(path string) error {
 	return nil
 }
 
+// info records a state change; a dry run changed nothing, so it records none.
 func (o *Ops) info(msg string) {
+	if o.Dry {
+		return
+	}
 	o.logger().Info(msg, logx.Action("install.step"), logx.Result(logx.ResultOK))
 }
 

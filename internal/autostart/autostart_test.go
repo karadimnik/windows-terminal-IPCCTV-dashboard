@@ -146,7 +146,7 @@ func TestLogonInstallIdempotentVerifiedRecorded(t *testing.T) {
 	if err != nil || !res.Created || !res.Changed {
 		t.Fatalf("install: %+v %v\n%s", res, err, r.out.String())
 	}
-	calls := r.fos.callList()
+	calls := r.fos.Calls()
 	if len(calls) != 3 || !strings.HasPrefix(calls[0], "schtasks /Query /TN Holocron /XML") || !strings.HasPrefix(calls[1], "schtasks /Create /TN Holocron /XML ") ||
 		strings.HasSuffix(calls[1], "/F") || !strings.HasPrefix(calls[2], "schtasks /Query") {
 		t.Errorf("calls %q", calls)
@@ -164,24 +164,24 @@ func TestLogonInstallIdempotentVerifiedRecorded(t *testing.T) {
 	}
 
 	// second run: unchanged, read-only
-	r.fos.reset()
+	r.fos.Reset()
 	res, err = Install(r.ops(), s, "v1")
-	if err != nil || res.Changed || !strings.Contains(r.out.String(), "already installed, unchanged") || len(mutating(r.fos.callList())) != 0 {
-		t.Errorf("second install: %+v %v %q %q", res, err, r.out.String(), r.fos.callList())
+	if err != nil || res.Changed || !strings.Contains(r.out.String(), "already installed, unchanged") || len(Mutating(r.fos.Calls())) != 0 {
+		t.Errorf("second install: %+v %v %q %q", res, err, r.out.String(), r.fos.Calls())
 	}
 
 	// moved binary: an update that says what changed, replacing (/F), never a second task
-	r.fos.reset()
+	r.fos.Reset()
 	s.Exe = `D:\Holocron\holocron.exe`
 	res, err = Install(r.ops(), s, "v2")
 	if err != nil || res.Created || !res.Changed || len(res.Changes) != 1 || !strings.Contains(res.Changes[0], `D:\Holocron\holocron.exe`) {
 		t.Errorf("update: %+v %v", res, err)
 	}
-	if m := mutating(r.fos.callList()); len(m) != 1 || !strings.HasSuffix(m[0], "/F") {
+	if m := Mutating(r.fos.Calls()); len(m) != 1 || !strings.HasSuffix(m[0], "/F") {
 		t.Errorf("update calls %q", m)
 	}
-	if len(r.fos.tasks) != 1 {
-		t.Errorf("tasks %v", r.fos.tasks)
+	if len(r.fos.Tasks) != 1 {
+		t.Errorf("tasks %v", r.fos.Tasks)
 	}
 }
 
@@ -195,11 +195,11 @@ func TestLogonEnableDisableRemove(t *testing.T) {
 	if st := Status(r.env, Logon, TaskName); !st.Installed || st.Enabled {
 		t.Fatalf("installed disabled: %+v", st)
 	}
-	r.fos.reset()
+	r.fos.Reset()
 	if ch, err := SetEnabled(r.ops(), Logon, TaskName, true); !ch || err != nil {
 		t.Fatal(ch, err)
 	}
-	if m := mutating(r.fos.callList()); len(m) != 1 || m[0] != "schtasks /Change /TN Holocron /ENABLE" {
+	if m := Mutating(r.fos.Calls()); len(m) != 1 || m[0] != "schtasks /Change /TN Holocron /ENABLE" {
 		t.Errorf("enable %q", m)
 	}
 	if ch, err := SetEnabled(r.ops(), Logon, TaskName, true); ch || err != nil {
@@ -208,11 +208,11 @@ func TestLogonEnableDisableRemove(t *testing.T) {
 	if ch, err := SetEnabled(r.ops(), Logon, TaskName, false); !ch || err != nil || Status(r.env, Logon, TaskName).Enabled {
 		t.Errorf("disable: %v %v", ch, err)
 	}
-	r.fos.reset()
+	r.fos.Reset()
 	if rm, err := Remove(r.ops(), Logon, TaskName); !rm || err != nil {
 		t.Fatal(rm, err)
 	}
-	if m := mutating(r.fos.callList()); len(m) != 1 || m[0] != "schtasks /Delete /TN Holocron /F" {
+	if m := Mutating(r.fos.Calls()); len(m) != 1 || m[0] != "schtasks /Delete /TN Holocron /F" {
 		t.Errorf("remove %q", m)
 	}
 	if rm, err := Remove(r.ops(), Logon, TaskName); rm || err != nil {
@@ -226,10 +226,10 @@ func TestLogonEnableDisableRemove(t *testing.T) {
 func TestRollbackOnFailingStep(t *testing.T) {
 	// verification fails: the task this run created is deleted again
 	r := newRigT(t, "windows")
-	r.fos.mangle = func(x string) string { return strings.Replace(x, "--detach</Arguments>", "</Arguments>", 1) }
+	r.fos.Mangle = func(x string) string { return strings.Replace(x, "--detach</Arguments>", "</Arguments>", 1) }
 	_, err := Install(r.ops(), winSpec(r), "v1")
-	if err == nil || !strings.Contains(err.Error(), "verification") || !strings.Contains(err.Error(), "rolled back") || len(r.fos.tasks) != 0 {
-		t.Errorf("err %v tasks %v", err, r.fos.tasks)
+	if err == nil || !strings.Contains(err.Error(), "verification") || !strings.Contains(err.Error(), "rolled back") || len(r.fos.Tasks) != 0 {
+		t.Errorf("err %v tasks %v", err, r.fos.Tasks)
 	}
 	if _, ok, _ := ReadRecord(winSpec(r).Record); ok {
 		t.Error("a failed install left a record")
@@ -240,8 +240,8 @@ func TestRollbackOnFailingStep(t *testing.T) {
 	if _, err := Install(r.ops(), winSpec(r), "v1"); err != nil {
 		t.Fatal(err)
 	}
-	before := r.fos.tasks[TaskName]
-	r.fos.mangle = func(x string) string {
+	before := r.fos.Tasks[TaskName]
+	r.fos.Mangle = func(x string) string {
 		if strings.Contains(x, `D:\`) {
 			return strings.Replace(x, "--detach</Arguments>", "</Arguments>", 1)
 		}
@@ -252,13 +252,13 @@ func TestRollbackOnFailingStep(t *testing.T) {
 	if _, err := Install(r.ops(), s, "v2"); err == nil || !strings.Contains(err.Error(), "previous entry was put back") {
 		t.Errorf("update rollback: %v", err)
 	}
-	if after, _ := parseTask(r.fos.tasks[TaskName]); after == nil || after.Exe != `C:\Holocron\holocron.exe` {
-		t.Errorf("the previous task is not back: %v", r.fos.tasks[TaskName] == before)
+	if after, _ := parseTask(r.fos.Tasks[TaskName]); after == nil || after.Exe != `C:\Holocron\holocron.exe` {
+		t.Errorf("the previous task is not back: %v", r.fos.Tasks[TaskName] == before)
 	}
 
 	// systemd: enable fails after the unit was written: the unit file is gone again
 	r = newRigT(t, "linux")
-	r.fos.fail["systemctl:enable"] = errExit1
+	r.fos.Fail["systemctl:enable"] = ErrFakeExit
 	us := unixSpec(r, Systemd)
 	_, err = Install(r.ops(), us, "v1")
 	unit := filepath.Join(r.env.Home, ".config", "systemd", "user", "holocron.service")
@@ -268,9 +268,9 @@ func TestRollbackOnFailingStep(t *testing.T) {
 
 	// schtasks /Create fails: nothing was created, nothing to remove
 	r = newRigT(t, "windows")
-	r.fos.fail["schtasks:/Create"] = errExit1
-	if _, err := Install(r.ops(), winSpec(r), "v1"); err == nil || strings.Contains(strings.Join(r.fos.callList(), ","), "/Delete") {
-		t.Errorf("create failure: %v %q", err, r.fos.callList())
+	r.fos.Fail["schtasks:/Create"] = ErrFakeExit
+	if _, err := Install(r.ops(), winSpec(r), "v1"); err == nil || strings.Contains(strings.Join(r.fos.Calls(), ","), "/Delete") {
+		t.Errorf("create failure: %v %q", err, r.fos.Calls())
 	}
 }
 
@@ -291,7 +291,7 @@ func TestDryRunChangesNothing(t *testing.T) {
 		if err != nil || !res.Created {
 			t.Fatalf("%s: %v", c.goos, err)
 		}
-		if m := mutating(r.fos.callList()); len(m) != 0 {
+		if m := Mutating(r.fos.Calls()); len(m) != 0 {
 			t.Errorf("%s: dry run ran %q", c.goos, m)
 		}
 		if !strings.Contains(out, "would") || !strings.Contains(out, "would write the install record") {
@@ -312,14 +312,14 @@ func TestDryRunChangesNothing(t *testing.T) {
 			t.Fatal(err)
 		}
 		r.dry = true
-		r.fos.reset()
+		r.fos.Reset()
 		if rm, err := Remove(r.ops(), s.Mode, s.Name); !rm || err != nil {
 			t.Errorf("%s: dry remove %v %v", c.goos, rm, err)
 		}
 		if ch, err := SetEnabled(r.ops(), s.Mode, s.Name, false); !ch || err != nil {
 			t.Errorf("%s: dry disable %v %v", c.goos, ch, err)
 		}
-		if m := mutating(r.fos.callList()); len(m) != 0 {
+		if m := Mutating(r.fos.Calls()); len(m) != 0 {
 			t.Errorf("%s: dry remove/disable ran %q", c.goos, m)
 		}
 		if !Status(r.env, s.Mode, s.Name).Installed || !Status(r.env, s.Mode, s.Name).Enabled {
@@ -335,24 +335,24 @@ func TestSystemdSequences(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"systemctl --user daemon-reload", "systemctl --user enable holocron.service"}
-	if m := mutating(r.fos.callList()); !reflect.DeepEqual(m, want) {
+	if m := Mutating(r.fos.Calls()); !reflect.DeepEqual(m, want) {
 		t.Errorf("install %q", m)
 	}
 	st := Status(r.env, Systemd, UnitName)
 	if !st.Installed || !st.Enabled || st.Running != "inactive" || st.Exe != s.Exe {
 		t.Errorf("status %+v", st)
 	}
-	r.fos.reset()
+	r.fos.Reset()
 	SetEnabled(r.ops(), Systemd, UnitName, false)
 	SetEnabled(r.ops(), Systemd, UnitName, true)
-	if m := mutating(r.fos.callList()); !reflect.DeepEqual(m, []string{"systemctl --user disable holocron.service", "systemctl --user enable holocron.service"}) {
+	if m := Mutating(r.fos.Calls()); !reflect.DeepEqual(m, []string{"systemctl --user disable holocron.service", "systemctl --user enable holocron.service"}) {
 		t.Errorf("switch %q", m)
 	}
-	r.fos.reset()
+	r.fos.Reset()
 	if _, err := Remove(r.ops(), Systemd, UnitName); err != nil {
 		t.Fatal(err)
 	}
-	if m := mutating(r.fos.callList()); !reflect.DeepEqual(m, []string{"systemctl --user disable holocron.service", "systemctl --user daemon-reload"}) {
+	if m := Mutating(r.fos.Calls()); !reflect.DeepEqual(m, []string{"systemctl --user disable holocron.service", "systemctl --user daemon-reload"}) {
 		t.Errorf("remove %q", m)
 	}
 	// a test-disabled unit is written and reloaded but never enabled
@@ -362,7 +362,7 @@ func TestSystemdSequences(t *testing.T) {
 	if _, err := Install(r.ops(), s, "v1"); err != nil {
 		t.Fatal(err)
 	}
-	if m := mutating(r.fos.callList()); !reflect.DeepEqual(m, []string{"systemctl --user daemon-reload"}) {
+	if m := Mutating(r.fos.Calls()); !reflect.DeepEqual(m, []string{"systemctl --user daemon-reload"}) {
 		t.Errorf("disabled install %q", m)
 	}
 }
@@ -373,20 +373,20 @@ func TestLaunchdSequences(t *testing.T) {
 	if _, err := Install(r.ops(), s, "v1"); err != nil {
 		t.Fatal(err)
 	}
-	if m := mutating(r.fos.callList()); !reflect.DeepEqual(m, []string{"launchctl enable gui/501/com.holocron.nvr"}) {
+	if m := Mutating(r.fos.Calls()); !reflect.DeepEqual(m, []string{"launchctl enable gui/501/com.holocron.nvr"}) {
 		t.Errorf("install %q", m)
 	}
-	r.fos.reset()
+	r.fos.Reset()
 	SetEnabled(r.ops(), Launchd, LaunchLabel, false)
 	if st := Status(r.env, Launchd, LaunchLabel); st.Enabled || !st.Installed || st.Running != "not loaded" {
 		t.Errorf("after disable %+v", st)
 	}
-	r.fos.loaded[LaunchLabel] = true
-	r.fos.reset()
+	r.fos.Loaded[LaunchLabel] = true
+	r.fos.Reset()
 	if _, err := Remove(r.ops(), Launchd, LaunchLabel); err != nil {
 		t.Fatal(err)
 	}
-	if m := mutating(r.fos.callList()); !reflect.DeepEqual(m, []string{"launchctl bootout gui/501/com.holocron.nvr"}) {
+	if m := Mutating(r.fos.Calls()); !reflect.DeepEqual(m, []string{"launchctl bootout gui/501/com.holocron.nvr"}) {
 		t.Errorf("remove %q", m)
 	}
 }
@@ -394,25 +394,25 @@ func TestLaunchdSequences(t *testing.T) {
 func TestOldTasksAreOnlyRead(t *testing.T) {
 	r := newRigT(t, "windows")
 	old := strings.Replace(taskXML(`PC\alice`, "S-1", `C:\x\powershell.exe`, "-File x.ps1", `C:\x`, false), "\n", "\r\n", -1)
-	r.fos.tasks["IPCCTV-Recorder"] = strings.Replace(old, "<Enabled>false</Enabled>\r\n    <Hidden>", "<Enabled>true</Enabled>\r\n    <Hidden>", 1)
-	r.fos.tasks["IPCCTV-Dashboard"] = old
+	r.fos.Tasks["IPCCTV-Recorder"] = strings.Replace(old, "<Enabled>false</Enabled>\r\n    <Hidden>", "<Enabled>true</Enabled>\r\n    <Hidden>", 1)
+	r.fos.Tasks["IPCCTV-Dashboard"] = old
 	got := QueryOldTasks(r.env)
 	want := []OldTask{{Name: "IPCCTV-Recorder", Found: true, Enabled: true}, {Name: "IPCCTV-Dashboard", Found: true}, {Name: "IPCCTV-Ui", Detail: "ERROR: The system cannot find the file specified."}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("old tasks %+v", got)
 	}
-	if m := mutating(r.fos.callList()); len(m) != 0 {
+	if m := Mutating(r.fos.Calls()); len(m) != 0 {
 		t.Errorf("old tasks were changed: %q", m)
 	}
 	// a whole install / uninstall cycle never names them
 	Install(r.ops(), winSpec(r), "v1")
 	Remove(r.ops(), Logon, TaskName)
-	for _, c := range r.fos.callList() {
+	for _, c := range r.fos.Calls() {
 		if strings.Contains(c, "IPCCTV") && !strings.HasPrefix(c, "schtasks /Query") {
 			t.Errorf("touched an old task: %s", c)
 		}
 	}
-	if r.fos.tasks["IPCCTV-Dashboard"] != old {
+	if r.fos.Tasks["IPCCTV-Dashboard"] != old {
 		t.Error("an old task changed")
 	}
 }
