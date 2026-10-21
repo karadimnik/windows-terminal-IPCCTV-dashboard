@@ -19,7 +19,7 @@ import (
 func (p Paths) WebStopFile() string { return filepath.Join(p.State(), "web.stop") }
 
 // webAux is the web role as the host's auxiliary child: `<exe> <global flags> web --stop-file ...`
-// in the host's own scope, restarted in place (internal/host Aux), listed in <state>/aux.json
+// in the host's own scope, restarted in place (internal/host Aux), listed in <state>/webchild.json
 // for the census of `down`. Before it starts, the web child a crashed earlier host left behind is
 // reaped when it is a provable orphan and no other host is alive.
 func webAux(p Paths, scope *osx.Scope, exe string, global []string, log *slog.Logger) host.Aux {

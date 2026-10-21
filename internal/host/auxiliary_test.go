@@ -194,7 +194,7 @@ func TestAuxStopsWithTheHost(t *testing.T) {
 func TestAuxIsListedInTheRegistry(t *testing.T) {
 	h := newHarness(t, Service)
 	s := &auxSpawner{h: h, obey: true}
-	reg := osx.NewRegistry(filepath.Join(h.state, "aux.json"))
+	reg := osx.NewRegistry(filepath.Join(h.state, "webchild.json"))
 	in := &osx.FakeInspector{Procs: map[int]osx.ProcInfo{9000: {Start: "t0", Image: "/bin/holocron"}, 9001: {Start: "t1", Image: "/bin/holocron"}}}
 	h.aux = []Aux{s.aux(reg, in)}
 	h.onSpawn = func(l *fakeLife) { l.running(); l.honourStop() }
@@ -214,7 +214,7 @@ func TestAuxIsListedInTheRegistry(t *testing.T) {
 	if e, _ := reg.Load(); len(e) != 0 {
 		t.Errorf("entries left after the host ended: %+v", e)
 	}
-	if _, err := os.Stat(filepath.Join(h.state, "aux.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(h.state, "webchild.json")); err != nil {
 		t.Error(err)
 	}
 }

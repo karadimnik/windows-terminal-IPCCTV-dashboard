@@ -666,7 +666,7 @@ func TestStatusShowsTheWebRole(t *testing.T) {
 	}
 	os.MkdirAll(filepath.Join(r.root, "_state"), 0o700)
 	b, _ := json.Marshal(map[string]any{"supervisor": 1, "children": []osx.ChildEntry{{Pid: 7001, Start: "t", Image: "/bin/holocron", Role: "web"}, {Pid: 7002, Start: "t", Image: "/bin/other", Role: "web"}}})
-	os.WriteFile(filepath.Join(r.root, "_state", "aux.json"), b, 0o600)
+	os.WriteFile(filepath.Join(r.root, "_state", "webchild.json"), b, 0o600)
 	r.insp = liveInspector{7001: {Start: "t", Image: "/bin/holocron"}, 7002: {Start: "t", Image: "/bin/holocron"}} // 7002: another image = a reused pid
 	out, _, _ = r.run("status")
 	if !strings.Contains(out, "web app: running pid 7001 on http://127.0.0.1:18821/") || strings.Contains(out, "7002") {
