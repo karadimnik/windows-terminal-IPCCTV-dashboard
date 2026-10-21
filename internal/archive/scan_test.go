@@ -184,3 +184,45 @@ func TestTracker(t *testing.T) {
 		t.Errorf("after Forget: %v", got)
 	}
 }
+
+// The newest segment's size is the live one (Get-CamLiveFileLength), not the listing's: a stand-in
+// for NTFS, whose listing shows the size of the open segment as of its creation (0), reports more
+// than the listing for the newest file only. A refused open keeps the listing value. Closed
+// segments are never re-read.
+func TestScanNewestSizeIsLive(t *testing.T) {
+	const (
+		closed = "Cam_A_20261017_114500+0300.mkv"
+		open   = "Cam_A_20261017_120000+0300.mkv"
+	)
+	dir := camDir(t, "Cam_A")
+	put(t, dir, closed, 300, 900*time.Second)
+	put(t, dir, open, 0, 3*time.Second) // the stale listing: nothing written yet
+	put(t, dir, "notes.txt", 7, time.Hour)
+	var asked []string
+	live := map[string]int64{open: 150 << 20}
+	var fail error
+	orig := newestSize
+	t.Cleanup(func() { newestSize = orig })
+	newestSize = func(p string) (int64, error) {
+		asked = append(asked, filepath.Base(p))
+		if fail != nil {
+			return -1, fail
+		}
+		return live[filepath.Base(p)], nil
+	}
+	s, err := Scan(dir, ".mkv", t0, 900)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Newest != open || s.NewestBytes != 150<<20 || s.Bytes != 150<<20+300+7 || s.Files != 3 {
+		t.Errorf("live size: newest %s %d bytes, total %d in %d files; want %s %d, total %d in 3", s.Newest, s.NewestBytes, s.Bytes, s.Files, open, 150<<20, 150<<20+307)
+	}
+	if len(asked) != 1 || asked[0] != open {
+		t.Errorf("live size asked for %v, want the newest segment only", asked)
+	}
+	fail = os.ErrPermission
+	s, _ = Scan(dir, ".mkv", t0, 900)
+	if s.NewestBytes != 0 || s.Bytes != 307 {
+		t.Errorf("refused open: newest %d bytes, total %d; want the listing (0, 307)", s.NewestBytes, s.Bytes)
+	}
+}

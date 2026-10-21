@@ -212,6 +212,13 @@ hold, stagger, repeat, blind gap, 300 s reset, [int] rounding, denied) each fail
 - **Open segment**: its first-seen time (`archive.Tracker`) counts only while the scan says `Recent`; PowerShell
   counts NTFS creation time of the newest-created file. Without a scan the stall marker is StartedAt (PowerShell
   enumerates the folder).
+- **Open segment size** (W13b): `CurrentSegmentBytes` and `ArchiveBytes` take the newest segment's live size
+  (`archive` reads it through an open handle, as `Get-CamLiveFileLength`); a Windows listing shows the size at creation
+  (0) while ffmpeg holds the file. The stall watchdog and alert 110 never read a size: their markers are StartedAt, the
+  newest CLOSED write (fresh in the listing: NTFS updates an entry when its handle closes) and the open segment's
+  first-seen time, so the stale size changed neither decision. `SecondsSinceLastClosedSegment` is the age of the newest
+  closed write and is correct as listed: with 900 s segments it runs from 0 to about 900 s while the current segment is
+  open (865 s means the current segment is 865 s old).
 - **Restarts** are a ring (last hour, at most 4096); PowerShell keeps every stamp for the process life.
 - **Reconcile stops** are handed out as Kill and the replacing entry of the same folder waits for the old child to exit.
 - `LastError` rounds the run time like PowerShell's `[int]` (half to even), as `ffmpeg.ExitInfo.Message` now does.
