@@ -25,13 +25,24 @@ func assertOwnerOnly(t *testing.T, path string, isDir bool) {
 	if strings.Contains(text, "(I)") {
 		t.Errorf("%s still has inherited entries:\n%s", path, text)
 	}
-	entries := 0
+	// The current user must hold full control. SYSTEM and BUILTIN\Administrators may also appear: an
+	// elevated administrator's token (the hosted CI runner) makes them explicit entries, and an
+	// administrator can take ownership anyway. Any other principal (Users, Everyone, Authenticated
+	// Users, another account) fails the check.
+	ownEntries, otherEntries := 0, 0
 	for _, line := range strings.Split(text, "\n") {
-		if strings.Contains(line, ":(") {
-			entries++
+		if !strings.Contains(line, ":(") {
+			continue
+		}
+		switch {
+		case strings.Contains(line, current.Username+":("):
+			ownEntries++
+		case strings.Contains(line, "NT AUTHORITY\\SYSTEM:(") || strings.Contains(line, "BUILTIN\\Administrators:("):
+		default:
+			otherEntries++
 		}
 	}
-	if entries != 1 || !strings.Contains(text, "(F)") && !strings.Contains(text, "(OI)(CI)(F)") {
-		t.Errorf("%s: want exactly one full-control entry for %s:\n%s", path, current.Username, text)
+	if ownEntries != 1 || otherEntries != 0 || !strings.Contains(text, "(F)") && !strings.Contains(text, "(OI)(CI)(F)") {
+		t.Errorf("%s: want one full-control entry for %s and no other account besides SYSTEM and Administrators:\n%s", path, current.Username, text)
 	}
 }
