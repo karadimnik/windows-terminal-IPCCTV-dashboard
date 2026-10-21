@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"holocron/internal/autostart"
+	"holocron/internal/osx"
 )
 
 func (r *rig) unitFile(name string) string {
@@ -238,5 +239,54 @@ func TestOldTasksGateWindows(t *testing.T) {
 		if r.tools.Tasks[k] != v {
 			t.Errorf("%s changed", k)
 		}
+	}
+}
+
+func TestServiceModeGate(t *testing.T) {
+	r := newRig(t)
+	r.auto.GOOS = "windows"
+	scm := &osx.FakeSCM{}
+	r.auto.SCM = scm
+	writeCfg := func(secrets string) {
+		os.WriteFile(r.cfg, []byte(`{"StopTimeoutSeconds": 1, "secrets": `+secrets+`}`), 0o644)
+	}
+	writeCfg(`{"backend": "auto"}`)
+	out, errw, code := r.run("install", "--mode", "service", "--yes")
+	caveat := strings.Index(out, "has no Windows Credential Manager")
+	if code != 1 || caveat < 0 || !strings.Contains(out, "elevated (Run as administrator)") || !strings.Contains(errw, "needs secrets.backend file") || !strings.Contains(errw, "holocron config set secrets.backend file") {
+		t.Errorf("auto backend: %d\n%s%s", code, out, errw)
+	}
+	writeCfg(`{"backend": "file"}`)
+	if _, errw, code := r.run("install", "--mode", "service", "--yes"); code != 1 || !strings.Contains(errw, "absolute paths") {
+		t.Errorf("default file paths: %d %s", code, errw)
+	}
+	key := filepath.Join(filepath.Dir(r.cfg), "secrets.key")
+	writeCfg(`{"backend": "file", "file": "` + filepath.ToSlash(filepath.Join(filepath.Dir(r.cfg), "secrets.enc")) + `", "keyFile": "` + filepath.ToSlash(key) + `"}`)
+	r.stdin = "no\n"
+	out, errw, code = r.run("install", "--mode", "service")
+	if code != 1 || !strings.Contains(out, "type yes to create the service") || !strings.Contains(errw, "not confirmed") || strings.Index(out, "type yes") < caveat {
+		t.Errorf("not confirmed: %d\n%s%s", code, out, errw)
+	}
+	// confirmed: the gate lets it through (the rig's Linux paths then fail the Windows path check,
+	// before anything reaches the service manager)
+	r.stdin = "yes\n"
+	if out, errw, code := r.run("install", "--mode", "service"); code != 1 || !strings.Contains(errw, "not an absolute Windows path") {
+		t.Errorf("confirmed: %d\n%s%s", code, out, errw)
+	}
+	r.stdin = ""
+	if out, errw, code := r.run("install", "--mode", "service", "--dry-run"); strings.Contains(out, "type yes") || !strings.Contains(errw, "not an absolute Windows path") || code != 1 {
+		t.Errorf("dry run asks nothing: %d\n%s%s", code, out, errw)
+	}
+	if _, errw, code := r.run("install", "--mode", "service", "--yes", "--account", `PC\alice`); code != 2 || !strings.Contains(errw, "without a password") {
+		t.Errorf("account: %d %s", code, errw)
+	}
+	for _, c := range scm.CallList() {
+		if !strings.HasPrefix(c, "query:") {
+			t.Errorf("the service manager was changed: %s", c)
+		}
+	}
+	// the hidden role refuses to run outside the service manager
+	if _, errw, code := r.run("service"); code != 2 || !strings.Contains(errw, "Windows service manager starts") {
+		t.Errorf("service role: %d %s", code, errw)
 	}
 }

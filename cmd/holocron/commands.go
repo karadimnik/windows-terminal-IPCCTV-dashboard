@@ -86,6 +86,7 @@ func init() {
 		{path: "autostart status", usage: "[--json]", about: "installed, enabled, what it runs and whether that executable exists; the PowerShell system's tasks (read only)", action: "autostart.status", audit: true, run: cmdAutostartStatus},
 		{path: "host", action: "role.host", role: true, run: cmdRoleHost},
 		{path: "supervisor", action: "role.supervisor", role: true, run: cmdRoleSupervisor},
+		{path: "service", action: "role.service", role: true, run: cmdRoleService},
 	}
 	for _, c := range commands {
 		c := c

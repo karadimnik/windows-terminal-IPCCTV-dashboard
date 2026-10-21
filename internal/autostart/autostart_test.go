@@ -9,6 +9,9 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"holocron/internal/osx"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files in testdata")
@@ -197,7 +200,9 @@ func TestLogonEnableDisableRemove(t *testing.T) {
 	if st := Status(r.env, Logon, TaskName); !st.Installed || st.Enabled {
 		t.Fatalf("installed disabled: %+v", st)
 	}
-	trigger := func() string { return regexp.MustCompile(`(?s)<LogonTrigger>.*?</LogonTrigger>`).FindString(r.fos.Tasks[TaskName]) }
+	trigger := func() string {
+		return regexp.MustCompile(`(?s)<LogonTrigger>.*?</LogonTrigger>`).FindString(r.fos.Tasks[TaskName])
+	}
 	r.fos.Reset()
 	if ch, err := SetEnabled(r.ops(), Logon, TaskName, true); !ch || err != nil {
 		t.Fatal(ch, err)
@@ -481,5 +486,113 @@ func TestDecodeTaskXML(t *testing.T) {
 		if err != nil || got.Command() != e.Command() || got.Key != e.Key {
 			t.Errorf("decode: %v %+v", err, got)
 		}
+	}
+}
+
+func svcRig(t *testing.T) (*rigT, *osx.FakeSCM, Spec) {
+	r := newRigT(t, "windows")
+	scm := &osx.FakeSCM{}
+	r.env.SCM = scm
+	s := winSpec(r)
+	s.Mode, s.Name, s.Exe = Service, ServiceName, `C:\Program Files\Holocron\holocron.exe`
+	return r, scm, s
+}
+
+func TestServiceAgainstFakeSCM(t *testing.T) {
+	r, scm, s := svcRig(t)
+	res, err := Install(r.ops(), s, "v1")
+	if err != nil || !res.Created {
+		t.Fatalf("%v\n%s", err, r.out.String())
+	}
+	if got := scm.CallList(); !reflect.DeepEqual(got, []string{"query:Holocron", "create:Holocron", "query:Holocron"}) {
+		t.Errorf("calls %q", got)
+	}
+	c := scm.Services[ServiceName]
+	want := osx.ServiceConfig{Name: "Holocron", DisplayName: "Holocron NVR", Account: "LocalSystem", Start: osx.StartAuto, Delayed: true, RestartDelay: 60 * time.Second,
+		BinaryPath:  `"C:\Program Files\Holocron\holocron.exe" --config C:\Holocron\holocron.config.json service`,
+		Description: c.Description}
+	if c != want || !strings.Contains(c.Description, "holocron uninstall") {
+		t.Errorf("service config\n%+v\nwant\n%+v", c, want)
+	}
+	if st := Status(r.env, Service, ServiceName); !st.Installed || !st.Enabled || st.Exe != s.Exe || st.Running != "stopped" {
+		t.Errorf("status %+v", st)
+	}
+	scm.Calls = nil
+	if res, err := Install(r.ops(), s, "v1"); err != nil || res.Changed || !reflect.DeepEqual(scm.CallList(), []string{"query:Holocron"}) {
+		t.Errorf("second install: %+v %v %q", res, err, scm.CallList())
+	}
+	s2 := s
+	s2.Account = `NT AUTHORITY\LocalService`
+	if res, err := Install(r.ops(), s2, "v2"); err != nil || res.Created || len(res.Changes) != 1 || scm.Services[ServiceName].Account != `NT AUTHORITY\LocalService` {
+		t.Errorf("update: %+v %v", res, err)
+	}
+	if ch, err := SetEnabled(r.ops(), Service, ServiceName, false); !ch || err != nil || scm.Services[ServiceName].Start != osx.StartDisabled {
+		t.Errorf("disable: %v %v %+v", ch, err, scm.Services[ServiceName])
+	}
+	if ch, err := SetEnabled(r.ops(), Service, ServiceName, true); !ch || err != nil || scm.Services[ServiceName].Start != osx.StartAuto || !scm.Services[ServiceName].Delayed {
+		t.Errorf("enable: %v %v %+v", ch, err, scm.Services[ServiceName])
+	}
+
+	// dry runs call nothing that changes the manager
+	r.dry = true
+	scm.Calls = nil
+	SetEnabled(r.ops(), Service, ServiceName, false)
+	Remove(r.ops(), Service, ServiceName)
+	s3 := s
+	s3.Exe = `D:\x\holocron.exe`
+	Install(r.ops(), s3, "v3")
+	for _, c := range scm.CallList() {
+		if !strings.HasPrefix(c, "query:") {
+			t.Errorf("dry run called %s", c)
+		}
+	}
+	if !strings.Contains(r.out.String(), "would call the service control manager: ChangeServiceConfig Holocron") {
+		t.Errorf("dry run output:\n%s", r.out.String())
+	}
+	r.dry = false
+
+	// a running service is only marked for deletion: uninstall says so and fails
+	scm.Running = map[string]bool{ServiceName: true}
+	if _, err := Remove(r.ops(), Service, ServiceName); err == nil || !strings.Contains(err.Error(), "marked for deletion") {
+		t.Errorf("running: %v", err)
+	}
+	scm.Running = nil
+	if rm, err := Remove(r.ops(), Service, ServiceName); !rm || err != nil || len(scm.Services) != 0 {
+		t.Errorf("remove: %v %v", rm, err)
+	}
+}
+
+func TestServiceRefusals(t *testing.T) {
+	r, scm, s := svcRig(t)
+	scm.Fail = map[string]error{"create": osx.ErrAccessDenied}
+	_, err := Install(r.ops(), s, "v1")
+	if !errors.Is(err, osx.ErrAccessDenied) || !strings.Contains(err.Error(), "elevated") {
+		t.Errorf("access denied: %v", err)
+	}
+	for _, c := range scm.CallList() {
+		if c == "delete:Holocron" {
+			t.Error("rollback deleted a service this run did not create")
+		}
+	}
+	for _, a := range []string{`PC\alice`, "alice"} {
+		s.Account = a
+		if _, err := Generate(r.env, s); !errors.Is(err, ErrUsage) {
+			t.Errorf("account %q: %v", a, err)
+		}
+	}
+	for _, a := range []string{"", "LocalSystem", `NT AUTHORITY\NetworkService`, `NT SERVICE\Holocron`} {
+		s.Account = a
+		if _, err := Generate(r.env, s); err != nil {
+			t.Errorf("account %q: %v", a, err)
+		}
+	}
+	s.Account, s.Exe = "", `C:\100%\holocron.exe`
+	if _, err := Generate(r.env, s); !errors.Is(err, ErrUsage) {
+		t.Errorf("percent in the service path: %v", err)
+	}
+	s.Exe, s.Disabled, s.Name = `C:\Holocron\holocron.exe`, true, "Holocron-TEST-s1"
+	scm.Fail = nil
+	if _, err := Install(r.ops(), s, "v1"); err != nil || scm.Services["Holocron-TEST-s1"].Start != osx.StartDisabled || scm.Services["Holocron-TEST-s1"].DisplayName != "Holocron NVR (Holocron-TEST-s1)" {
+		t.Errorf("test service: %v %+v", err, scm.Services)
 	}
 }

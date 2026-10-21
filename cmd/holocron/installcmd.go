@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"holocron/internal/app"
 	"holocron/internal/autostart"
 	"holocron/internal/cli"
 	"holocron/internal/logx"
+	"holocron/internal/osx"
 )
 
 // EnvInstallName overrides the entry name; like the hidden --name flag it accepts only names with
@@ -143,6 +145,11 @@ func cmdInstall(ctx context.Context, e *env) error {
 	}
 	if *account != "" && m != autostart.Service {
 		return usageErr("holocron install --account is for --mode service only")
+	}
+	if m == autostart.Service {
+		if err := autostart.CheckAccount(*account); err != nil {
+			return usageOf(err)
+		}
 	}
 	if err := e.needConfig(); err != nil {
 		return err
@@ -404,6 +411,65 @@ func autostartChecks(e *env) []check {
 	return append(cs, check{v, "old tasks", text})
 }
 
-func (e *env) serviceGate(autostart.Spec, bool, bool) error {
-	return failed("holocron install --mode service is not built yet")
+// serviceGate is what --mode service says and checks BEFORE it asks: elevation, the account's
+// own profile (no Credential Manager, other default folders), the file secrets store with explicit
+// paths and a key that account can read; then the confirmation (--yes skips it; a dry run asks
+// nothing).
+func (e *env) serviceGate(s autostart.Spec, dry, yes bool) error {
+	acct := autostart.ServiceAccount(s.Account)
+	w := e.out
+	fmt.Fprintf(w, "--mode service creates a Windows service %s that the system starts at boot (delayed), before anyone logs on, as %s:\n", s.Name, acct)
+	fmt.Fprintln(w, "  - install, uninstall and autostart enable|disable need an elevated (Run as administrator) prompt")
+	fmt.Fprintf(w, "  - %s has no Windows Credential Manager and its own profile: the camera login must be in the encrypted file store (secrets.backend file, with secrets.file and secrets.keyFile set to absolute paths)\n", acct)
+	fmt.Fprintf(w, "  - HOLOCRON_SECRET_KEY (in the service's environment) or the key file must be readable by %s; a key in your own profile is not\n", acct)
+	fmt.Fprintf(w, "  - the archive root, the configuration and the web app's folders (web.authDir, web.tlsDir; their defaults are in YOUR profile) must be usable by %s\n", acct)
+	fmt.Fprintln(w, "  - there is no console: closing a window does not stop it; holocron down or sc stop does, and the system restarts it 60 s after a failure")
+	sc := e.cfg.Secrets
+	switch {
+	case sc.Backend != "file":
+		return cli.Refuse("--mode service needs secrets.backend file (it is %q): holocron config set secrets.backend file, set secrets.file and secrets.keyFile in %s to absolute paths %s can read, store the login with holocron secret set camera.user and camera.password, then install again", sc.Backend, e.paths.Config, acct)
+	case !isAbs(sc.File) || !isAbs(sc.KeyFile):
+		return cli.Refuse("--mode service needs secrets.file and secrets.keyFile as absolute paths in %s (the defaults are in the installing user's profile, which %s does not see); now secrets.file %q, secrets.keyFile %q", e.paths.Config, acct, sc.File, sc.KeyFile)
+	}
+	fmt.Fprintf(w, "secrets: file store %s, key file %s (or HOLOCRON_SECRET_KEY)\n", sc.File, sc.KeyFile)
+	if dry || yes {
+		return nil
+	}
+	fmt.Fprint(w, "type yes to create the service: ")
+	line, _, err := readLine(e.stdin, 64)
+	fmt.Fprintln(w)
+	if err != nil || strings.TrimSpace(line) != "yes" {
+		return cli.Refuse("not confirmed (type yes, or add --yes)")
+	}
+	return nil
+}
+
+func isAbs(p string) bool {
+	return filepath.IsAbs(p) || len(p) >= 3 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')
+}
+
+// cmdRoleService is what the Windows service manager starts (`holocron service`, hidden): the host
+// in service mode; Stop, Shutdown and Preshutdown are an ordered, requested stop (as `down`).
+func cmdRoleService(ctx context.Context, e *env) error {
+	if err := wantArgs("service", e.args, 0, 0); err != nil {
+		return err
+	}
+	exe, err := e.self()
+	if err != nil {
+		return failed("%v", err)
+	}
+	code := 0
+	err = osx.RunService(autostart.ServiceName, func(sctx context.Context) int {
+		code = app.RunHost(sctx, app.HostOptions{Options: e.opts, Service: true, Exe: exe, SupArgs: e.global})
+		return code
+	})
+	switch {
+	case errors.Is(err, osx.ErrNotService):
+		return usageErr("holocron service is the role the Windows service manager starts (holocron install --mode service); run holocron up instead")
+	case err != nil:
+		return failed("%v", err)
+	case code != 0:
+		return &exitError{code: code}
+	}
+	return nil
 }

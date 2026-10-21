@@ -148,7 +148,9 @@ func (f *FakeSCM) Delete(name string) error {
 	if _, ok := f.Services[name]; !ok {
 		return errors.New("OpenService: the specified service does not exist")
 	}
-	delete(f.Services, name)
+	if !f.Running[name] { // a running service is only marked for deletion, as with the real manager
+		delete(f.Services, name)
+	}
 	return nil
 }
 

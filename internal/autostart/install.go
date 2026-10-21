@@ -210,6 +210,9 @@ func Remove(o *Ops, m Mode, name string) (removed bool, err error) {
 		return true, nil
 	}
 	if got, _, err := b.current(name); err != nil || got != nil {
+		if m == Service && err == nil {
+			return false, fmt.Errorf("the Windows service %s is marked for deletion and goes when it stops (holocron down, or sc stop %s); run holocron uninstall again then", name, name)
+		}
 		return false, fmt.Errorf("verification: %s %s is still there after the removal (%v)", kind(m), name, err)
 	}
 	o.logger().Info(fmt.Sprintf("removed %s %s, verified gone", kind(m), name), logx.Action("install.remove"), logx.Target(name), logx.Result(logx.ResultOK))
