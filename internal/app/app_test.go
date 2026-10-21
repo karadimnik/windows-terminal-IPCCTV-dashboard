@@ -36,6 +36,7 @@ func TestCheckSandboxRoot(t *testing.T) {
 		cases[`E:\`] = false
 		cases[`E:\cameras`] = false
 		cases[`C:`] = false
+		cases[`C:x`] = false // drive-relative: wherever C:'s current folder is, also when the tests run on C:
 	}
 	for root, want := range cases {
 		err := CheckSandboxRoot(root)

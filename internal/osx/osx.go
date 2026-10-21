@@ -8,6 +8,10 @@ type Protected struct {
 	Why  string // for the refusal message, for example "the Windows directory"
 }
 
+// WhyMount is the Why of a mount point (already a resolved path, so archive.CheckRoot does not
+// touch it: reading a stale network mount can hang).
+const WhyMount = "a mount point"
+
 // Dirs are the default directories of the running OS (LLD section 4). Every field is absolute.
 type Dirs struct {
 	Root   string // default archive root (configurable)

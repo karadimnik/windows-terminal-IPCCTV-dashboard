@@ -4,19 +4,20 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
-// systemdUnit is a systemd USER unit (never a system unit, never sudo).
+// systemdUnit is a systemd USER unit (never a system unit, never sudo). Its paths are Unix paths
+// (path, not filepath) on any host, so a test on Windows generates what Linux gets.
 type systemdUnit struct{ env Env }
 
 func (u systemdUnit) dir() string {
 	base := u.env.ConfigHome
 	if base == "" {
-		base = filepath.Join(u.env.Home, ".config")
+		base = path.Join(u.env.Home, ".config")
 	}
-	return filepath.Join(base, "systemd", "user")
+	return path.Join(base, "systemd", "user")
 }
 
 func unitFile(name string) string { return name + ".service" }
@@ -54,7 +55,7 @@ func (u systemdUnit) entry(s Spec) (Entry, error) {
 	if err != nil {
 		return e, err
 	}
-	e.File = filepath.Join(u.dir(), unitFile(s.Name))
+	e.File = path.Join(u.dir(), unitFile(s.Name))
 	e.Content = unitText(e.Argv, e.WorkDir)
 	return e, nil
 }
@@ -84,15 +85,15 @@ WantedBy=default.target
 func (u systemdUnit) systemctl(args ...string) []string { return append([]string{"--user"}, args...) }
 
 func (u systemdUnit) current(name string) (*Entry, State, error) {
-	path := filepath.Join(u.dir(), unitFile(name))
-	b, err := os.ReadFile(path)
+	file := path.Join(u.dir(), unitFile(name))
+	b, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, State{}, nil
 	}
 	if err != nil {
 		return nil, State{}, err
 	}
-	e := &Entry{Mode: Systemd, Name: name, File: path, Content: string(b)}
+	e := &Entry{Mode: Systemd, Name: name, File: file, Content: string(b)}
 	for _, l := range strings.Split(e.Content, "\n") {
 		if v, ok := strings.CutPrefix(l, "ExecStart="); ok {
 			e.Argv = sdSplit(v)
@@ -151,7 +152,7 @@ func (u systemdUnit) remove(o *Ops, cur Entry) error {
 	}
 	file := cur.File
 	if file == "" {
-		file = filepath.Join(u.dir(), unitFile(cur.Name))
+		file = path.Join(u.dir(), unitFile(cur.Name))
 	}
 	if err := o.removeFile(file); err != nil {
 		return err

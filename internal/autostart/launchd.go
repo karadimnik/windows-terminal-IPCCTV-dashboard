@@ -6,16 +6,17 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
 // launchdAgent is a per-user launchd agent in ~/Library/LaunchAgents. UNVERIFIED: no macOS machine
-// was available; the plist and the command sequences are unit-tested only.
+// was available; the plist and the command sequences are unit-tested only. Its paths are Unix paths
+// (path, not filepath) on any host, so a test on Windows generates what macOS gets.
 type launchdAgent struct{ env Env }
 
 func (a launchdAgent) file(label string) string {
-	return filepath.Join(a.env.Home, "Library", "LaunchAgents", label+".plist")
+	return path.Join(a.env.Home, "Library", "LaunchAgents", label+".plist")
 }
 
 func (a launchdAgent) domain() string { return "gui/" + a.env.UID }
@@ -31,7 +32,7 @@ func (a launchdAgent) entry(s Spec) (Entry, error) {
 		return e, err
 	}
 	e.File = a.file(s.Name)
-	e.Content = plistText(s.Name, e.Argv, e.WorkDir, filepath.Join(a.env.Home, "Library", "Logs", s.Name+".log"))
+	e.Content = plistText(s.Name, e.Argv, e.WorkDir, path.Join(a.env.Home, "Library", "Logs", s.Name+".log"))
 	return e, nil
 }
 
@@ -118,17 +119,17 @@ func parsePlist(text string) (argv []string, workDir string, err error) {
 }
 
 func (a launchdAgent) current(name string) (*Entry, State, error) {
-	path := a.file(name)
-	b, err := os.ReadFile(path)
+	file := a.file(name)
+	b, err := os.ReadFile(file)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, State{}, nil
 	}
 	if err != nil {
 		return nil, State{}, err
 	}
-	e := &Entry{Mode: Launchd, Name: name, File: path, Content: string(b)}
+	e := &Entry{Mode: Launchd, Name: name, File: file, Content: string(b)}
 	if e.Argv, e.WorkDir, err = parsePlist(e.Content); err != nil {
-		return nil, State{}, fmt.Errorf("%s does not parse: %w", path, err)
+		return nil, State{}, fmt.Errorf("%s does not parse: %w", file, err)
 	}
 	if len(e.Argv) > 0 {
 		e.Exe = e.Argv[0]

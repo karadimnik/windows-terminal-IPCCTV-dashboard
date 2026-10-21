@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -12,7 +14,16 @@ import (
 )
 
 func (r *rig) unitFile(name string) string {
-	return filepath.Join(r.auto.Home, ".config", "systemd", "user", name+".service")
+	return path.Join(r.auto.Home, ".config", "systemd", "user", name+".service")
+}
+
+// skipLinuxInstallOnWindows: a systemd install needs Unix paths, and on a Windows host the rig's
+// executable, configuration and root are Windows paths, which the unit generator refuses (as it
+// must). The generator itself is tested on every host in internal/autostart.
+func skipLinuxInstallOnWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("simulates a Linux host: a systemd unit cannot hold this host's Windows paths")
+	}
 }
 
 func (r *rig) record() (autostart.Record, bool) {
@@ -31,6 +42,7 @@ func (r *rig) autostartJSON() autostart.State {
 }
 
 func TestInstallCycleSystemd(t *testing.T) {
+	skipLinuxInstallOnWindows(t)
 	r := newRig(t)
 	r.logSpec = "install=debug" // the exact commands and file contents are DEBUG records
 	out, errw, code := r.run("install", "--dry-run")
@@ -159,21 +171,24 @@ func TestInstallRefusals(t *testing.T) {
 	if !strings.Contains(r.log(), "result=refused") {
 		t.Error("the refusal is not logged as refused")
 	}
-	if out, errw, code := r.run("install", "--allow-temp", "--name", "holocron-TEST-t1", "--test-disabled"); code != 0 || !strings.Contains(out, "installing anyway because of --allow-temp") {
-		t.Errorf("--allow-temp: %d %s%s", code, out, errw)
-	}
-	if st := r.autostartJSON(); st.Name != "holocron-TEST-t1" || !st.Installed || st.Enabled {
-		t.Errorf("test entry %+v", st)
-	}
-	if m := autostart.Mutating(r.tools.Calls()); strings.Contains(strings.Join(m, ","), "enable") {
-		t.Errorf("a test-disabled install enabled the unit: %q", m)
-	}
-	if _, _, code := r.run("uninstall", "--name", "holocron-TEST-other"); code != 1 {
-		t.Errorf("uninstall of a name that is not the recorded one: %d", code)
-	}
-	if out, _, code := r.run("uninstall"); code != 0 || !strings.Contains(out, "removed") {
-		t.Errorf("uninstall: %d %s", code, out)
-	}
+	t.Run("allow-temp installs a test entry", func(t *testing.T) {
+		skipLinuxInstallOnWindows(t)
+		if out, errw, code := r.run("install", "--allow-temp", "--name", "holocron-TEST-t1", "--test-disabled"); code != 0 || !strings.Contains(out, "installing anyway because of --allow-temp") {
+			t.Errorf("--allow-temp: %d %s%s", code, out, errw)
+		}
+		if st := r.autostartJSON(); st.Name != "holocron-TEST-t1" || !st.Installed || st.Enabled {
+			t.Errorf("test entry %+v", st)
+		}
+		if m := autostart.Mutating(r.tools.Calls()); strings.Contains(strings.Join(m, ","), "enable") {
+			t.Errorf("a test-disabled install enabled the unit: %q", m)
+		}
+		if _, _, code := r.run("uninstall", "--name", "holocron-TEST-other"); code != 1 {
+			t.Errorf("uninstall of a name that is not the recorded one: %d", code)
+		}
+		if out, _, code := r.run("uninstall"); code != 0 || !strings.Contains(out, "removed") {
+			t.Errorf("uninstall: %d %s", code, out)
+		}
+	})
 
 	// an entry with holocron's name but no record: refused, then removed with --force
 	os.MkdirAll(filepath.Dir(r.unitFile("holocron")), 0o755)
@@ -218,10 +233,10 @@ func TestOldTasksGateWindows(t *testing.T) {
 			t.Errorf("%v: %d %s", a, code, errw)
 		}
 	}
-	// with the override the gate lets it through (the Linux temp paths of the rig then fail the
-	// Windows path check, which is all this test needs)
+	// with the override the gate lets it through: elsewhere the rig's Unix temp paths then fail the
+	// Windows path check; on Windows they are Windows paths and the fake schtasks creates the task
 	out, errw, code = r.run("install", "--"+oldTasksFlag)
-	if !strings.Contains(out, "going on because of --"+oldTasksFlag) || code != 1 || !strings.Contains(errw, "not an absolute Windows path") {
+	if !strings.Contains(out, "going on because of --"+oldTasksFlag) || !passedTheGate(code, out, errw, "logon task Holocron") {
 		t.Errorf("override: %d\n%s%s", code, out, errw)
 	}
 	// autostart enable is gated the same way
@@ -246,6 +261,16 @@ func TestOldTasksGateWindows(t *testing.T) {
 			t.Errorf("%s changed", k)
 		}
 	}
+}
+
+// passedTheGate: a Windows install the gates let through. On a non-Windows host the rig's Unix temp
+// paths then fail the Windows path check; on Windows they are real Windows paths and the install
+// completes against the fakes (installed and verified, or already installed on a repeat).
+func passedTheGate(code int, out, errw, entry string) bool {
+	if runtime.GOOS != "windows" {
+		return code == 1 && strings.Contains(errw, "not an absolute Windows path")
+	}
+	return code == 0 && (strings.Contains(out, "installed and verified: "+entry) || strings.Contains(out, "already installed, unchanged: "+entry))
 }
 
 func TestServiceModeGate(t *testing.T) {
@@ -273,23 +298,40 @@ func TestServiceModeGate(t *testing.T) {
 	if code != 1 || !strings.Contains(out, "type yes to create the service") || !strings.Contains(errw, "not confirmed") || strings.Index(out, "type yes") < caveat {
 		t.Errorf("not confirmed: %d\n%s%s", code, out, errw)
 	}
-	// confirmed: the gate lets it through (the rig's Linux paths then fail the Windows path check,
-	// before anything reaches the service manager)
+	changed := func() (out []string) {
+		for _, c := range scm.CallList() {
+			if !strings.HasPrefix(c, "query:") {
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	if c := changed(); len(c) != 0 {
+		t.Errorf("the service manager was changed before a confirmation: %q", c)
+	}
+	// confirmed: the gate lets it through. Elsewhere the rig's Unix paths then fail the Windows path
+	// check before anything reaches the service manager; on Windows they are Windows paths and the
+	// fake service manager creates the service, once.
 	r.stdin = "yes\n"
-	if out, errw, code := r.run("install", "--mode", "service"); code != 1 || !strings.Contains(errw, "not an absolute Windows path") {
+	if out, errw, code := r.run("install", "--mode", "service"); !passedTheGate(code, out, errw, "Windows service Holocron") {
 		t.Errorf("confirmed: %d\n%s%s", code, out, errw)
 	}
+	wantChanged := 0
+	if runtime.GOOS == "windows" {
+		wantChanged = 1
+	}
+	if c := changed(); len(c) != wantChanged || wantChanged == 1 && c[0] != "create:Holocron" {
+		t.Errorf("service manager changes after the confirmed install: %q", c)
+	}
 	r.stdin = ""
-	if out, errw, code := r.run("install", "--mode", "service", "--dry-run"); strings.Contains(out, "type yes") || !strings.Contains(errw, "not an absolute Windows path") || code != 1 {
+	if out, errw, code := r.run("install", "--mode", "service", "--dry-run"); strings.Contains(out, "type yes") || !passedTheGate(code, out, errw, "Windows service Holocron") {
 		t.Errorf("dry run asks nothing: %d\n%s%s", code, out, errw)
 	}
 	if _, errw, code := r.run("install", "--mode", "service", "--yes", "--account", `PC\alice`); code != 2 || !strings.Contains(errw, "without a password") {
 		t.Errorf("account: %d %s", code, errw)
 	}
-	for _, c := range scm.CallList() {
-		if !strings.HasPrefix(c, "query:") {
-			t.Errorf("the service manager was changed: %s", c)
-		}
+	if c := changed(); len(c) != wantChanged {
+		t.Errorf("the dry run or the refused account changed the service manager: %q", c)
 	}
 	// the hidden role refuses to run outside the service manager
 	if _, errw, code := r.run("service"); code != 2 || !strings.Contains(errw, "Windows service manager starts") {

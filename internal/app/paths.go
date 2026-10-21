@@ -71,12 +71,16 @@ func absPath(p string) string {
 // ErrSandbox is a root refused by the sandbox guard.
 var ErrSandbox = errors.New("refused by the sandbox guard (" + SandboxEnv + "=1)")
 
-// CheckSandboxRoot refuses a root that could be the Operator's: a drive or filesystem root, a path
+// CheckSandboxRoot refuses a root that could be the Operator's: a drive or filesystem root, a
+// drive-relative path (C:, C:x: wherever that drive's current folder is), a path
 // with a folder named "cameras" in it (E:\cameras, /srv/cameras), or a folder that holds what the
 // PowerShell recorder writes (recorder.log, camera_creds.xml).
 func CheckSandboxRoot(root string) error {
 	if strings.TrimSpace(root) == "" {
 		return fmt.Errorf("%w: no root", ErrSandbox)
+	}
+	if v := filepath.VolumeName(root); len(v) == 2 && !filepath.IsAbs(root) {
+		return fmt.Errorf("%w: %s is relative to the current folder of drive %s", ErrSandbox, root, v)
 	}
 	clean := filepath.Clean(absPath(root))
 	if vol := filepath.VolumeName(clean); clean == vol+string(filepath.Separator) || clean == vol || clean == string(filepath.Separator) {

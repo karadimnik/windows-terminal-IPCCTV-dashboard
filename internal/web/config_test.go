@@ -73,7 +73,7 @@ func TestLoadConfigDefaultsAndPrecedence(t *testing.T) {
 	if cfg.Listen != "127.0.0.1:9000" {
 		t.Errorf("flag listen ignored: %q", cfg.Listen)
 	}
-	if !strings.HasPrefix(cfg.StatusFile, "/tmp/archive") {
+	if cfg.StatusFile != filepath.Join("/tmp/archive", "_state", "status.json") {
 		t.Errorf("status file not derived from the flag archive root: %q", cfg.StatusFile)
 	}
 

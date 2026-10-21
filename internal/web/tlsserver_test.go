@@ -407,7 +407,7 @@ func TestLoadConfigTLS(t *testing.T) {
 }
 
 func TestPrintCA(t *testing.T) {
-	dir := t.TempDir() + "/tls"
+	dir := filepath.Join(t.TempDir(), "tls")
 	var out, errOut bytes.Buffer
 	if code := runPrintCA(Config{TLSDir: dir}, &out, &errOut); code != 0 {
 		t.Fatalf("exit %d: %s", code, errOut.String())
@@ -421,7 +421,7 @@ func TestPrintCA(t *testing.T) {
 	if strings.Contains(strings.ToLower(text), "token") {
 		t.Errorf("print-ca still talks about a token:\n%s", text)
 	}
-	if _, err := os.Stat(dir + "/leaf.crt"); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "leaf.crt")); err == nil {
 		t.Error("-print-ca created a server certificate")
 	}
 	// Idempotent: the same CA the second time.

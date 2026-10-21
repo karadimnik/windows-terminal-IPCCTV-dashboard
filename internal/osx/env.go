@@ -118,7 +118,7 @@ func ProtectedFor(goos string, e Env) []Protected {
 		addHome(goos, e, add)
 	}
 	for _, m := range e.Mounts {
-		add(m, "a mount point")
+		add(m, WhyMount)
 	}
 	add(e.ExeDir, "the program's own directory")
 	return out

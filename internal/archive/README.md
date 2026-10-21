@@ -54,6 +54,8 @@ Naming, scanning and root-safety rules. The pruner planner/executor (W3) builds 
   `-strftime 1` also expands the directory part, so the recorder MUST build the output pattern with `ffmpeg.SegmentPattern(root, safe, ext)`
   and never `archive.FormatSegmentPattern` plus `filepath.Join`. Existing PowerShell-written files for such a camera stay "foreign".
 - `CheckRoot`: lexical checks use the `osx.Platform`'s syntax (`Name()`), so the Windows table is tested on Linux; symlink/reparse and
-  symlinked-ancestor checks run only when the platform is the host. A root that does not exist yet passes (claiming checks existence).
+  symlinked-ancestor checks run only when the platform is the host. Where the root lands is the system's answer (Windows: the final path
+  of an open handle, so junctions and 8.3 short names resolve too; elsewhere `filepath.EvalSymlinks`), and it is compared with the protected
+  paths as given and in their real form (mount points as given). A root that does not exist yet passes (claiming checks existence).
   A folder inside a protected one is accepted (the marker decides), as in PowerShell.
 - Not here: the per-file prune predicate (`Get-CamPruneRefusal`: reparse, inside-root, parent equals root, no `_` folder, `IsSegmentOf`) - W3 composes it from these parts.
