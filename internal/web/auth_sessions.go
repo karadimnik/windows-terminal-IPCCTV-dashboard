@@ -161,13 +161,21 @@ func (s *sessionStore) Delete(token string) error {
 }
 
 // DeleteUser ends every session of a user (password change, user removal).
-func (s *sessionStore) DeleteUser(userID string) error {
+func (s *sessionStore) DeleteUser(userID string) error { return s.DeleteUserExcept(userID, "") }
+
+// DeleteUserExcept ends every session of a user but the one of keepToken (an admin changing his
+// own password or role in the page stays signed in there; "" spares none).
+func (s *sessionStore) DeleteUserExcept(userID, keepToken string) error {
+	keep := ""
+	if keepToken != "" {
+		keep = hashToken(keepToken)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.loadLocked()
 	n := len(s.sessions)
 	for hash, sess := range s.sessions {
-		if sess.UserID == userID {
+		if sess.UserID == userID && hash != keep {
 			delete(s.sessions, hash)
 		}
 	}
