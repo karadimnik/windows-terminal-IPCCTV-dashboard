@@ -101,14 +101,18 @@ jobs:
           "$fp" -version | sed -n 1p
       - name: go test -race
         run: go test -race -count=1 -p 1 -v ./... 2>&1 | tee .ci-race.txt
-      # Failures as one annotation, readable without a login (job logs need one).
-      - name: Failed tests as an annotation
+      # Failures as annotations (job logs need a login, annotations do not). Chunks under the 4 KB annotation limit.
+      - name: Failed tests as annotations
         if: always()
         run: |
-          for f in .ci-race.txt; do
-            [ -f "$f" ] || continue
-            msg=$(grep -nE '^(--- FAIL|FAIL|panic:|ok )|^\s+[A-Za-z0-9_./-]+_test\.go:[0-9]+:|^\s+--- FAIL' "$f" | grep -v '^[0-9]*:ok ' | head -80 | sed 's/%/%25/g' | awk '{printf "%s%%0A",$0}')
-            [ -n "$msg" ] && echo "::error title=failed tests::$msg"
+          [ -f .ci-race.txt ] || exit 0
+          grep -E '^(--- FAIL|FAIL|panic:)|^[[:space:]]+[A-Za-z0-9_./-]+_test\.go:[0-9]+:|^[[:space:]]+--- FAIL' .ci-race.txt | cut -c1-230 | sed 's/%/%25/g' > .ci-fail.txt || true
+          [ -s .ci-fail.txt ] || exit 0
+          split -l 14 .ci-fail.txt .ci-fail-part-
+          n=0
+          for part in .ci-fail-part-*; do
+            n=$((n+1)); [ "$n" -gt 9 ] && break
+            echo "::error title=failed tests $n::$(awk '{printf "%s%%0A",$0}' "$part")"
           done
           exit 0
       - name: ffmpeg-dependent tests ran and passed
