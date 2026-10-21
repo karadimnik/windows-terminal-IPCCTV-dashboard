@@ -26,7 +26,7 @@ var jsonHdr = map[string]string{"Content-Type": "application/json"}
 // Every route the program registers, classified. TestEveryRouteIsClassified fails when a route appears that is not here.
 var roRoutes = []roRoute{
 	{"GET", "/", nil, "", true}, {"HEAD", "/", nil, "", true}, {"GET", "/index.html", nil, "", true}, {"GET", "/app.js", nil, "", true},
-	{"GET", "/live.js", nil, "", true}, {"GET", "/style.css", nil, "", true}, {"GET", "/nothing-static", nil, "", true},
+	{"GET", "/live.js", nil, "", true}, {"GET", "/style.css", nil, "", true}, {"GET", "/nothing-static", nil, "", true}, {"GET", "/admin.js", nil, "", true},
 	{"GET", "/api/status", nil, "", true}, {"GET", "/api/live", nil, "", true}, {"GET", "/api/cameras", nil, "", true},
 	{"GET", "/api/config", nil, "", true}, {"GET", "/api/footage", nil, "", true}, {"GET", "/api/clip?camera=x&segment=y", nil, "", true},
 	{"GET", "/api/tls/ca.crt", nil, "", true}, {"GET", "/api/tls/info", nil, "", true},

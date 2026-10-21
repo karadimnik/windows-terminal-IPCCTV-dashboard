@@ -119,24 +119,6 @@ func (a *authService) storeFailed(action, target string, started time.Time, err 
 	emit(a.log, slog.LevelError, action, "system", target, "fail", started, "error", err.Error())
 }
 
-// ---------------------------------------------------------------------------
-// What needs no session on the LAN listener. Everything else is refused by
-// default, so a route added later is protected until someone decides otherwise.
-// ---------------------------------------------------------------------------
-
-func publicRoute(method, path string) bool {
-	switch method {
-	case http.MethodGet, http.MethodHead:
-		switch path {
-		case "/login", "/login.js", "/style.css", "/api/auth/me":
-			return true
-		}
-	case http.MethodPost:
-		return path == "/api/auth/login"
-	}
-	return false
-}
-
 type ctxKey struct{}
 
 // signedIn is the user behind a valid session cookie.
@@ -158,26 +140,47 @@ func (a *authService) signedIn(r *http.Request) (User, bool) {
 
 // gate is the outermost check: a request with no valid session reaches nothing
 // but the public routes. A browser navigation is sent to the login page; an API
-// call gets 401 JSON and no redirect.
-func (a *authService) gate(next http.Handler) http.Handler {
+// call gets 401 JSON and no redirect. A signed-in user then needs the role the
+// route's class asks for (access.go): a viewer on an admin route gets 403 and an
+// audit record. The class is the one of the pattern mux will run for the request.
+func (a *authService) gate(mux *http.ServeMux, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, ok := a.signedIn(r)
 		if ok {
 			r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, user))
 		}
-		if ok || publicRoute(r.Method, r.URL.Path) {
+		class, pattern := accessOf(mux, r)
+		if class == accessPublic {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.Contains(r.Header.Get("Accept"), "text/html") {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Redirect(w, r, "/login?next="+url.QueryEscape(safeNext(r.URL.RequestURI())), http.StatusSeeOther)
+		if !ok {
+			if (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.Contains(r.Header.Get("Accept"), "text/html") {
+				w.Header().Set("Cache-Control", "no-store")
+				http.Redirect(w, r, "/login?next="+url.QueryEscape(safeNext(r.URL.RequestURI())), http.StatusSeeOther)
+				return
+			}
+			w.Header().Set(loginRequiredHeader, "1")
+			writeAPIError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
-		w.Header().Set(loginRequiredHeader, "1")
-		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		switch {
+		case class == accessUnclassified:
+			a.log.Error("route has no access class: refused", "method", r.Method, "path", r.URL.Path, "route", pattern)
+			denied(a.log, r, user, pattern, "unclassified route")
+			writeAPIError(w, http.StatusForbidden, "forbidden")
+			return
+		case class == accessAdmin && !isAdmin(user):
+			denied(a.log, r, user, pattern, "admins only")
+			writeAPIError(w, http.StatusForbidden, adminOnlyMessage)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
+
+// adminOnlyMessage is a viewer's refusal.
+const adminOnlyMessage = "forbidden: admins only"
 
 func userFrom(r *http.Request) (User, bool) {
 	u, ok := r.Context().Value(ctxKey{}).(User)
@@ -373,7 +376,7 @@ func (a *authService) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	a.audit(r, started, "anonymous", user.Username, "login", "ok")
 	a.setSessionCookie(w, token, int(sessionLifetime.Seconds()))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": user.Username, "role": user.Role, "next": safeNext(req.Next)})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": user.Username, "role": effectiveRole(user.Role), "next": safeNext(req.Next)})
 }
 
 func (a *authService) dummyHash() string {
@@ -410,7 +413,7 @@ func (a *authService) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"authenticated": false, "loginRequired": true})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": user.Username, "role": user.Role, "loginRequired": true, "next": safeNext(r.URL.Query().Get("next"))})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": user.Username, "role": effectiveRole(user.Role), "loginRequired": true, "next": safeNext(r.URL.Query().Get("next"))})
 }
 
 // ---------------------------------------------------------------------------
@@ -440,7 +443,7 @@ func newLoopbackAuth(dir string, log *slog.Logger) *loopbackAuth {
 
 func (l *loopbackAuth) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/me", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "loginRequired": false})
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "loginRequired": false, "role": roleAdmin})
 	})
 	if l.users == nil {
 		return

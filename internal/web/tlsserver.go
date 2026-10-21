@@ -85,7 +85,7 @@ func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNam
 		// After the session check (401 beats 403) and before the guard and any handler.
 		chain = readOnlyGate(log, chain)
 	}
-	chain = logRequestsAt(log, env.reqLevel, auth.gate(chain))
+	chain = logRequestsAt(log, env.reqLevel, auth.gate(mux, chain))
 	// Outermost, so the redirects and every refusal carry it too.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")

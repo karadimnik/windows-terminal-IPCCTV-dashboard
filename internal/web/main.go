@@ -234,7 +234,12 @@ func buildMux(cfg Config, log *slog.Logger, opts ...serveOpt) (*http.ServeMux, e
 	api := NewAPI(cfg, log)
 	newServeEnv(opts).apply(api)
 	api.Routes(mux)
-	mux.Handle("GET /", versioned(hideAuthPages(http.FileServerFS(static))))
+	files := versioned(hideAuthPages(http.FileServerFS(static)))
+	mux.Handle("GET /", files)
+	// The same files under their own patterns, so each has its own access class (access.go): the
+	// sign-in page needs the style sheet, and the Admin tab's code is served to admins only.
+	mux.Handle("GET /style.css", files)
+	mux.Handle("GET /admin.js", files)
 	return mux, nil
 }
 
