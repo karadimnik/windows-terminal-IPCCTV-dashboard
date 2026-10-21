@@ -38,7 +38,28 @@ var wantAccess = map[string]access{
 }
 
 // adminWantAccess are the Admin tab's routes (every one admin-only).
-var adminWantAccess = map[string]access{}
+var adminWantAccess = map[string]access{
+	"GET /api/admin/config":          accessAdmin,
+	"POST /api/admin/config/set":     accessAdmin,
+	"POST /api/admin/config/unset":   accessAdmin,
+	"GET /api/admin/users":           accessAdmin,
+	"POST /api/admin/users/add":      accessAdmin,
+	"POST /api/admin/users/password": accessAdmin,
+	"POST /api/admin/users/role":     accessAdmin,
+	"POST /api/admin/users/remove":   accessAdmin,
+	"POST /api/admin/users/unlock":   accessAdmin,
+	"GET /api/admin/camera-login":    accessAdmin,
+	"POST /api/admin/camera-login":   accessAdmin,
+	"GET /api/admin/tls":             accessAdmin,
+	"GET /api/admin/tls/ca.crt":      accessAdmin,
+	"POST /api/admin/tls/rotate":     accessAdmin,
+	"GET /api/admin/prune":           accessAdmin,
+	"GET /api/admin/archive":         accessAdmin,
+	"GET /api/admin/log":             accessAdmin,
+	"POST /api/admin/log/level":      accessAdmin,
+	"GET /api/admin/autostart":       accessAdmin,
+	"POST /api/admin/autostart":      accessAdmin,
+}
 
 func init() {
 	for k, v := range adminWantAccess {

@@ -64,6 +64,28 @@ var routeAccess = map[string]access{
 	"GET /api/config":                 accessAdmin,
 	"PUT /api/config":                 accessAdmin,
 
+	// the Admin tab (admin_api.go)
+	"GET /api/admin/config":          accessAdmin,
+	"POST /api/admin/config/set":     accessAdmin,
+	"POST /api/admin/config/unset":   accessAdmin,
+	"GET /api/admin/users":           accessAdmin,
+	"POST /api/admin/users/add":      accessAdmin,
+	"POST /api/admin/users/password": accessAdmin,
+	"POST /api/admin/users/role":     accessAdmin,
+	"POST /api/admin/users/remove":   accessAdmin,
+	"POST /api/admin/users/unlock":   accessAdmin,
+	"GET /api/admin/camera-login":    accessAdmin,
+	"POST /api/admin/camera-login":   accessAdmin,
+	"GET /api/admin/tls":             accessAdmin,
+	"GET /api/admin/tls/ca.crt":      accessAdmin,
+	"POST /api/admin/tls/rotate":     accessAdmin,
+	"GET /api/admin/prune":           accessAdmin,
+	"GET /api/admin/archive":         accessAdmin,
+	"GET /api/admin/log":             accessAdmin,
+	"POST /api/admin/log/level":      accessAdmin,
+	"GET /api/admin/autostart":       accessAdmin,
+	"POST /api/admin/autostart":      accessAdmin,
+
 	// loopback only (the first-run page): never registered on the LAN listener
 	"GET /setup":           accessAdmin,
 	"GET /setup.js":        accessAdmin,

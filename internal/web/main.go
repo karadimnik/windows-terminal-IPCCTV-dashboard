@@ -59,6 +59,9 @@ type Options struct {
 	GoSystem bool
 	// Settings writes PUT /api/cameras and PUT /api/config in the Go system (nil: they answer 501).
 	Settings SettingsWriter
+	// Admin serves the Admin tab's configuration, camera login, maintenance and autostart sections
+	// (the holocron web role supplies it; nil: those sections answer 501, users and TLS still work).
+	Admin AdminTools
 	// StopFile, when set, ends Run as soon as the file exists (how the host stops the web role on
 	// every OS; removed by the host).
 	StopFile string
@@ -283,12 +286,17 @@ func Run(ctx context.Context, o Options) error {
 	}
 	cfg := o.Config
 	var log *slog.Logger
-	opts := []serveOpt{withController(o.Controller), withLaunch(o.Launch, o.GoSystem), withSettings(o.Settings)}
+	opts := []serveOpt{withController(o.Controller), withLaunch(o.Launch, o.GoSystem), withSettings(o.Settings), withAdmin(o.Admin)}
 	if o.Logs != nil {
 		log = o.Logs.For("web")
 		opts = append(opts, withLogs(o.Logs), withRequestLevel(slog.LevelDebug))
 	} else {
 		log = newStdoutLogger()
+	}
+	if cfg.TLSListen != "" {
+		// One sign-in service for both listeners: the Admin tab on either sees the LAN listener's
+		// lockouts and changes users through the very store its session gate reads.
+		opts = append(opts, withAuth(newAuthService(cfg.AuthDir, newFileUserStore(cfg.AuthDir, time.Now), log, time.Now, defaultPasswordHasher)))
 	}
 	handler, err := newHandler(cfg, log, opts...)
 	if err != nil {
