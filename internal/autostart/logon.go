@@ -62,7 +62,9 @@ func (t logonTask) entry(s Spec) (Entry, error) {
 	if principal == "" {
 		principal = t.env.User
 	}
-	e.Content = taskXML(t.env.User, principal, e.Argv[0], "--headless "+winJoin(inner), e.WorkDir, e.Enabled)
+	// a disabled (test) task gets a disabled logon trigger too: switching the task on with
+	// `autostart enable` then still leaves nothing that can fire
+	e.Content = taskXML(t.env.User, principal, e.Argv[0], "--headless "+winJoin(inner), e.WorkDir, e.Enabled, e.Enabled)
 	got, err := parseTask(e.Content)
 	if err != nil {
 		return Entry{}, fmt.Errorf("the generated task XML does not parse: %w", err)
@@ -83,7 +85,7 @@ func xmlText(s string) string { return xmlEscaper.Replace(s) }
 // time limit, not stopped on battery, a second start ignored (the instance lock protects as well),
 // started late when the logon was missed, normal priority (the default 7 is below normal and
 // ffmpeg would inherit it).
-func taskXML(user, principal, command, args, workDir string, enabled bool) string {
+func taskXML(user, principal, command, args, workDir string, enabled, triggerEnabled bool) string {
 	return `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -92,7 +94,7 @@ func taskXML(user, principal, command, args, workDir string, enabled bool) strin
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
-      <Enabled>true</Enabled>
+      <Enabled>` + fmt.Sprint(triggerEnabled) + `</Enabled>
       <UserId>` + xmlText(user) + `</UserId>
     </LogonTrigger>
   </Triggers>
@@ -216,12 +218,12 @@ func parseTask(text string) (*Entry, error) {
 			e.Exe = e.Argv[2]
 		}
 	}
-	user := ""
+	user, trig := "", ""
 	if len(d.Triggers.Logon) > 0 {
-		user = strings.ToLower(d.Triggers.Logon[0].UserID)
+		user, trig = strings.ToLower(d.Triggers.Logon[0].UserID), or(d.Triggers.Logon[0].Enabled, "true")
 	}
-	e.Key = fmt.Sprintf("other-triggers=%d logon-trigger=%d(%s) actions=%d logon-type=%s multiple=%s on-battery=%s/%s start-when-available=%s time-limit=%s priority=%s",
-		len(d.Triggers.Any), len(d.Triggers.Logon), user, len(d.Exec)+len(d.Other), d.Principal.LogonType,
+	e.Key = fmt.Sprintf("other-triggers=%d logon-trigger=%d(%s enabled=%s) actions=%d logon-type=%s multiple=%s on-battery=%s/%s start-when-available=%s time-limit=%s priority=%s",
+		len(d.Triggers.Any), len(d.Triggers.Logon), user, trig, len(d.Exec)+len(d.Other), d.Principal.LogonType,
 		or(d.Settings.Multiple, "IgnoreNew"), or(d.Settings.Disallow, "true"), or(d.Settings.StopOnBatt, "true"),
 		or(d.Settings.Available, "false"), or(d.Settings.Limit, "PT72H"), or(d.Settings.Priority, "7"))
 	return e, nil

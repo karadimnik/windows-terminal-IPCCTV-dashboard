@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -47,8 +48,9 @@ func TestGeneratedEntriesGolden(t *testing.T) {
 	}
 	s := winSpec(r)
 	s.Disabled = true
-	if e, _ := Generate(r.env, s); !strings.Contains(e.Content, "<Enabled>false</Enabled>\n    <Hidden>") || e.Enabled {
-		t.Error("a disabled spec must generate a disabled task")
+	if e, _ := Generate(r.env, s); !strings.Contains(e.Content, "<Enabled>false</Enabled>\n    <Hidden>") || e.Enabled ||
+		!strings.Contains(e.Content, "<LogonTrigger>\n      <Enabled>false</Enabled>") {
+		t.Error("a disabled spec must generate a disabled task with a disabled trigger")
 	}
 
 	r = newRigT(t, "linux")
@@ -195,12 +197,16 @@ func TestLogonEnableDisableRemove(t *testing.T) {
 	if st := Status(r.env, Logon, TaskName); !st.Installed || st.Enabled {
 		t.Fatalf("installed disabled: %+v", st)
 	}
+	trigger := func() string { return regexp.MustCompile(`(?s)<LogonTrigger>.*?</LogonTrigger>`).FindString(r.fos.Tasks[TaskName]) }
 	r.fos.Reset()
 	if ch, err := SetEnabled(r.ops(), Logon, TaskName, true); !ch || err != nil {
 		t.Fatal(ch, err)
 	}
 	if m := Mutating(r.fos.Calls()); len(m) != 1 || m[0] != "schtasks /Change /TN Holocron /ENABLE" {
 		t.Errorf("enable %q", m)
+	}
+	if !strings.Contains(trigger(), "<Enabled>false</Enabled>") {
+		t.Errorf("enabling a test task must leave its trigger off: %s", trigger())
 	}
 	if ch, err := SetEnabled(r.ops(), Logon, TaskName, true); ch || err != nil {
 		t.Errorf("enable twice: %v %v", ch, err)
@@ -393,7 +399,7 @@ func TestLaunchdSequences(t *testing.T) {
 
 func TestOldTasksAreOnlyRead(t *testing.T) {
 	r := newRigT(t, "windows")
-	old := strings.Replace(taskXML(`PC\alice`, "S-1", `C:\x\powershell.exe`, "-File x.ps1", `C:\x`, false), "\n", "\r\n", -1)
+	old := strings.Replace(taskXML(`PC\alice`, "S-1", `C:\x\powershell.exe`, "-File x.ps1", `C:\x`, false, true), "\n", "\r\n", -1)
 	r.fos.Tasks["IPCCTV-Recorder"] = strings.Replace(old, "<Enabled>false</Enabled>\r\n    <Hidden>", "<Enabled>true</Enabled>\r\n    <Hidden>", 1)
 	r.fos.Tasks["IPCCTV-Dashboard"] = old
 	got := QueryOldTasks(r.env)
