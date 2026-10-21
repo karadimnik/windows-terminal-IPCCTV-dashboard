@@ -29,7 +29,7 @@ var EditableKeys = []string{
 	"alerts.webhook.enabled", "alerts.webhook.url", "alerts.webhook.secretName", "alerts.webhook.secretHeader",
 	"alerts.push.enabled", "alerts.push.server", "alerts.push.topic", "alerts.push.tokenName",
 	"alerts.desktop.enabled", "alerts.eventlog.enabled",
-	"secrets.backend",
+	"secrets.backend", "secrets.file", "secrets.keyFile",
 	"web.enabled",
 }
 

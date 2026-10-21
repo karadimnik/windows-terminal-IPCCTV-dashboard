@@ -24,10 +24,24 @@ const (
 	sessionsFileName = "sessions.json"
 	authFileVersion  = 1
 
-	// roleAdmin is the only role for now. It is stored and returned and
-	// enforced nowhere beyond what tlsReadOnly already does.
-	roleAdmin = "admin"
+	// The roles. An admin may do everything the page offers; a viewer watches live, browses
+	// footage and sees the status, and is refused every other route (access.go). A record
+	// without a role (a users.json from before roles existed) is an admin.
+	roleAdmin  = "admin"
+	roleViewer = "viewer"
 )
+
+// effectiveRole is the role a stored value stands for: none is admin.
+func effectiveRole(role string) string {
+	if role == "" {
+		return roleAdmin
+	}
+	return role
+}
+
+func validRole(role string) bool { return role == roleAdmin || role == roleViewer }
+
+func isAdmin(u User) bool { return effectiveRole(u.Role) == roleAdmin }
 
 // User is one account. Hash is the self-describing password hash (auth_password.go).
 type User struct {
@@ -116,6 +130,9 @@ func (s *fileUserStore) loadLocked() error {
 		}
 		seen[key] = true
 	}
+	for i := range doc.Users {
+		doc.Users[i].Role = effectiveRole(doc.Users[i].Role)
+	}
 	s.users = doc.Users
 	return nil
 }
@@ -128,8 +145,8 @@ func checkUser(u User) error {
 		return errors.New("the username must be 1 to 64 characters from A-Z a-z 0-9 . _ -")
 	case u.Hash == "":
 		return errors.New("a user needs a password hash")
-	case u.Role == "":
-		return errors.New("a user needs a role")
+	case u.Role != "" && !validRole(u.Role):
+		return errors.New("the role must be admin or viewer")
 	}
 	return nil
 }
@@ -175,6 +192,9 @@ func (s *fileUserStore) List() ([]User, error) {
 func (s *fileUserStore) Put(u User) error {
 	if err := checkUser(u); err != nil {
 		return err
+	}
+	if !validRole(u.Role) { // what is written always names its role; only an old file may lack it
+		return errors.New("the role must be admin or viewer")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

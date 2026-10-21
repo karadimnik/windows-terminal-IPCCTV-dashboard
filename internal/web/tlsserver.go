@@ -47,6 +47,7 @@ func tlsGuardConfig(cfg Config, names certNames) Config {
 // the TLS-only routes. The login POST passes the guard like any other API call,
 // so a cross-site login attempt is refused before a password is looked at.
 func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNames, auth *authService, opts ...serveOpt) (http.Handler, error) {
+	opts = append(opts, withAuth(auth))
 	env := newServeEnv(opts)
 	mux, err := buildMux(cfg, log, opts...)
 	if err != nil {
@@ -85,7 +86,7 @@ func newTLSHandler(cfg Config, log *slog.Logger, mgr *certManager, names certNam
 		// After the session check (401 beats 403) and before the guard and any handler.
 		chain = readOnlyGate(log, chain)
 	}
-	chain = logRequestsAt(log, env.reqLevel, auth.gate(chain))
+	chain = logRequestsAt(log, env.reqLevel, auth.gate(mux, chain))
 	// Outermost, so the redirects and every refusal carry it too.
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -113,7 +114,10 @@ func startTLS(cfg Config, log *slog.Logger, opts ...serveOpt) (*http.Server, fun
 		return nil, nil, fmt.Errorf("TLS certificate: %w", err)
 	}
 	clearUnlockMarkers(cfg.AuthDir)
-	auth := newAuthService(cfg.AuthDir, newFileUserStore(cfg.AuthDir, time.Now), log, time.Now, defaultPasswordHasher)
+	auth := newServeEnv(opts).auth
+	if auth == nil {
+		auth = newAuthService(cfg.AuthDir, newFileUserStore(cfg.AuthDir, time.Now), log, time.Now, defaultPasswordHasher)
+	}
 	handler, err := newTLSHandler(cfg, log, mgr, names, auth, opts...)
 	if err != nil {
 		return nil, nil, err

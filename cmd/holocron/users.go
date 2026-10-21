@@ -40,7 +40,7 @@ func userError(err error) error {
 		return usageErr("%v; nothing changed", err)
 	case errors.Is(err, web.ErrUserExists):
 		return cli.Refuse("%v; use holocron user passwd to change the password", err)
-	case errors.Is(err, web.ErrNoSuchUser):
+	case errors.Is(err, web.ErrNoSuchUser), errors.Is(err, web.ErrLastAdmin):
 		return cli.Refuse("%v", err)
 	}
 	return failed("%v", err)
@@ -48,6 +48,10 @@ func userError(err error) error {
 
 func cmdUserSet(ctx context.Context, e *env, verb string) error {
 	fs, dir := userFlags(e, "user "+verb)
+	role := web.RoleAdmin
+	if verb == "add" {
+		fs.StringVar(&role, "role", web.RoleAdmin, "admin (manages everything) or viewer (watches live and footage only)")
+	}
 	pos, err := parseFlags(fs, e.args)
 	if err != nil {
 		return err
@@ -56,6 +60,9 @@ func cmdUserSet(ctx context.Context, e *env, verb string) error {
 		return err
 	}
 	name := pos[0]
+	if role = strings.ToLower(role); role != web.RoleAdmin && role != web.RoleViewer {
+		return usageErr("holocron user add: --role must be admin or viewer")
+	}
 	password, err := e.secretInput("Password for "+name+" (12 to 128 characters; not shown): ", maxPasswordBytes)
 	if err != nil {
 		return err
@@ -64,7 +71,7 @@ func cmdUserSet(ctx context.Context, e *env, verb string) error {
 	admin := userAdmin(ctx, e, *dir)
 	actor := cli.ActorFrom(ctx)
 	if verb == "add" {
-		err = admin.Add(actor, name, password)
+		err = admin.AddRole(actor, name, password, role)
 	} else {
 		err = admin.SetPassword(actor, name, password)
 	}
@@ -72,7 +79,7 @@ func cmdUserSet(ctx context.Context, e *env, verb string) error {
 		return userError(err)
 	}
 	if verb == "add" {
-		fmt.Fprintf(e.out, "created user %s (role admin) in %s\n", name, admin.Dir())
+		fmt.Fprintf(e.out, "created user %s (role %s) in %s\n", name, role, admin.Dir())
 	} else {
 		fmt.Fprintf(e.out, "changed the password of %s; every session of that user was ended\n", name)
 	}
@@ -101,6 +108,27 @@ func cmdUserRemove(ctx context.Context, e *env) error {
 		return userError(err)
 	}
 	fmt.Fprintf(e.out, "removed user %s and ended its sessions\n", pos[0])
+	return nil
+}
+
+func cmdUserRole(ctx context.Context, e *env) error {
+	fs, dir := userFlags(e, "user role")
+	pos, err := parseFlags(fs, e.args)
+	if err != nil {
+		return err
+	}
+	if err := wantArgs("user role", pos, 2, 2); err != nil {
+		return err
+	}
+	changed, err := userAdmin(ctx, e, *dir).SetRole(cli.ActorFrom(ctx), pos[0], pos[1])
+	if err != nil {
+		return userError(err)
+	}
+	if !changed {
+		fmt.Fprintf(e.out, "%s has the role %s already; nothing changed\n", pos[0], strings.ToLower(pos[1]))
+		return nil
+	}
+	fmt.Fprintf(e.out, "%s is now %s; every session of that user was ended\n", pos[0], strings.ToLower(pos[1]))
 	return nil
 }
 

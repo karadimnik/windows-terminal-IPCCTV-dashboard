@@ -62,6 +62,12 @@ func (e inputError) Error() string { return e.msg }
 // SetPassword creates the user (role admin) or changes the password of an existing
 // one, and ends every session of that user. created is true for a new user.
 func (a *authService) SetPassword(actor, username, password string) (created bool, err error) {
+	return a.savePassword(actor, username, password, roleAdmin, "")
+}
+
+// savePassword is SetPassword with the role a new user gets and the session to spare (keepToken,
+// "" for none); an existing user keeps its role.
+func (a *authService) savePassword(actor, username, password, newRole, keepToken string) (created bool, err error) {
 	started := time.Now()
 	fail := func(level slog.Level, err error) (bool, error) {
 		emit(a.log, level, "user.set_password", actor, username, "fail", started, "error", err.Error())
@@ -84,16 +90,16 @@ func (a *authService) SetPassword(actor, username, password string) (created boo
 	if existing {
 		user.Hash = hash
 	} else {
-		user = User{ID: newID(), Username: username, Hash: hash, Role: roleAdmin, CreatedAt: a.now().UTC()}
+		user = User{ID: newID(), Username: username, Hash: hash, Role: newRole, CreatedAt: a.now().UTC()}
 	}
 	if err := a.users.Put(user); err != nil {
 		return fail(slog.LevelError, fmt.Errorf("cannot save the user: %w", err))
 	}
-	if err := a.sessions.DeleteUser(user.ID); err != nil {
+	if err := a.sessions.DeleteUserExcept(user.ID, keepToken); err != nil {
 		return fail(slog.LevelError, fmt.Errorf("the password was saved but its sessions could not be ended: %w", err))
 	}
 	_ = a.authLog.record("local", user.Username, "set-password", "ok")
-	emit(a.log, slog.LevelInfo, "user.set_password", actor, user.Username, "ok", started, "created", !existing)
+	emit(a.log, slog.LevelInfo, "user.set_password", actor, user.Username, "ok", started, "created", !existing, "role", user.Role)
 	return !existing, nil
 }
 

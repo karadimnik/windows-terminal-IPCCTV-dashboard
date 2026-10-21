@@ -108,6 +108,10 @@ type API struct {
 	launch     *HolocronLaunch
 	goSystem   bool           // the holocron web role: an unanswering control endpoint means "stopped", not "PowerShell"
 	settings   SettingsWriter // the Go system's settings writer (nil: PUT /api/cameras and /api/config answer 501 there)
+	admin      AdminTools     // the Admin tab's command-line helpers (nil: those sections answer 501)
+	auth       *authService   // the LAN listener's running sign-in service, when there is one
+	usersOnce  sync.Once
+	userAdmin  *UserAdmin
 	pickMu     sync.Mutex
 	picked     Controller
 	pickedAt   time.Time
@@ -153,6 +157,7 @@ func (a *API) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/footage", a.handleFootage)
 	mux.HandleFunc("GET /api/clip", a.handleClip)
 	a.liveRoutes(mux)
+	a.adminRoutes(mux)
 }
 
 func (a *API) handleStatus(w http.ResponseWriter, r *http.Request) {

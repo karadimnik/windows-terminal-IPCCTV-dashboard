@@ -88,22 +88,9 @@ func cmdPrune(ctx context.Context, e *env) error {
 	if *now && supervisorAnswers(ctx, e) {
 		return cli.Refuse("a supervisor is running for %s and prunes on its own schedule (every PruneIntervalSeconds); stop it first, or let it do its work", e.paths.Root)
 	}
-	rules := prune.RulesFrom(e.cfg)
-	at := time.Now()
-	in, err := prune.Collect(e.paths.Root, e.opts.Platform, rules, at, !*now)
+	rep, res, err := pruneDecide(ctx, e, *now)
 	if err != nil {
-		return failed("cannot read the archive: %v", err)
-	}
-	ex := prune.Executor{FS: prune.OSFS{Platform: e.opts.Platform}, Log: e.lg.For("prune"), Actor: cli.ActorFrom(ctx), DryRun: !*now}
-	res, err := ex.Run(in, &prune.State{})
-	if err != nil {
-		return cli.Refuse("%v", err)
-	}
-	rep := pruneReportOf(e, res, !*now)
-	if !*now {
-		if ok, why := archive.MarkerValid(e.paths.Root, e.opts.Platform); !ok && res.Refusal == nil {
-			rep.Note = "the root is not claimed yet (" + why + "): the supervisor claims it at start, and --now refuses until then"
-		}
+		return err
 	}
 	if e.json {
 		if err := printJSON(e.out, rep); err != nil {
@@ -121,6 +108,28 @@ func cmdPrune(ctx context.Context, e *env) error {
 		return quietFail("prune: %d deletion(s) failed", res.Failed)
 	}
 	return nil
+}
+
+// pruneDecide runs the pruner's planner over the archive: a dry run deletes nothing (what
+// `holocron prune` and the Admin tab's preview show), now deletes what it decides.
+func pruneDecide(ctx context.Context, e *env, now bool) (pruneReport, prune.Result, error) {
+	rules := prune.RulesFrom(e.cfg)
+	in, err := prune.Collect(e.paths.Root, e.opts.Platform, rules, time.Now(), !now)
+	if err != nil {
+		return pruneReport{}, prune.Result{}, failed("cannot read the archive: %v", err)
+	}
+	ex := prune.Executor{FS: prune.OSFS{Platform: e.opts.Platform}, Log: e.lg.For("prune"), Actor: cli.ActorFrom(ctx), DryRun: !now}
+	res, err := ex.Run(in, &prune.State{})
+	if err != nil {
+		return pruneReport{}, res, cli.Refuse("%v", err)
+	}
+	rep := pruneReportOf(e, res, !now)
+	if !now {
+		if ok, why := archive.MarkerValid(e.paths.Root, e.opts.Platform); !ok && res.Refusal == nil {
+			rep.Note = "the root is not claimed yet (" + why + "): the supervisor claims it at start, and --now refuses until then"
+		}
+	}
+	return rep, res, nil
 }
 
 func pruneReportOf(e *env, res prune.Result, dry bool) pruneReport {

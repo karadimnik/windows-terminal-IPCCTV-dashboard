@@ -157,3 +157,127 @@ func TestTLSFacade(t *testing.T) {
 		t.Error("an empty TLS folder should be removed")
 	}
 }
+
+// A users.json written before roles existed (every user admin; a hand-made record may have no role
+// at all) loads as admin, with no migration.
+func TestPreRolesUserFileLoadsAsAdmin(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "auth")
+	hash, _ := fastHasher().Hash(testPassword)
+	doc := `{"version":1,"users":[` +
+		`{"id":"u1","username":"alice","hash":"` + hash + `","role":"admin","createdAt":"2026-10-01T10:00:00Z"},` +
+		`{"id":"u2","username":"bob","hash":"` + hash + `","createdAt":"2026-10-02T10:00:00Z"}]}`
+	os.MkdirAll(dir, 0o700)
+	if err := os.WriteFile(filepath.Join(dir, usersFileName), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	admin := usersWith(dir, nil, fastHasher())
+	list, err := admin.List()
+	if err != nil || len(list) != 2 || list[0].Role != roleAdmin || list[1].Role != roleAdmin {
+		t.Fatalf("%+v %v", list, err)
+	}
+	for _, name := range []string{"alice", "bob"} {
+		u, found, err := admin.svc.users.Get(name)
+		if err != nil || !found || !isAdmin(u) {
+			t.Errorf("%s: %+v %v", name, u, err)
+		}
+	}
+	// an unknown role is not guessed at: the file is refused (fail closed), as any invalid record
+	bad := strings.Replace(doc, `"role":"admin"`, `"role":"root"`, 1)
+	os.WriteFile(filepath.Join(dir, usersFileName), []byte(bad), 0o600)
+	if _, err := usersWith(dir, nil, fastHasher()).List(); err == nil {
+		t.Error("a record with an unknown role was accepted")
+	}
+}
+
+func TestRolesAndTheLastAdmin(t *testing.T) {
+	admin, logs := newAdmin(t)
+	if err := admin.AddRole("cli:test", "alice", testPassword, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.AddRole("cli:test", "bob", testPassword, "Viewer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.AddRole("cli:test", "carol", testPassword, "root"); !IsInputError(err) {
+		t.Errorf("unknown role: %v", err)
+	}
+	if list, _ := admin.List(); len(list) != 2 || list[1].Role != roleViewer {
+		t.Fatalf("%+v", list)
+	}
+	// the only admin can be neither demoted nor removed while bob remains
+	if _, err := admin.SetRole("cli:test", "alice", "viewer"); !errors.Is(err, ErrLastAdmin) {
+		t.Errorf("demote the last admin: %v", err)
+	}
+	if err := admin.Remove("cli:test", "alice"); !errors.Is(err, ErrLastAdmin) {
+		t.Errorf("remove the last admin: %v", err)
+	}
+	if _, err := admin.SetRole("cli:test", "nobody", "admin"); !errors.Is(err, ErrNoSuchUser) {
+		t.Errorf("unknown user: %v", err)
+	}
+	if _, err := admin.SetRole("cli:test", "bob", "boss"); !IsInputError(err) {
+		t.Errorf("bad role: %v", err)
+	}
+	// a role change ends that user's sessions, except the one being spared
+	bob, _, _ := admin.svc.users.Get("bob")
+	one, _ := admin.svc.sessions.Create(bob.ID)
+	two, _ := admin.svc.sessions.Create(bob.ID)
+	if changed, err := admin.sparing(two).SetRole("web:bob", "bob", "admin"); err != nil || !changed {
+		t.Fatalf("promote: %v %v", changed, err)
+	}
+	if _, ok := admin.svc.sessions.Lookup(one); ok {
+		t.Error("the other session survived a role change")
+	}
+	if _, ok := admin.svc.sessions.Lookup(two); !ok {
+		t.Error("the spared session was ended")
+	}
+	if changed, err := admin.SetRole("cli:test", "bob", "admin"); err != nil || changed {
+		t.Errorf("same role again: %v %v", changed, err)
+	}
+	// with two admins either may go down to viewer; then the other is the last
+	if _, err := admin.SetRole("cli:test", "alice", "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admin.SetRole("cli:test", "bob", "viewer"); !errors.Is(err, ErrLastAdmin) {
+		t.Errorf("demote the new last admin: %v", err)
+	}
+	// a viewer can always be removed; then bob is the very last user: the command line may remove
+	// him (as before roles), the Admin tab never
+	if err := admin.Remove("cli:test", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	web := *admin
+	web.web = true
+	if err := web.Remove("web:bob", "bob"); !errors.Is(err, ErrLastAdmin) {
+		t.Errorf("the Admin tab removed the last admin: %v", err)
+	}
+	if err := admin.Remove("cli:test", "bob"); err != nil {
+		t.Errorf("the command line could not remove the last user: %v", err)
+	}
+	for _, want := range []string{"action=user.role", "result=ok", "result=unchanged", "role=viewer"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("%q not logged", want)
+		}
+	}
+	if strings.Contains(logs.String(), testPassword) {
+		t.Error("a password reached the log")
+	}
+}
+
+func TestPasswordChangeSparesOnlyTheGivenSession(t *testing.T) {
+	admin, _ := newAdmin(t)
+	admin.Add("cli:test", "alice", testPassword)
+	u, _, _ := admin.svc.users.Get("alice")
+	mine, _ := admin.svc.sessions.Create(u.ID)
+	other, _ := admin.svc.sessions.Create(u.ID)
+	if err := admin.sparing(mine).SetPassword("web:alice", "alice", "a different long passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := admin.svc.sessions.Lookup(mine); !ok {
+		t.Error("the page's own session was ended")
+	}
+	if _, ok := admin.svc.sessions.Lookup(other); ok {
+		t.Error("another session survived the password change")
+	}
+	if got, _, _ := admin.svc.users.Get("alice"); got.Role != roleAdmin {
+		t.Errorf("a password change touched the role: %q", got.Role)
+	}
+}

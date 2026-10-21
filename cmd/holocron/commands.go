@@ -62,9 +62,10 @@ func init() {
 		{path: "web", usage: "[-listen H:P] [-tls-listen IP:P] [-tls-dir D] [-auth-dir D] [-tls-readonly true|false] [-config FILE] [-print-ca] [-set-password USER] [-unlock USER] [-version]", about: "run the web app alone (normally started by up): login page, Live grid, Footage, Settings; camui's flags and config file all work", action: "web.serve", run: cmdWeb},
 		{path: "open", usage: "[camera] [--print]", about: "open the Live grid (or one camera) in the default browser; --print only prints the address", action: "web.open", run: cmdOpen},
 
-		{path: "user add", usage: "<name> [--auth-dir D]", about: "add a login user; the password is read from standard input", action: "user.add", mutating: true, run: func(ctx context.Context, e *env) error { return cmdUserSet(ctx, e, "add") }},
+		{path: "user add", usage: "<name> [--role admin|viewer] [--auth-dir D]", about: "add a login user (default role admin; a viewer watches live and footage only); the password is read from standard input", action: "user.add", mutating: true, run: func(ctx context.Context, e *env) error { return cmdUserSet(ctx, e, "add") }},
 		{path: "user passwd", usage: "<name> [--auth-dir D]", about: "change a user's password (read from standard input) and end that user's sessions", action: "user.passwd", mutating: true, run: func(ctx context.Context, e *env) error { return cmdUserSet(ctx, e, "passwd") }},
-		{path: "user remove", usage: "<name> [--force] [--auth-dir D]", about: "remove a user and its sessions (the last user only with --force while web.tlsListen is set)", action: "user.remove", mutating: true, run: cmdUserRemove},
+		{path: "user role", usage: "<name> admin|viewer [--auth-dir D]", about: "change a user's role and end that user's sessions (the last admin cannot be demoted)", action: "user.role", mutating: true, run: cmdUserRole},
+		{path: "user remove", usage: "<name> [--force] [--auth-dir D]", about: "remove a user and its sessions (not the last admin while other users remain; the last user only with --force while web.tlsListen is set)", action: "user.remove", mutating: true, run: cmdUserRemove},
 		{path: "user list", usage: "[--json] [--auth-dir D]", about: "names, role and creation time (never hashes)", action: "user.list", audit: true, run: cmdUserList},
 		{path: "user unlock", usage: "<name> [--auth-dir D]", about: "lift a sign-in lockout in a running web app", action: "user.unlock", mutating: true, run: cmdUserUnlock},
 

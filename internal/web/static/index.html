@@ -17,6 +17,8 @@
       <button data-t="set">Settings</button>
       <button data-t="foot">Footage</button>
       <button data-t="live">Live</button>
+      <!-- Shown to admins only (detectAccess in app.js); its code, admin.js, is served to admins only. -->
+      <button data-t="admin" class="hide" id="adminTab">Admin</button>
     </nav>
     <div class="feed">
       <span id="feed"></span>
@@ -29,6 +31,8 @@
 
   <!-- Shown only on the HTTPS LAN listener in view-only mode (see detectViewOnly in app.js). -->
   <div id="viewOnly" class="viewonly-note hide"><strong>This address is view-only.</strong> You can watch the cameras and browse footage, but not start, stop or change anything. Use the PC itself for that.</div>
+  <!-- Shown to a signed-in viewer (detectAccess in app.js); the server refuses a viewer everything else anyway. -->
+  <div id="viewerNote" class="viewonly-note hide"><strong>You are signed in as a viewer.</strong> You can watch the cameras and browse footage. Starting, stopping, recording and settings are for admins.</div>
 
   <div id="toast"></div>
   <!-- What is running right now, with the seconds ticking. Filled by
@@ -197,6 +201,10 @@
     </footer>
   </section>
 
+  <!-- ============== ADMIN ============== -->
+  <!-- Empty for everyone: admin.js fills it, and only admins receive admin.js. -->
+  <section data-tab="admin" class="hide"></section>
+
   <!-- ============== LIVE ============== -->
   <section data-tab="live" class="hide">
     <div class="lwrap" id="lwrap">
@@ -234,7 +242,7 @@
   </section>
 </div>
 
-<!-- Confirmation for anything that stops footage being recorded. -->
+<!-- Confirmation for anything that stops footage being recorded, and for every destructive Admin action. -->
 <dialog id="confirm">
   <form method="dialog">
     <h2 id="confirmTitle"></h2>

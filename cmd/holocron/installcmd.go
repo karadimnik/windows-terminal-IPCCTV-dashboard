@@ -304,6 +304,13 @@ func cmdAutostartSet(ctx context.Context, e *env, on bool) error {
 	if err := f.parse(e, "autostart "+verb); err != nil {
 		return err
 	}
+	return autostartSet(e, on, *f.dry, *f.oldOK, *f.name)
+}
+
+// autostartSet is `autostart enable|disable` once the flags are parsed (the Admin tab calls it
+// with no dry run and no test name).
+func autostartSet(e *env, on, dry, oldOK bool, nameFlag string) error {
+	verb := map[bool]string{true: "enable", false: "disable"}[on]
 	rec, ok, err := autostart.ReadRecord(e.recordPath())
 	if err != nil {
 		return failed("the install record cannot be read: %v", err)
@@ -311,25 +318,25 @@ func cmdAutostartSet(ctx context.Context, e *env, on bool) error {
 	if !ok {
 		return cli.Refuse("nothing was installed by holocron install (no record at %s): run holocron install first", e.recordPath())
 	}
-	if n, err := e.entryName(*f.name, rec.Mode); err != nil {
+	if n, err := e.entryName(nameFlag, rec.Mode); err != nil {
 		return err
-	} else if n != rec.Name && (*f.name != "" || e.opts.Getenv(EnvInstallName) != "") {
+	} else if n != rec.Name && (nameFlag != "" || e.opts.Getenv(EnvInstallName) != "") {
 		return cli.Refuse("the install record names %s, not %s", rec.Name, n)
 	}
 	if on {
-		if err := e.oldTasksGate(*f.oldOK); err != nil {
+		if err := e.oldTasksGate(oldOK); err != nil {
 			return err
 		}
 	}
-	if *f.dry {
+	if dry {
 		fmt.Fprintln(e.out, "dry run: nothing is changed")
 	}
-	changed, err := autostart.SetEnabled(e.ops(*f.dry), rec.Mode, rec.Name, on)
+	changed, err := autostart.SetEnabled(e.ops(dry), rec.Mode, rec.Name, on)
 	if err != nil {
 		return failed("holocron autostart %s: %v", verb, err)
 	}
 	switch {
-	case *f.dry:
+	case dry:
 	case changed:
 		fmt.Fprintf(e.out, "%sd and verified: %s\n", verb, e.recorded(rec.Mode, rec.Name).Summary())
 	default:
@@ -373,15 +380,21 @@ type autostartReport struct {
 	OldTasks  []autostart.OldTask `json:"oldTasks,omitempty"`
 }
 
+// autostartReportOf is what `autostart status` and the Admin tab report (the old tasks read only).
+func autostartReportOf(e *env) autostartReport {
+	rep := autostartReport{Autostart: e.autostartState(), Record: e.recordPath()}
+	if e.auto.GOOS == "windows" {
+		rep.OldTasks = autostart.QueryOldTasks(e.auto)
+	}
+	return rep
+}
+
 func cmdAutostartStatus(ctx context.Context, e *env) error {
 	f := newInstallFlags(e, "autostart status")
 	if err := f.parse(e, "autostart status"); err != nil {
 		return err
 	}
-	rep := autostartReport{Autostart: e.autostartState(), Record: e.recordPath()}
-	if e.auto.GOOS == "windows" {
-		rep.OldTasks = autostart.QueryOldTasks(e.auto)
-	}
+	rep := autostartReportOf(e)
 	if e.json {
 		return printJSON(e.out, rep)
 	}

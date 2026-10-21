@@ -258,7 +258,7 @@ func TestLANActors(t *testing.T) {
 
 // newTLSRigLogx is newTLSRig with the web app's logx logger: the Runner's records and the request
 // lines land in logs. The camera list and recorder config are in the sandbox the handler reads.
-func newTLSRigLogx(t *testing.T, logs *webLogs, mutate func(*Config)) *tlsRig {
+func newTLSRigLogx(t *testing.T, logs *webLogs, mutate func(*Config), opts ...serveOpt) *tlsRig {
 	t.Helper()
 	cfg := webSandbox(t)
 	cfg.TLSListen, cfg.TLSDir = lanListen, filepath.Join(cfg.ArchiveRoot, "tls")
@@ -286,7 +286,7 @@ func newTLSRigLogx(t *testing.T, logs *webLogs, mutate func(*Config)) *tlsRig {
 		t.Fatal(err)
 	}
 	auth := newAuthService(cfg.AuthDir, users, logs.For("auth"), clock.now, hasher)
-	h, err := newTLSHandler(cfg, log, mgr, names, auth, withLogs(logs), withController(&fakeCtl{}), withRequestLevel(slog.LevelDebug))
+	h, err := newTLSHandler(cfg, log, mgr, names, auth, append([]serveOpt{withLogs(logs), withController(&fakeCtl{}), withRequestLevel(slog.LevelDebug)}, opts...)...)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -19,6 +21,14 @@ var (
 	ErrUserExists = errors.New("that user exists already")
 	// ErrNoSuchUser: `user passwd` or `user remove` for a name nobody has.
 	ErrNoSuchUser = errors.New("no such user")
+	// ErrLastAdmin: removing or demoting the only admin, which would leave nobody able to manage.
+	ErrLastAdmin = errors.New("that is the last admin: make another user an admin first")
+)
+
+// The roles a user may have (`holocron user add --role`, `holocron user role`).
+const (
+	RoleAdmin  = roleAdmin
+	RoleViewer = roleViewer
 )
 
 // IsInputError reports whether err is a refusal caused by what the caller supplied (a bad user
@@ -28,18 +38,30 @@ func IsInputError(err error) bool {
 	return errors.As(err, &bad)
 }
 
-// UserInfo is one account as `user list` shows it: never the hash.
+// UserInfo is one account as `user list` shows it: never the hash. Locked is known only to the
+// running web app (its sign-in failures live in its memory); the command line leaves it false.
 type UserInfo struct {
 	Username  string    `json:"username"`
 	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"createdAt"`
+	Locked    bool      `json:"locked"`
 }
 
 // UserAdmin manages the login users in an auth folder.
-type UserAdmin struct{ svc *authService }
+type UserAdmin struct {
+	svc *authService
+	// live: svc is the running LAN listener's own service, so its lockouts are visible and an
+	// unlock applies at once. web: the caller is the Admin tab, where the last admin can never
+	// be removed (from the command line the very last user may go, as before roles).
+	live, web bool
+	keep      string // the session token spared when a user's sessions end (the page's own)
+}
+
+// adminMu serialises the last-admin checks with the writes that depend on them.
+var adminMu sync.Mutex
 
 // Users opens the auth folder (empty: the web app's default folder). log receives the service's
-// own records (component auth: user.set_password, user.remove, user.unlock; never a password).
+// own records (component auth: user.set_password, user.role, user.remove, user.unlock; never a password).
 func Users(authDir string, log *slog.Logger) *UserAdmin {
 	return usersWith(authDir, log, defaultPasswordHasher)
 }
@@ -57,8 +79,32 @@ func usersWith(authDir string, log *slog.Logger, hasher passwordHasher) *UserAdm
 // Dir is the auth folder in use.
 func (u *UserAdmin) Dir() string { return u.svc.dir }
 
+// sparing is u acting for a request whose own session (token) survives the change.
+func (u *UserAdmin) sparing(token string) *UserAdmin {
+	c := *u
+	c.keep = token
+	return &c
+}
+
+func parseRole(role string) (string, error) {
+	r := strings.ToLower(strings.TrimSpace(role))
+	if !validRole(r) {
+		return "", inputError{"the role must be admin or viewer"}
+	}
+	return r, nil
+}
+
 // Add creates an admin user; ErrUserExists when the name is taken.
 func (u *UserAdmin) Add(actor, name, password string) error {
+	return u.AddRole(actor, name, password, roleAdmin)
+}
+
+// AddRole creates a user with the role admin or viewer; ErrUserExists when the name is taken.
+func (u *UserAdmin) AddRole(actor, name, password, role string) error {
+	role, err := parseRole(role)
+	if err != nil {
+		return err
+	}
 	if validUsername(name) {
 		if _, found, err := u.svc.users.Get(name); err != nil {
 			return fmt.Errorf("cannot read the user file: %w", err)
@@ -66,12 +112,12 @@ func (u *UserAdmin) Add(actor, name, password string) error {
 			return ErrUserExists
 		}
 	}
-	_, err := u.svc.SetPassword(actor, name, password)
+	_, err = u.svc.savePassword(actor, name, password, role, "")
 	return err
 }
 
-// SetPassword changes an existing user's password and ends that user's sessions;
-// ErrNoSuchUser when the name is unknown.
+// SetPassword changes an existing user's password and ends that user's sessions (all but the
+// page's own when it is the caller's); ErrNoSuchUser when the name is unknown.
 func (u *UserAdmin) SetPassword(actor, name, password string) error {
 	if validUsername(name) {
 		if _, found, err := u.svc.users.Get(name); err != nil {
@@ -80,16 +126,37 @@ func (u *UserAdmin) SetPassword(actor, name, password string) error {
 			return ErrNoSuchUser
 		}
 	}
-	_, err := u.svc.SetPassword(actor, name, password)
+	_, err := u.svc.savePassword(actor, name, password, roleAdmin, u.keep)
 	return err
 }
 
-// Remove deletes the user and every session of that user; ErrNoSuchUser when unknown.
-func (u *UserAdmin) Remove(actor, name string) error {
+// admins counts the admins among users.
+func admins(users []User) int {
+	n := 0
+	for _, x := range users {
+		if isAdmin(x) {
+			n++
+		}
+	}
+	return n
+}
+
+// SetRole gives a user the role admin or viewer and ends that user's other sessions. Demoting the
+// last admin is ErrLastAdmin; changed is false when the user had the role already.
+func (u *UserAdmin) SetRole(actor, name, role string) (changed bool, err error) {
 	started := time.Now()
-	fail := func(level slog.Level, err error) error {
-		emit(u.svc.log, level, "user.remove", actor, name, "fail", started, "error", err.Error())
-		return err
+	fail := func(level slog.Level, err error) (bool, error) {
+		emit(u.svc.log, level, "user.role", actor, name, "fail", started, "error", err.Error())
+		return false, err
+	}
+	if role, err = parseRole(role); err != nil {
+		return fail(slog.LevelWarn, err)
+	}
+	adminMu.Lock()
+	defer adminMu.Unlock()
+	users, err := u.svc.users.List()
+	if err != nil {
+		return fail(slog.LevelError, fmt.Errorf("cannot read the user file: %w", err))
 	}
 	user, found, err := u.svc.users.Get(name)
 	if err != nil {
@@ -97,6 +164,49 @@ func (u *UserAdmin) Remove(actor, name string) error {
 	}
 	if !found {
 		return fail(slog.LevelWarn, ErrNoSuchUser)
+	}
+	if effectiveRole(user.Role) == role {
+		emit(u.svc.log, slog.LevelInfo, "user.role", actor, user.Username, "unchanged", started, "role", role)
+		return false, nil
+	}
+	if isAdmin(user) && admins(users) <= 1 {
+		return fail(slog.LevelWarn, ErrLastAdmin)
+	}
+	user.Role = role
+	if err := u.svc.users.Put(user); err != nil {
+		return fail(slog.LevelError, fmt.Errorf("cannot save the user file: %w", err))
+	}
+	if err := u.svc.sessions.DeleteUserExcept(user.ID, u.keep); err != nil {
+		return fail(slog.LevelError, fmt.Errorf("the role was saved but the user's sessions could not be ended: %w", err))
+	}
+	_ = u.svc.authLog.record("local", user.Username, "role-"+role, "ok")
+	emit(u.svc.log, slog.LevelInfo, "user.role", actor, user.Username, "ok", started, "role", role)
+	return true, nil
+}
+
+// Remove deletes the user and every session of that user; ErrNoSuchUser when unknown. The last
+// admin is ErrLastAdmin while other users remain (and always from the Admin tab).
+func (u *UserAdmin) Remove(actor, name string) error {
+	started := time.Now()
+	fail := func(level slog.Level, err error) error {
+		emit(u.svc.log, level, "user.remove", actor, name, "fail", started, "error", err.Error())
+		return err
+	}
+	adminMu.Lock()
+	defer adminMu.Unlock()
+	users, err := u.svc.users.List()
+	if err != nil {
+		return fail(slog.LevelError, fmt.Errorf("cannot read the user file: %w", err))
+	}
+	user, found, err := u.svc.users.Get(name)
+	if err != nil {
+		return fail(slog.LevelError, fmt.Errorf("cannot read the user file: %w", err))
+	}
+	if !found {
+		return fail(slog.LevelWarn, ErrNoSuchUser)
+	}
+	if isAdmin(user) && admins(users) <= 1 && (len(users) > 1 || u.web) {
+		return fail(slog.LevelWarn, ErrLastAdmin)
 	}
 	if err := u.svc.users.Delete(user.ID); err != nil {
 		return fail(slog.LevelError, fmt.Errorf("cannot save the user file: %w", err))
@@ -117,14 +227,26 @@ func (u *UserAdmin) List() ([]UserInfo, error) {
 	}
 	out := make([]UserInfo, 0, len(users))
 	for _, x := range users {
-		out = append(out, UserInfo{Username: x.Username, Role: x.Role, CreatedAt: x.CreatedAt})
+		info := UserInfo{Username: x.Username, Role: effectiveRole(x.Role), CreatedAt: x.CreatedAt}
+		if u.live {
+			_, info.Locked = u.svc.lock.locked(x.Username)
+		}
+		out = append(out, info)
 	}
 	return out, nil
 }
 
 // Unlock asks a running web app to forget the failed sign-ins of a name (the cross-process marker
-// the service consumes at the next attempt).
-func (u *UserAdmin) Unlock(actor, name string) error { return u.svc.Unlock(actor, name) }
+// the service consumes at the next attempt); in the running web app itself it applies at once.
+func (u *UserAdmin) Unlock(actor, name string) error {
+	if err := u.svc.Unlock(actor, name); err != nil {
+		return err
+	}
+	if u.live && u.svc.consumeUnlock(name) {
+		u.svc.lock.reset(name)
+	}
+	return nil
+}
 
 // ---------------------------------------------------------------------------
 // TLS: the local certificate authority

@@ -296,3 +296,51 @@ func TestTLSCommands(t *testing.T) {
 		t.Error("tls.rotate is not logged")
 	}
 }
+
+func TestUserRoles(t *testing.T) {
+	r := newRig(t)
+	r.stdin = goodPassword + "\n"
+	r.run("user", "add", "alice")
+	r.stdin = "a second long passphrase\n"
+	if out, errw, code := r.run("user", "add", "bob", "--role", "viewer"); code != 0 || !strings.Contains(out, "role viewer") {
+		t.Fatalf("add viewer: %d %q %q", code, out, errw)
+	}
+	r.stdin = goodPassword + "\n"
+	if _, errw, code := r.run("user", "add", "carol", "--role", "root"); code != 2 || !strings.Contains(errw, "admin or viewer") {
+		t.Errorf("bad role: %d %q", code, errw)
+	}
+	out, _, _ := r.run("--json", "user", "list")
+	var users []map[string]any
+	if err := json.Unmarshal([]byte(out), &users); err != nil || len(users) != 2 || users[0]["role"] != "admin" || users[1]["role"] != "viewer" {
+		t.Fatalf("list: %v %s", err, out)
+	}
+	// the last admin: neither demoted nor removed while bob remains
+	if _, errw, code := r.run("user", "role", "alice", "viewer"); code != 1 || !strings.Contains(errw, "last admin") {
+		t.Errorf("demote the last admin: %d %q", code, errw)
+	}
+	if _, errw, code := r.run("user", "remove", "alice", "--force"); code != 1 || !strings.Contains(errw, "last admin") {
+		t.Errorf("remove the last admin: %d %q", code, errw)
+	}
+	if _, errw, code := r.run("user", "role", "bob", "boss"); code != 2 || !strings.Contains(errw, "admin or viewer") {
+		t.Errorf("bad role: %d %q", code, errw)
+	}
+	if out, errw, code := r.run("user", "role", "bob", "admin"); code != 0 || !strings.Contains(out, "bob is now admin") {
+		t.Errorf("promote: %d %q %q", code, out, errw)
+	}
+	if out, _, code := r.run("user", "role", "bob", "admin"); code != 0 || !strings.Contains(out, "already") {
+		t.Errorf("again: %d %q", code, out)
+	}
+	if _, _, code := r.run("user", "role", "alice", "viewer"); code != 0 {
+		t.Errorf("demote one of two admins: %d", code)
+	}
+	if out, _, _ := r.run("user", "list"); !strings.Contains(out, "viewer") {
+		t.Errorf("list: %q", out)
+	}
+	if !strings.Contains(r.log(), "action=user.role") || !strings.Contains(r.log(), "result=refused") {
+		t.Error("user.role records missing")
+	}
+	audit, _ := os.ReadFile(filepath.Join(r.root, "_logs", "audit.log"))
+	if !strings.Contains(string(audit), "action=user.role") {
+		t.Error("user.role is not in the audit stream")
+	}
+}

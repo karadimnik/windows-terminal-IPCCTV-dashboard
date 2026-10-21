@@ -47,18 +47,24 @@ func cmdSecretSet(ctx context.Context, e *env) error {
 	if err != nil {
 		return err
 	}
+	return storeSecret(e, pos[0], value)
+}
+
+// storeSecret is `secret set` once the value is read (the Admin tab's camera login calls it too):
+// the value is registered with the redactor before anything else and never printed.
+func storeSecret(e *env, name, value string) error {
 	e.lg.Redactor().Register(value)
 	p, err := openSecrets(e)
 	if err != nil {
 		return err
 	}
-	if err := p.Put(pos[0], value); err != nil {
+	if err := p.Put(name, value); err != nil {
 		if errors.Is(err, secrets.ErrReadOnly) || errors.Is(err, secrets.ErrInvalidValue) {
-			return cli.Refuse("%s: %v", pos[0], err)
+			return cli.Refuse("%s: %v", name, err)
 		}
-		return failed("%s: %v", pos[0], err)
+		return failed("%s: %v", name, err)
 	}
-	fmt.Fprintf(e.out, "stored %s (%s store)\n", pos[0], p.Backend())
+	fmt.Fprintf(e.out, "stored %s (%s store)\n", name, p.Backend())
 	return nil
 }
 

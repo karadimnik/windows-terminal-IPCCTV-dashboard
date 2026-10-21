@@ -211,7 +211,12 @@ func cmdLogLevel(ctx context.Context, e *env) error {
 	if err := wantArgs("log level", pos, 2, 2); err != nil {
 		return err
 	}
-	comp, level := strings.ToLower(pos[0]), pos[1]
+	return setLogLevel(ctx, e, pos[0], pos[1], *save)
+}
+
+// setLogLevel is `log level` once the arguments are parsed (the Admin tab calls it too).
+func setLogLevel(ctx context.Context, e *env, comp, level string, save bool) error {
+	comp = strings.ToLower(comp)
 	applied := false
 	if c, ok := dialRunning(e); ok {
 		lv, err := c.SetLevel(ctx, comp, level)
@@ -221,7 +226,7 @@ func cmdLogLevel(ctx context.Context, e *env) error {
 		applied = true
 		fmt.Fprintf(e.out, "running supervisor: default %s%s\n", lv.Default, componentsText(lv.Components))
 	}
-	if *save {
+	if save {
 		key := "logging.levels." + comp
 		if comp == "all" {
 			key = "logging.level"
@@ -230,7 +235,7 @@ func cmdLogLevel(ctx context.Context, e *env) error {
 			return err
 		}
 	}
-	if !applied && !*save {
+	if !applied && !save {
 		return failed("the supervisor is not running (or its control endpoint does not answer): nothing to change; use --save to write it to the configuration")
 	}
 	return nil
