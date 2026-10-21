@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -48,4 +49,81 @@ func TestStatusAndDoctorStillSayRelayOff(t *testing.T) {
 	}
 }
 
-var _ = net.Listen
+// holdPort binds a free port of the test range and keeps it until the test ends.
+func holdPort(t *testing.T) (net.Listener, string) {
+	t.Helper()
+	for p := 18880; p <= 18899; p++ {
+		addr := "127.0.0.1:" + strconv.Itoa(p)
+		if l, err := net.Listen("tcp", addr); err == nil {
+			t.Cleanup(func() { l.Close() })
+			return l, addr
+		}
+	}
+	t.Skip("no free port in 18880-18899")
+	return nil, ""
+}
+
+func (r *rig) listenOn(addr, extra string) {
+	r.t.Helper()
+	b, _ := os.ReadFile(r.cfg)
+	s := strings.Replace(string(b), `"listen": "127.0.0.1:18821"`, `"listen": "`+addr+`"`+extra, 1)
+	if err := os.WriteFile(r.cfg, []byte(s), 0o644); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+func warnLine(out, what string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "warn") && strings.Contains(l, what) {
+			return l
+		}
+	}
+	return ""
+}
+
+func TestDoctorWarnsWhenTheWebPortIsHeld(t *testing.T) {
+	_, addr := holdPort(t)
+	_, port, _ := net.SplitHostPort(addr)
+	r := newRig(t)
+	r.listenOn(addr, "")
+	out, _, _ := r.run("doctor")
+	line := warnLine(out, "web listen") // a warn line, so not a failure
+	for _, want := range []string{"port " + port, "another program", "camui.exe", "crash-loop", "alert 104"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("doctor warning lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// The HTTPS listener is checked too: here it is the held one and the plain listener is free.
+func TestDoctorWarnsWhenTheTLSPortIsHeld(t *testing.T) {
+	_, held := holdPort(t)
+	free, freeAddr := holdPort(t)
+	free.Close()
+	r := newRig(t)
+	r.listenOn(freeAddr, `, "tlsListen": "`+held+`"`)
+	out, _, _ := r.run("doctor")
+	if warnLine(out, "web listen") != "" || !strings.Contains(warnLine(out, "web tlsListen"), "alert 104") {
+		t.Errorf("tlsListen held:\n%s", out)
+	}
+}
+
+func TestDoctorSkipsThePortCheckWhenTheWebAppIsOff(t *testing.T) {
+	_, addr := holdPort(t)
+	r := newRig(t)
+	r.listenOn(addr, `, "enabled": false`)
+	if out, _, _ := r.run("doctor"); strings.Contains(out, "web listen") {
+		t.Errorf("web.enabled false still checked the port:\n%s", out)
+	}
+}
+
+func TestDoctorSaysFreeWebPortIsFree(t *testing.T) {
+	held, addr := holdPort(t)
+	held.Close()
+	r := newRig(t)
+	r.listenOn(addr, "")
+	out, _, _ := r.run("doctor")
+	if !strings.Contains(out, "ok   web listen") || warnLine(out, "web listen") != "" {
+		t.Errorf("free port:\n%s", out)
+	}
+}
