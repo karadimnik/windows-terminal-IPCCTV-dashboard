@@ -14,12 +14,12 @@ import (
 	"holocron/internal/status"
 )
 
-// The shadow rig (docs/shadow.md) runs Holocron with RestreamerEnabled false and every camera
-// entry pointing at the Operator's existing relay: IP 127.0.0.1:8554, stream = the relay path. This
-// runs the production supervisor on that configuration with a stand-in ffmpeg and shows (1) what
-// the stand-in is asked to read, (2) that a relay that refuses is retried with the backoff, not in
-// a tight loop, with the supervisor staying up, and (3) that recording resumes by itself when the
-// relay is back.
+// The shadow rig (docs/shadow.md) runs Holocron with RelayExternal true and RestreamerEnabled false:
+// the cameras record from the Operator's existing relay at RelayBase and Holocron runs no MediaMTX.
+// This runs the production supervisor on that configuration with a stand-in ffmpeg and shows (1)
+// that the stand-in is asked to read the relay with the production relay input vector, (2) that a
+// relay that refuses is retried with the backoff, not in a tight loop, with the supervisor staying
+// up, and (3) that recording resumes by itself when the relay is back.
 func TestShadowRigSurvivesARelayThatIsGoneAndRecovers(t *testing.T) {
 	dir := t.TempDir()
 	root := filepath.Join(dir, "shadow root")
@@ -32,15 +32,14 @@ func TestShadowRigSurvivesARelayThatIsGoneAndRecovers(t *testing.T) {
 	script := `#!/bin/sh
 case "$1" in -version) echo "ffmpeg version 7.1"; exit 0;; esac
 echo "$$ $(date +%s)" >> ` + starts + `
-prev=
-for a in "$@"; do if [ "$prev" = "-i" ]; then cat "$a" >> ` + captured + `; fi; prev="$a"; done
+echo "$@" >> ` + captured + `
 if [ -e ` + up + ` ]; then exec sleep 300; fi
 exit 1
 `
 	if err := os.WriteFile(ffmpeg, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := `{"FfmpegPath":` + strconv.Quote(ffmpeg) + `,"RestreamerEnabled":false,"SegmentSeconds":60,"ReconcileSeconds":0.5,"StatusIntervalSeconds":0.5,
+	cfg := `{"FfmpegPath":` + strconv.Quote(ffmpeg) + `,"RestreamerEnabled":false,"RelayExternal":true,"SegmentSeconds":60,"ReconcileSeconds":0.5,"StatusIntervalSeconds":0.5,
 "BackoffStartSeconds":1,"BackoffMaxSeconds":2,"StopTimeoutSeconds":5,"alerts":{"desktop":{"enabled":false},"eventlog":{"enabled":false}},"web":{"enabled":false}}`
 	cams := `[{"Name":"Front Door","IP":"127.0.0.1:8554","Quality":"frontdoor","Record":true}]`
 	cfgPath := filepath.Join(cfgDir, "holocron.config.json")
@@ -73,8 +72,12 @@ exit 1
 		t.Errorf("no relay of its own may be started: %+v", doc.Restreamer)
 	}
 	list, _ := os.ReadFile(captured)
-	if !strings.Contains(string(list), "rtsp://shadow:") || !strings.Contains(string(list), "@127.0.0.1:8554/frontdoor'") || !strings.Contains(string(list), "option rtsp_transport tcp") {
-		t.Errorf("the recorder should read the relay path: %q", list)
+	if !strings.Contains(string(list), "-rtsp_transport tcp -timeout 10000000 -fflags +genpts+discardcorrupt -i rtsp://127.0.0.1:8554/frontdoor -map") ||
+		strings.Contains(string(list), "concat") || strings.Contains(string(list), "shadow-NOT-A-SECRET") {
+		t.Errorf("the recorder should read the relay path with the relay input vector: %q", list)
+	}
+	if _, err := os.Stat(filepath.Join(root, "_logs", "restreamer.log")); !os.IsNotExist(err) {
+		t.Errorf("a restreamer log exists: %v", err)
 	}
 
 	// the relay is back: the next start stays up and the camera is reported alive

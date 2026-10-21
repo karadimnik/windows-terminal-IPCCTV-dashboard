@@ -139,7 +139,7 @@ func SettingsFrom(c config.Config) Settings {
 		BackoffStart:      c.BackoffStartSeconds,
 		BackoffMax:        c.BackoffMaxSeconds,
 		HealthyReset:      float64(c.HealthyResetSeconds),
-		RelayEnabled:      c.RestreamerEnabled,
+		RelayEnabled:      c.RestreamerEnabled || c.RelayExternal,
 		RelayReadyWait:    time.Duration(max(c.RelayReadyWaitSeconds, 0)) * time.Second,
 		StartStagger:      time.Duration(max(c.StartStaggerMs, 0)) * time.Millisecond,
 		StatusInterval:    c.StatusIntervalSeconds,
