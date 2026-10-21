@@ -24,3 +24,7 @@ Measure every interval, age and deadline on `Get-CamWallClock`, which returns UT
 | --- | --- |
 | `-PrintUrls` | Prints the input each camera would use right now, redacted, and the computed layout, then exits without opening a window. The quickest way to see whether the relay is being used. |
 | `-NoHealthStrip` | Reserves the strip but launches no health window in it. |
+
+## Continuous integration
+
+The Holocron track has a GitHub Actions workflow on the `portable-nvr` branch that runs gofmt, vet for three operating systems, the race suite on Linux and Windows (macOS best effort) and the cross-builds. What it covers, how to read it, how to run the same checks locally and what it leaves out on purpose: [ci.md](ci.md).
