@@ -1,7 +1,7 @@
 # osx
 
-Per-OS facts behind one interface. Process lifetime, the instance lock, the child registry and console events (W8) are below;
-services and desktop notifications are not here yet.
+Per-OS facts behind one interface. Process lifetime, the instance lock, the child registry and console events (W8) and the
+Windows service manager seam (W12) are below; desktop notifications are not here yet.
 Build-tagged files: `free_{unix,windows}.go`, `perm_{unix,windows}.go`, `mounts_{linux,darwin,windows}.go`. `env.go` holds
 the pure builders (`DefaultDirs`, `ProtectedFor`) so every OS's table is tested on any host.
 
@@ -109,3 +109,23 @@ start are killed, after identity verification). Measured 2026-10-20 (Windows 11,
 | `TestRealLockTwoProcesses` | ErrHeld with owner; free 5 ms after the holder's kill | same, 3 ms |
 | `TestRealWindowsConsoleProbeFires` / `...NoProbeMissesConsoleDeath` (control) / `...ConsoleCloseEvent` | 501 ms / no event in 3 s / 314 ms | - |
 | `TestRealUnixConsoleSignals` | - | hangup, terminate |
+
+## Windows service manager (W12)
+
+    type ServiceStart string // auto | demand | disabled
+    type ServiceConfig struct{ Name, DisplayName, Description, BinaryPath, Account string; Start ServiceStart; Delayed bool; RestartDelay time.Duration }
+    type ServiceState struct{ Exists bool; Config ServiceConfig; Running bool; State string }
+    type ServiceManager interface{ Query(name) (ServiceState, error); Create(c) error; Update(c) error; SetStart(name, start, delayed) error; Delete(name) error }
+    func Services() ServiceManager                         // advapi32 on Windows; ErrNoServiceManager elsewhere
+    func RunService(name, fn func(ctx) int) error           // StartServiceCtrlDispatcher; ErrNotService outside the manager
+    type FakeSCM struct{ Services; Running; Fail map[string]error; Calls }   // a running service is only marked for deletion
+    var ErrAccessDenied                                      // creating/changing a service without elevation
+
+`service_windows.go`: `OpenSCManager`, `CreateService` (own process, error control normal, LocalSystem when Account is
+empty), `ChangeServiceConfig`/`ChangeServiceConfig2` (description, delayed auto start, failure actions restart x3 after
+RestartDelay, reset after a day, and the failure-actions flag so a non-zero exit counts), `QueryServiceConfig(2)`,
+`QueryServiceStatus`, `DeleteService`. `RunService`: `StartServiceCtrlDispatcherW` with a `syscall.NewCallback` service
+main that registers a `RegisterServiceCtrlHandlerExW` handler, reports running (accepting Stop, Shutdown, Preshutdown),
+cancels fn's context on any of them (stop pending, checkpoint every 5 s) and reports stopped with fn's exit code as a
+service-specific error. Standard library only. UNVERIFIED on a real system (needs elevation; never taken): the logic
+above it is tested against FakeSCM in `internal/autostart`, this file is compiled and vetted for windows only.
