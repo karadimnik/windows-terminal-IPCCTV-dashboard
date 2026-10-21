@@ -171,6 +171,10 @@ What it does, per camera (every camera folder of `--new`, or the `--camera` name
   (the shadow's first file, or the part after a restart) and is reported, not counted as missing. A pair whose durations differ
   because the shorter one ends where the window ends (the shadow was stopped, or still running) is `partial_end` and is not
   compared for size or duration. A shorter segment anywhere else is a difference.
+- **A file that was never finalized.** `holocron down` kills `ffmpeg` (a hard kill, as the PowerShell stop does), so the file
+  the shadow was writing has its streams but no duration (and loses its last buffered seconds). `ffprobe` shows no duration for it.
+  As the last file of a side that is a note and its length is estimated from its write time (the pair is `partial_end`); anywhere
+  else it is a difference.
 - **Names and boundaries.** Segment names must be `<Camera>_YYYYMMDD_HHMMSS+ZZZZ.mkv` of the camera's folder (a foreign file in
   the new folder is a difference, in the old one a note). Segments are cut on multiples of the segment length of the name's own
   clock time; a segment that follows the one before it without a gap and does not start on such a boundary (within 5 seconds)
