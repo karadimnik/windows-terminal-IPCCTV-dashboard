@@ -281,7 +281,10 @@ func TestOutsideTheOverlapIsNotCompared(t *testing.T) {
 	if !c.Equal || len(c.Pairs) != 4 || c.Old.Closed != 12 || c.Old.Compared != 4 {
 		t.Fatalf("%+v", c)
 	}
-	if c.Window.From != at(11, 0, 0).Format(time.RFC3339) || c.Window.To != at(12, 0, 0).Format(time.RFC3339) {
+	// the window end is a file mtime, printed in the host zone: compare the instants, not the text
+	from, ferr := time.Parse(time.RFC3339, c.Window.From)
+	to, terr := time.Parse(time.RFC3339, c.Window.To)
+	if ferr != nil || terr != nil || !from.Equal(at(11, 0, 0)) || !to.Equal(at(12, 0, 0)) {
 		t.Errorf("window %+v", c.Window)
 	}
 	if len(sb.fp.log) != 8 {
