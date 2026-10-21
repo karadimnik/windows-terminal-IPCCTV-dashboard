@@ -272,7 +272,9 @@ func cmdDoctor(ctx context.Context, e *env) error {
 		add("ok", "ffmpeg", "%s %s", ff, v)
 	}
 	// MediaMTX
-	if cfg.RestreamerEnabled {
+	if cfg.RelayExternal {
+		add("ok", "mediamtx", "%s", relayExternalText(cfg))
+	} else if cfg.RestreamerEnabled {
 		cs = append(cs, mediamtx(cfg.RestreamerExePath))
 	} else {
 		add("ok", "mediamtx", "the relay is off (RestreamerEnabled false)")
