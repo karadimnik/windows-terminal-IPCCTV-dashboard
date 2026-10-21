@@ -95,7 +95,9 @@ func parseRole(role string) (string, error) {
 }
 
 // Add creates an admin user; ErrUserExists when the name is taken.
-func (u *UserAdmin) Add(actor, name, password string) error { return u.AddRole(actor, name, password, roleAdmin) }
+func (u *UserAdmin) Add(actor, name, password string) error {
+	return u.AddRole(actor, name, password, roleAdmin)
+}
 
 // AddRole creates a user with the role admin or viewer; ErrUserExists when the name is taken.
 func (u *UserAdmin) AddRole(actor, name, password, role string) error {
