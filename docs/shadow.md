@@ -1,7 +1,7 @@
 # Running Holocron in shadow beside the PowerShell system
 
 Before Holocron records the real footage it runs next to the PowerShell system for a while (HLD phase 2, decision D5:
-seven days, two cameras). It writes its own copy of two cameras to a separate folder under a small size cap, and
+three days counting the start day, two cameras; revised by the Operator on 21 Oct 2026). It writes its own copy of two cameras to a separate folder under a small size cap, and
 `holocron archive compare` checks that this copy has the same names, boundaries, sizes, durations and audio as the
 PowerShell system's, with no gaps. This page is the whole procedure. Both systems keep working; the shadow can be stopped
 and deleted at any time without touching the real archive.
@@ -248,6 +248,6 @@ by any step on this page.
 ## Not covered
 
 The shadow's DST behaviour is covered by the comparison's handling of changing `%z` names (a unit test runs a fall-back night),
-not by a run across a clock change; the next one is 25 Oct 2026, and a shadow started before it will record across it, which
-is a real test. The web app, the live view and the alerts are not part of the shadow. Real cameras, sleep and resume are
+not by a run across a clock change; the next one is 25 Oct 2026. The 3-day shadow (21 to 23 Oct 2026) ends before it, so that night is NOT covered by a
+run; cut over after 26 Oct or extend the shadow past it. The web app, the live view and the alerts are not part of the shadow. Real cameras, sleep and resume are
 Operator checks.

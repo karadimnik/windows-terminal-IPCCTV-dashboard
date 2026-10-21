@@ -28,3 +28,7 @@ Measure every interval, age and deadline on `Get-CamWallClock`, which returns UT
 ## Continuous integration
 
 The Holocron track has a GitHub Actions workflow on the `portable-nvr` branch that runs gofmt, vet for three operating systems, the race suite on Linux and Windows (macOS best effort) and the cross-builds. What it covers, how to read it, how to run the same checks locally and what it leaves out on purpose: [ci.md](ci.md).
+
+## Moving to Holocron, and back
+
+The Go program `holocron` runs beside the PowerShell system first ([shadow.md](shadow.md)); its autostart is [autostart.md](autostart.md). Moving the real NVR over, step by step with the stop conditions, is [cutover.md](cutover.md), and the way back, which leaves the old system untouched, is [rollback.md](rollback.md).
