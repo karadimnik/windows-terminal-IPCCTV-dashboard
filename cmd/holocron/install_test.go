@@ -48,7 +48,7 @@ func TestInstallCycleSystemd(t *testing.T) {
 	}
 
 	out, errw, code = r.run("install")
-	if code != 0 || !strings.Contains(out, "installed and verified: systemd user unit holocron, enabled") || !strings.Contains(out, "loginctl enable-linger alice") {
+	if code != 0 || !strings.Contains(out, "installed and verified: systemd user unit holocron, enabled") || strings.Contains(out, "not recorded") || !strings.Contains(out, "loginctl enable-linger alice") {
 		t.Fatalf("install: exit %d\n%s%s", code, out, errw)
 	}
 	rec, ok := r.record()
@@ -77,7 +77,7 @@ func TestInstallCycleSystemd(t *testing.T) {
 	if out, _, code := r.run("autostart", "disable", "--dry-run"); code != 0 || len(autostart.Mutating(r.tools.Calls())) != 0 || !strings.Contains(out, "would run: systemctl --user disable holocron.service") {
 		t.Errorf("dry disable: %d %s %q", code, out, r.tools.Calls())
 	}
-	if out, _, code := r.run("autostart", "disable"); code != 0 || !strings.Contains(out, "disabled and verified") || r.autostartJSON().Enabled {
+	if out, _, code := r.run("autostart", "disable"); code != 0 || !strings.Contains(out, "disabled and verified") || strings.Contains(out, "not recorded") || r.autostartJSON().Enabled {
 		t.Errorf("disable: %d %s", code, out)
 	}
 	if out, _, code := r.run("autostart", "disable"); code != 0 || !strings.Contains(out, "already disabled, unchanged") {

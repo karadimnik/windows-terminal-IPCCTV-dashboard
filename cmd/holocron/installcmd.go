@@ -183,7 +183,7 @@ func cmdInstall(ctx context.Context, e *env) error {
 		return nil
 	}
 	if res.Changed {
-		fmt.Fprintf(e.out, "installed and verified: %s\n", autostart.Status(e.auto, m, name).Summary())
+		fmt.Fprintf(e.out, "installed and verified: %s\n", e.recorded(m, name).Summary())
 	}
 	fmt.Fprintln(e.out, "recorded in", e.recordPath())
 	e.afterInstall(m, name, res.Entry)
@@ -307,11 +307,18 @@ func cmdAutostartSet(ctx context.Context, e *env, on bool) error {
 	switch {
 	case *f.dry:
 	case changed:
-		fmt.Fprintf(e.out, "%sd and verified: %s\n", verb, autostart.Status(e.auto, rec.Mode, rec.Name).Summary())
+		fmt.Fprintf(e.out, "%sd and verified: %s\n", verb, e.recorded(rec.Mode, rec.Name).Summary())
 	default:
-		fmt.Fprintf(e.out, "already %sd, unchanged: %s\n", verb, autostart.Status(e.auto, rec.Mode, rec.Name).Summary())
+		fmt.Fprintf(e.out, "already %sd, unchanged: %s\n", verb, e.recorded(rec.Mode, rec.Name).Summary())
 	}
 	return nil
+}
+
+// recorded is the state of an entry the install record names.
+func (e *env) recorded(m autostart.Mode, name string) autostart.State {
+	st := autostart.Status(e.auto, m, name)
+	st.Recorded = true
+	return st
 }
 
 // autostartState is the entry `status`, `doctor` and `autostart status` report: the recorded
@@ -319,9 +326,7 @@ func cmdAutostartSet(ctx context.Context, e *env, on bool) error {
 func (e *env) autostartState() autostart.State {
 	rec, ok, err := autostart.ReadRecord(e.recordPath())
 	if ok {
-		st := autostart.Status(e.auto, rec.Mode, rec.Name)
-		st.Recorded = true
-		return st
+		return e.recorded(rec.Mode, rec.Name)
 	}
 	m, merr := autostart.DefaultMode(e.auto.GOOS)
 	if merr != nil {
