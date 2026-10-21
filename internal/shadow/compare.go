@@ -305,6 +305,7 @@ func list(o *Options, root, folder string) (listing, error) {
 	if err != nil {
 		return l, err
 	}
+	var all []*seg
 	for _, e := range ents {
 		name := e.Name()
 		if !e.Type().IsRegular() || !o.Matcher.IsSegmentOf(name, folder, o.Container) {
@@ -319,27 +320,25 @@ func list(o *Options, root, folder string) (listing, error) {
 		if err != nil {
 			continue
 		}
-		if o.Now.Sub(fi.ModTime()) < o.Quiet { // also a time in the future: still being written
-			l.open = append(l.open, name)
-			continue
-		}
-		l.closed = append(l.closed, &seg{name: name, path: path, start: start, size: fi.Size(), mod: fi.ModTime()})
+		all = append(all, &seg{name: name, path: path, start: start, size: fi.Size(), mod: fi.ModTime()})
 	}
-	sort.Slice(l.closed, func(i, j int) bool {
-		a, b := l.closed[i], l.closed[j]
+	sort.Slice(all, func(i, j int) bool {
+		a, b := all[i], all[j]
 		if !a.start.Equal(b.start) {
 			return a.start.Before(b.start)
 		}
 		return a.name < b.name
 	})
-	// The newest segment of a folder may still be written even when its time looks old (a writer's
-	// time can lag), so it counts as open while it is younger than one segment plus a minute.
-	if n := len(l.closed); n > 0 {
-		last := l.closed[n-1]
-		if o.Now.Sub(last.mod) < time.Duration(o.SegmentSeconds)*time.Second+time.Minute {
-			l.open = append(l.open, last.name)
-			l.closed = l.closed[:n-1]
+	for i, s := range all {
+		age := o.Now.Sub(s.mod) // negative: a time in the future, still being written
+		// The newest segment of a folder may still be written even when its time looks old (a
+		// writer's time can lag), so it counts as open while it is younger than one segment and a minute.
+		newestOpen := i == len(all)-1 && age < time.Duration(o.SegmentSeconds)*time.Second+time.Minute
+		if age < o.Quiet || newestOpen {
+			l.open = append(l.open, s.name)
+			continue
 		}
+		l.closed = append(l.closed, s)
 	}
 	sort.Strings(l.open)
 	sort.Strings(l.other)

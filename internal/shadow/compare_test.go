@@ -235,6 +235,10 @@ func TestOpenRules(t *testing.T) {
 	if c, o := closedOf(91*time.Second, 2*time.Hour); c != 2 || len(o) != 0 {
 		t.Errorf("91 s on an older file is closed: closed %d open %v", c, o)
 	}
+	// the file being written is the newest; the one before it, closed a few minutes ago, is closed
+	if c, o := closedOf(5*time.Minute, 10*time.Second); c != 1 || len(o) != 1 {
+		t.Errorf("one open file must not hold back its predecessor: closed %d open %v", c, o)
+	}
 	// the newest file of a folder stays open for a segment and a minute even when its time looks old
 	if c, o := closedOf(2*time.Hour, 5*time.Minute); c != 1 || len(o) != 1 {
 		t.Errorf("newest written 5 min ago: closed %d open %v", c, o)
