@@ -233,9 +233,18 @@ func readPids(path string) []int {
 	return out
 }
 
+// helperProc is a started helper. Exactly one goroutine reaps the process (exec.Cmd.Wait must not
+// run twice, not even from two goroutines); Wait here only blocks until that reaper is done.
+type helperProc struct {
+	*exec.Cmd
+	done chan struct{}
+}
+
+func (h *helperProc) Wait() error { <-h.done; return nil }
+
 // startHelper runs this test binary in a helper role with a scratch dir; the process is killed in
 // Cleanup when still running.
-func startHelper(t *testing.T, dir, role string, env ...string) *exec.Cmd {
+func startHelper(t *testing.T, dir, role string, env ...string) *helperProc {
 	t.Helper()
 	exe, _ := os.Executable()
 	cmd := exec.Command(exe, "-test.run=^$")
@@ -244,14 +253,14 @@ func startHelper(t *testing.T, dir, role string, env ...string) *exec.Cmd {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { cmd.Wait(); close(done) }()
+	h := &helperProc{Cmd: cmd, done: make(chan struct{})}
+	go func() { cmd.Wait(); close(h.done) }()
 	t.Cleanup(func() {
 		select {
-		case <-done:
+		case <-h.done:
 		default:
 			cmd.Process.Kill()
-			<-done
+			<-h.done
 		}
 		if t.Failed() {
 			b, _ := os.ReadFile(filepath.Join(dir, "helper.log"))
@@ -259,7 +268,7 @@ func startHelper(t *testing.T, dir, role string, env ...string) *exec.Cmd {
 		}
 	})
 	t.Logf("helper %s pid %d", role, cmd.Process.Pid)
-	return cmd
+	return h
 }
 
 func waitFile(t *testing.T, path string, within time.Duration, v any) {

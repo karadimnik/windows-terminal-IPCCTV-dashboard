@@ -2,6 +2,7 @@ package web
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -362,5 +363,39 @@ func TestEveryRouteHasAnAccessClass(t *testing.T) {
 	}
 	if !strings.Contains(rig.logs.String(), "route has no access class") {
 		t.Error("the refusal was not logged")
+	}
+}
+
+// A viewer has no Settings tab, so the phone panel has its own tab: the page carries it and the
+// two certificate routes it uses answer a viewer with the CA certificate (never a key) and the
+// fingerprint, while the admin copy of the same data stays refused.
+func TestViewerReachesThePhonePanelAndNoAdminRoute(t *testing.T) {
+	rig := newTLSRigLogx(t, newWebLogs("info"), func(c *Config) { c.TLSReadOnly = boolPtr(false) })
+	rig.addViewer(t)
+	viewer := rig.loginAs(t, viewerUser, viewerPassword)
+
+	page := rig.do(tlsReq{path: "/", cookie: viewer})
+	if page.Code != 200 || !strings.Contains(page.Body.String(), `data-t="phone"`) || !strings.Contains(page.Body.String(), `id="phoneFingerprint"`) {
+		t.Errorf("viewer GET /: %d, the page has no phone tab/panel", page.Code)
+	}
+	if rec := rig.do(tlsReq{path: "/admin.js", cookie: viewer}); !isAdminRefusal(rec) {
+		t.Errorf("viewer GET /admin.js: %d", rec.Code)
+	}
+	var info map[string]any
+	rec := rig.do(tlsReq{path: "/api/tls/info", cookie: viewer})
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil || rec.Code != 200 || len(fmt.Sprint(info["caFingerprintSha256"])) != 95 {
+		t.Errorf("viewer GET /api/tls/info: %d %s (%v)", rec.Code, rec.Body.String(), err)
+	}
+	crt := rig.do(tlsReq{path: "/api/tls/ca.crt", cookie: viewer})
+	if crt.Code != 200 || !strings.Contains(crt.Body.String(), "BEGIN CERTIFICATE") || strings.Contains(crt.Body.String(), "PRIVATE KEY") {
+		t.Errorf("viewer GET /api/tls/ca.crt: %d (a certificate and no key expected)", crt.Code)
+	}
+	for _, c := range []struct{ method, path string }{
+		{"GET", "/api/admin/tls"}, {"GET", "/api/admin/tls/ca.crt"}, {"POST", "/api/admin/tls/rotate"},
+		{"GET", "/api/admin/config"}, {"GET", "/api/admin/users"}, {"GET", "/api/config"}, {"GET", "/api/cameras"}, {"POST", "/api/control"},
+	} {
+		if rec := rig.do(tlsReq{method: c.method, path: c.path, cookie: viewer}); !isAdminRefusal(rec) {
+			t.Errorf("viewer %s %s: %d, want the admin-only 403", c.method, c.path, rec.Code)
+		}
 	}
 }

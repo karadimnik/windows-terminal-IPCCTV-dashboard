@@ -272,7 +272,9 @@ func cmdDoctor(ctx context.Context, e *env) error {
 		add("ok", "ffmpeg", "%s %s", ff, v)
 	}
 	// MediaMTX
-	if cfg.RestreamerEnabled {
+	if cfg.RelayExternal {
+		add("ok", "mediamtx", "%s", relayExternalText(cfg))
+	} else if cfg.RestreamerEnabled {
 		cs = append(cs, mediamtx(cfg.RestreamerExePath))
 	} else {
 		add("ok", "mediamtx", "the relay is off (RestreamerEnabled false)")
@@ -294,6 +296,7 @@ func cmdDoctor(ctx context.Context, e *env) error {
 		cs = append(cs, portCheck("live WHEP", "tcp", cfg.LiveWhepAddress, running))
 		cs = append(cs, portCheck("live media", "udp", cfg.LiveUdpAddress, running))
 	}
+	cs = append(cs, webPortChecks(e)...)
 	// folders
 	for _, d := range []string{e.paths.Root, e.paths.State(), e.paths.Logs(), filepath.Dir(e.paths.Config)} {
 		cs = append(cs, writable(d))
@@ -398,6 +401,30 @@ func portCheck(what, network, addr string, running bool) check {
 		return check{"ok", what, fmt.Sprintf("%s %s is in use (the running supervisor's)", network, addr)}
 	}
 	return check{"fail", what, fmt.Sprintf("%s %s cannot be used: %v", network, addr, err)}
+}
+
+// webPortChecks warns (never fails) when web.listen or web.tlsListen is held by something that is
+// not this Holocron's web role: up would start a web role that cannot bind and crash-loops. Skipped
+// when the web app is off; a live web role of this root owns its ports.
+func webPortChecks(e *env) []check {
+	if !e.cfg.Web.Enabled || webStatus(e).Running {
+		return nil
+	}
+	var cs []check
+	for _, a := range []struct{ what, addr string }{{"web listen", e.cfg.Web.Listen}, {"web tlsListen", e.cfg.Web.TLSListen}} {
+		if a.addr == "" {
+			continue
+		}
+		l, err := net.Listen("tcp", a.addr)
+		if err == nil {
+			l.Close()
+			cs = append(cs, check{"ok", a.what, fmt.Sprintf("tcp %s is free", a.addr)})
+			continue
+		}
+		_, port, _ := net.SplitHostPort(a.addr)
+		cs = append(cs, check{"warn", a.what, fmt.Sprintf("port %s (%s) is held by another program (for example the PowerShell system's camui.exe): holocron up would crash-loop its web role (alert 104) (%v)", port, a.addr, err)})
+	}
+	return cs
 }
 
 func writable(dir string) check {

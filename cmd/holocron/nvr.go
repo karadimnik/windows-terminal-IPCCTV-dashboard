@@ -17,6 +17,7 @@ import (
 	"holocron/internal/alerts"
 	"holocron/internal/app"
 	"holocron/internal/autostart"
+	"holocron/internal/config"
 	"holocron/internal/osx"
 	"holocron/internal/status"
 	"holocron/internal/web"
@@ -276,6 +277,12 @@ func readErr(e *env) error {
 	return err
 }
 
+// relayExternalText is what status and doctor say when RelayExternal is set (text only, from the
+// configuration: the status document does not carry it).
+func relayExternalText(cfg config.Config) string {
+	return fmt.Sprintf("relay: external (RelayExternal: the cameras read %s/<path> from a relay this system does not run)", strings.TrimRight(cfg.RelayBase, "/"))
+}
+
 func printStatus(e *env, r statusReport) {
 	w := e.out
 	fmt.Fprintf(w, "holocron status - root %s\n", r.Root)
@@ -320,7 +327,9 @@ func printStatus(e *env, r statusReport) {
 		}
 		fmt.Fprintln(w, line)
 	}
-	if rs := d.Restreamer; rs != nil {
+	if e.cfg.RelayExternal {
+		fmt.Fprintln(w, relayExternalText(e.cfg))
+	} else if rs := d.Restreamer; rs != nil {
 		if rs.Enabled {
 			fmt.Fprintf(w, "relay: alive=%v%s, %d path(s)%s\n", rs.Alive, pidText(rs.Pid), len(rs.Paths), errText(rs.LastError))
 		} else {

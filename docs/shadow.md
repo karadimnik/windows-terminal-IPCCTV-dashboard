@@ -144,7 +144,57 @@ if anything remains).
 no relay of its own), and the segment names should be the same shape as the PowerShell system's,
 `Front_Door_20261021_183001+0300.mkv`. `CurrentSegmentBytes` grows during the segment (the open file's size is read through
 an open handle; a Windows directory listing shows 0 until ffmpeg closes it) and `SecondsSinceLastClosedSegment` is the age of
-the current segment, 0 to about 900. `doctor` reports the relay as off: that is Holocron's own relay.
+the current segment, 0 to about 900. `status` and `doctor` print `relay: external (RelayExternal: the cameras read rtsp://127.0.0.1:8554/<path> from a relay this system does not run)`, with the configured `RelayBase`.
+
+## Looking at the web app on the shadow's data (optional)
+
+The shadow runs no web app (step 3 above). To look at the new web app on what the shadow records, without touching the shadow's
+own configuration, run a second, separate process from a copy of the configuration. This is not part of the shadow's process
+tree, and the shadow does not need it.
+
+1. Copy `D:\holocron-shadow\_config\holocron.config.json` to `D:\holocron-shadow\_config\web-ui.config.json` and change only the
+   `web` object (everything else, `RootPath` included, stays so the page reads the shadow's archive and status):
+
+   ```json
+   "web": {
+     "enabled": true,
+     "listen": "127.0.0.1:8788",
+     "authDir": "D:\\holocron-shadow\\_config\\web\\auth",
+     "tlsDir":  "D:\\holocron-shadow\\_config\\web\\tls"
+   }
+   ```
+
+   The two folders sit under `<root>\_config\web\` so the page never uses `%LOCALAPPDATA%\IPCCTV`, the PowerShell system's UI data.
+   Leave `tlsListen` out: only the loopback page is wanted. Use a port that is free (`8787` is the PowerShell system's).
+
+2. Start it in the background and keep its pid:
+
+   ```powershell
+   $h = 'D:\holocron-shadow-bin\holocron.exe'; $w = 'D:\holocron-shadow\_config\web-ui.config.json'
+   $p = [System.Diagnostics.Process]::Start($h, "--config $w web")
+   $p.Id
+   ```
+
+   (it opens a console window of its own; or run `& $h --config $w web` in a window of your own and stop it with Ctrl+C).
+   Open `http://127.0.0.1:8788/`.
+
+3. **Warning: the loopback page is an admin and its buttons act on the SHADOW.** There is no sign-in on the loopback address.
+   Start and Stop, the record toggle of a camera and the Settings save all go through the control API to the shadow's running
+   supervisor, and the Settings save also writes the shadow's `cameras.json` and `holocron.config.json`. For a look, use
+   Dashboard, Footage and the status; press nothing else.
+
+4. **The Live tab does not work**: the shadow has no live relay (`LiveViewEnabled` is false, and the relay is the PowerShell
+   system's).
+
+5. Stop it by the pid you noted, never by the image name (the shadow's own `holocron.exe` processes share it):
+
+   ```powershell
+   $p.Kill()
+   ```
+
+   (in a new window: `[System.Diagnostics.Process]::GetProcessById(<pid>).Kill()`).
+
+   Then delete `web-ui.config.json` and `D:\holocron-shadow\_config\web` if you do not need them again.
 
 ## Comparing
 

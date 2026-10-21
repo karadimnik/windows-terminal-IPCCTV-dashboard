@@ -79,7 +79,7 @@ func TestRealScopeHardKillLeavesNoSurvivors(t *testing.T) {
 	w := newWatch(t, tree)
 	defer w.close()
 	t0 := time.Now()
-	hardKill(t, h)
+	hardKill(t, h.Cmd)
 	surv := w.survivors(5 * time.Second)
 	t.Logf("tree %v (children %v); survivors %v; all gone after %v", tree, st.Children, surv, time.Since(t0))
 	if len(tree) < 3 {
@@ -109,7 +109,7 @@ func TestRealScopeHardKillWithGrandchildren(t *testing.T) {
 	defer func() { t.Logf("sweep killed %v", sw.run(t)) }()
 	w := newWatch(t, all)
 	defer w.close()
-	hardKill(t, h)
+	hardKill(t, h.Cmd)
 	surv := w.survivors(5 * time.Second)
 	t.Logf("children %v grandchildren %v tree %v; survivors %v", st.Children, st.Grand, all, surv)
 	if runtime.GOOS == "windows" {
@@ -143,7 +143,7 @@ func TestRealScopeKillRacesStart(t *testing.T) {
 	sw.add(t, before...)
 	w := newWatch(t, before)
 	defer w.close()
-	hardKill(t, h)
+	hardKill(t, h.Cmd)
 	after := leftovers(t, h.Process.Pid, dir) // includes a child created while the kill landed
 	after = union(nil, minus(after, before))
 	sw.add(t, after...)
@@ -246,7 +246,7 @@ func TestRealLockTwoProcesses(t *testing.T) {
 		t.Fatalf("while the helper holds it: %v", err)
 	}
 	t.Logf("refused while held: %v", err)
-	hardKill(t, h2)
+	hardKill(t, h2.Cmd)
 	h2.Wait()
 	t0 := time.Now()
 	for {
