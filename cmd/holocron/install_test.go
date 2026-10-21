@@ -137,6 +137,7 @@ func TestInstallRefusals(t *testing.T) {
 		{[]string{"install", "--name", "Other"}, 2, "-TEST-"},
 		{[]string{"install", "--test-disabled"}, 2, "test entries only"},
 		{[]string{"install", "--account", "x"}, 2, "--mode service only"},
+		{[]string{"install", "--window", "hidden"}, 2, "Windows logon task only"},
 		{[]string{"install", "extra"}, 2, "wrong number"},
 		{[]string{"autostart", "enable"}, 1, "no record"},
 		{[]string{"autostart", "disable"}, 1, "no record"},
@@ -211,6 +212,11 @@ func TestOldTasksGateWindows(t *testing.T) {
 	if code != 1 || !strings.Contains(out, "WARNING: IPCCTV-Recorder is ENABLED") || !strings.Contains(out, "schtasks /Change /TN IPCCTV-Recorder /DISABLE") ||
 		!strings.Contains(out, "IPCCTV-Dashboard disabled") || !strings.Contains(out, "IPCCTV-Ui not found") || !strings.Contains(errw, oldTasksFlag) {
 		t.Errorf("gate: %d\n%s%s", code, out, errw)
+	}
+	for _, a := range [][]string{{"install", "--window", "maybe"}, {"install", "--mode", "service", "--window", "hidden"}} {
+		if _, errw, code := r.run(a...); code != 2 || !strings.Contains(errw, "--window") {
+			t.Errorf("%v: %d %s", a, code, errw)
+		}
 	}
 	// with the override the gate lets it through (the Linux temp paths of the rig then fail the
 	// Windows path check, which is all this test needs)

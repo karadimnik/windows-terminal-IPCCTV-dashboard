@@ -39,8 +39,27 @@ func TestGeneratedEntriesGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 	golden(t, "task.xml", e.Content)
-	if e.Command() != `C:\Windows\System32\conhost.exe --headless C:\Holocron\holocron.exe --config C:\Holocron\holocron.config.json up --detach` || e.WorkDir != `C:\Holocron` || e.Exe != `C:\Holocron\holocron.exe` {
-		t.Errorf("task command %q workdir %q exe %q", e.Command(), e.WorkDir, e.Exe)
+	if e.Command() != `C:\Holocron\holocron.exe --config C:\Holocron\holocron.config.json up` || e.WorkDir != `C:\Holocron` || e.Exe != `C:\Holocron\holocron.exe` || e.Window != WindowVisible {
+		t.Errorf("task command %q workdir %q exe %q window %q", e.Command(), e.WorkDir, e.Exe, e.Window)
+	}
+	hs := winSpec(r)
+	hs.Window = WindowHidden
+	h, err := Generate(r.env, hs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	golden(t, "task-hidden.xml", h.Content)
+	if h.Command() != `C:\Windows\System32\conhost.exe --headless C:\Holocron\holocron.exe --config C:\Holocron\holocron.config.json up --detach` || h.Exe != `C:\Holocron\holocron.exe` || h.Window != WindowHidden {
+		t.Errorf("hidden task command %q exe %q window %q", h.Command(), h.Exe, h.Window)
+	}
+	// both forms: interactive token (only while the user is logged on, so the console is on the
+	// desktop), the task not hidden, no time limit, a second start ignored
+	for _, x := range []string{e.Content, h.Content} {
+		for _, want := range []string{"<LogonType>InteractiveToken</LogonType>", "<Hidden>false</Hidden>", "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>"} {
+			if !strings.Contains(x, want) {
+				t.Errorf("task XML lacks %s", want)
+			}
+		}
 	}
 	for _, want := range []string{"<LogonTrigger>", `<UserId>PC\alice</UserId>`, "<UserId>S-1-5-21-1000-1000-1000-1001</UserId>", "<LogonType>InteractiveToken</LogonType>",
 		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>", "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
@@ -105,13 +124,22 @@ func TestWindowsPathsQuotedEscapedOrRefused(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(e.Content, `<Arguments>--headless "C:\Program Files\Holo &amp; Cron\holocron.exe" --config "C:\Program Files\Holo &amp; Cron\holocron.config.json" up --detach</Arguments>`) ||
+	if !strings.Contains(e.Content, `<Command>C:\Program Files\Holo &amp; Cron\holocron.exe</Command>`) ||
+		!strings.Contains(e.Content, `<Arguments>--config "C:\Program Files\Holo &amp; Cron\holocron.config.json" up</Arguments>`) ||
 		!strings.Contains(e.Content, `<WorkingDirectory>C:\Program Files\Holo &amp; Cron</WorkingDirectory>`) {
 		t.Errorf("spaces and & not quoted/escaped:\n%s", e.Content)
 	}
 	got, err := parseTask(e.Content)
-	if err != nil || got.Exe != s.Exe || got.Argv[4] != s.Config {
+	if err != nil || got.Exe != s.Exe || got.Argv[2] != s.Config {
 		t.Errorf("read back %+v %v", got, err)
+	}
+	s.Window = WindowHidden
+	e, _ = Generate(r.env, s)
+	if !strings.Contains(e.Content, `<Arguments>--headless "C:\Program Files\Holo &amp; Cron\holocron.exe" --config "C:\Program Files\Holo &amp; Cron\holocron.config.json" up --detach</Arguments>`) {
+		t.Errorf("hidden: spaces and & not quoted/escaped:\n%s", e.Content)
+	}
+	if got, err := parseTask(e.Content); err != nil || got.Exe != s.Exe || got.Argv[4] != s.Config || got.Window != WindowHidden {
+		t.Errorf("hidden read back %+v %v", got, err)
 	}
 	for _, bad := range []string{`C:\Holo%PATH%\holocron.exe`, `C:\Holo"x\holocron.exe`, `holocron.exe`, "C:\\Holo\nx\\holocron.exe"} {
 		s := winSpec(r)
@@ -157,7 +185,7 @@ func TestLogonInstallIdempotentVerifiedRecorded(t *testing.T) {
 		t.Errorf("calls %q", calls)
 	}
 	rec, ok, err := ReadRecord(s.Record)
-	if !ok || err != nil || rec.Mode != Logon || rec.Name != TaskName || rec.Exe != s.Exe || rec.Version != "v1" || !strings.Contains(rec.Command, "up --detach") {
+	if !ok || err != nil || rec.Mode != Logon || rec.Name != TaskName || rec.Exe != s.Exe || rec.Version != "v1" || !strings.HasSuffix(rec.Command, " up") || rec.Window != WindowVisible {
 		t.Errorf("record %+v %v %v", rec, ok, err)
 	}
 	if left, _ := filepath.Glob(filepath.Join(r.dir, "task-*.xml")); len(left) != 0 {
@@ -237,7 +265,7 @@ func TestLogonEnableDisableRemove(t *testing.T) {
 func TestRollbackOnFailingStep(t *testing.T) {
 	// verification fails: the task this run created is deleted again
 	r := newRigT(t, "windows")
-	r.fos.Mangle = func(x string) string { return strings.Replace(x, "--detach</Arguments>", "</Arguments>", 1) }
+	r.fos.Mangle = func(x string) string { return strings.Replace(x, "</Arguments>", " --mangled</Arguments>", 1) }
 	_, err := Install(r.ops(), winSpec(r), "v1")
 	if err == nil || !strings.Contains(err.Error(), "verification") || !strings.Contains(err.Error(), "rolled back") || len(r.fos.Tasks) != 0 {
 		t.Errorf("err %v tasks %v", err, r.fos.Tasks)
@@ -254,7 +282,7 @@ func TestRollbackOnFailingStep(t *testing.T) {
 	before := r.fos.Tasks[TaskName]
 	r.fos.Mangle = func(x string) string {
 		if strings.Contains(x, `D:\`) {
-			return strings.Replace(x, "--detach</Arguments>", "</Arguments>", 1)
+			return strings.Replace(x, "</Arguments>", " --mangled</Arguments>", 1)
 		}
 		return x
 	}
@@ -594,5 +622,57 @@ func TestServiceRefusals(t *testing.T) {
 	scm.Fail = nil
 	if _, err := Install(r.ops(), s, "v1"); err != nil || scm.Services["Holocron-TEST-s1"].Start != osx.StartDisabled || scm.Services["Holocron-TEST-s1"].DisplayName != "Holocron NVR (Holocron-TEST-s1)" {
 		t.Errorf("test service: %v %+v", err, scm.Services)
+	}
+}
+
+func TestLogonWindowModes(t *testing.T) {
+	r := newRigT(t, "windows")
+	s := winSpec(r)
+	s.Window = WindowHidden
+	if _, err := Install(r.ops(), s, "v1"); err != nil {
+		t.Fatal(err)
+	}
+	if rec, _, _ := ReadRecord(s.Record); rec.Window != WindowHidden {
+		t.Errorf("record %+v", rec)
+	}
+	if st := Status(r.env, Logon, TaskName); st.Window != WindowHidden || !strings.Contains(st.Summary(), "console window hidden") || st.Exe != s.Exe {
+		t.Errorf("status %+v", st)
+	}
+	// hidden -> visible is an update, reported, one replacing /Create
+	r.fos.Reset()
+	s.Window = WindowVisible
+	res, err := Install(r.ops(), s, "v1")
+	if err != nil || res.Created || !res.Changed || !strings.Contains(strings.Join(res.Changes, "\n"), "console window: hidden -> visible") {
+		t.Fatalf("update: %+v %v", res, err)
+	}
+	if m := Mutating(r.fos.Calls()); len(m) != 1 || !strings.HasSuffix(m[0], "/F") || len(r.fos.Tasks) != 1 {
+		t.Errorf("update calls %q", m)
+	}
+	if st := Status(r.env, Logon, TaskName); st.Window != WindowVisible || st.Command != `C:\Holocron\holocron.exe --config C:\Holocron\holocron.config.json up` {
+		t.Errorf("status after update %+v", st)
+	}
+	if rec, _, _ := ReadRecord(s.Record); rec.Window != WindowVisible {
+		t.Errorf("record after update %+v", rec)
+	}
+	if res, err := Install(r.ops(), s, "v1"); err != nil || res.Changed {
+		t.Errorf("visible twice: %+v %v", res, err)
+	}
+	// visible -> hidden whose verification fails: the visible task is put back
+	r.fos.Mangle = func(x string) string { return strings.Replace(x, "--detach</Arguments>", "</Arguments>", 1) }
+	s.Window = WindowHidden
+	if _, err := Install(r.ops(), s, "v1"); err == nil || !strings.Contains(err.Error(), "previous entry was put back") {
+		t.Errorf("rollback: %v", err)
+	}
+	if st := Status(r.env, Logon, TaskName); st.Window != WindowVisible {
+		t.Errorf("after rollback %+v", st)
+	}
+	for _, c := range []struct {
+		w    string
+		m    Mode
+		fail bool
+	}{{"", Systemd, false}, {"visible", Logon, false}, {"hidden", Logon, false}, {"hidden", Systemd, true}, {"visible", Service, true}, {"visible", Launchd, true}, {"maybe", Logon, true}} {
+		if err := CheckWindow(c.w, c.m); (err != nil) != c.fail || (err != nil && !errors.Is(err, ErrUsage)) {
+			t.Errorf("%q %s: %v", c.w, c.m, err)
+		}
 	}
 }

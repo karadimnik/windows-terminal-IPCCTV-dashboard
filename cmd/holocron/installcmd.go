@@ -129,6 +129,7 @@ func cmdInstall(ctx context.Context, e *env) error {
 	allowTemp := f.fs.Bool("allow-temp", false, "install an executable that is under a temporary folder")
 	yes := f.fs.Bool("yes", false, "(service mode) do not ask for confirmation")
 	account := f.fs.String("account", "", "(service mode) the service account (default LocalSystem)")
+	window := f.fs.String("window", "", "(Windows logon task) visible: the attached up in a console window (default); hidden: no window, up --detach")
 	if err := f.parse(e, "install"); err != nil {
 		return err
 	}
@@ -145,6 +146,9 @@ func cmdInstall(ctx context.Context, e *env) error {
 	}
 	if *account != "" && m != autostart.Service {
 		return usageErr("holocron install --account is for --mode service only")
+	}
+	if err := autostart.CheckWindow(*window, m); err != nil {
+		return usageOf(err)
 	}
 	if m == autostart.Service {
 		if err := autostart.CheckAccount(*account); err != nil {
@@ -170,7 +174,14 @@ func cmdInstall(ctx context.Context, e *env) error {
 	if err := e.oldTasksGate(*f.oldOK); err != nil {
 		return err
 	}
-	spec := autostart.Spec{Mode: m, Name: name, Exe: exe, Config: e.paths.Config, Disabled: *f.testDisabled, Account: *account, Record: e.recordPath()}
+	spec := autostart.Spec{Mode: m, Name: name, Exe: exe, Config: e.paths.Config, Disabled: *f.testDisabled, Account: *account, Record: e.recordPath(), Window: *window}
+	if m == autostart.Logon && spec.Window == "" {
+		// without --window a reinstall keeps the recorded choice; a first install is visible
+		spec.Window = autostart.WindowVisible
+		if rec, ok, _ := autostart.ReadRecord(e.recordPath()); ok && rec.Mode == m && rec.Name == name && rec.Window != "" {
+			spec.Window = rec.Window
+		}
+	}
 	if e.opts.Root != "" {
 		spec.Root = e.paths.Root
 	}
@@ -202,6 +213,12 @@ func (e *env) afterInstall(m autostart.Mode, name string, en autostart.Entry) {
 	switch m {
 	case autostart.Logon:
 		fmt.Fprintln(e.out, "it starts holocron at your next logon (nothing was started now; holocron up --detach starts it now)")
+		if en.Window == autostart.WindowHidden {
+			fmt.Fprintln(e.out, "console window: hidden (conhost.exe --headless runs holocron up --detach; holocron down stops it)")
+		} else {
+			fmt.Fprintln(e.out, "console window: visible - at logon holocron runs in a console window on your desktop; closing that window stops everything in order")
+			fmt.Fprintln(e.out, "  (a \"window closed\" stop with one alert 103, not an outage: nothing restarts it until the next logon or holocron up); --window hidden runs it without a window")
+		}
 	case autostart.Service:
 		fmt.Fprintf(e.out, "the service starts at the next boot (delayed); nothing was started now (sc start %s starts it)\n", name)
 	case autostart.Systemd:

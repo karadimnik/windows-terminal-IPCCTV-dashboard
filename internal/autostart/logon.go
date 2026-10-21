@@ -55,16 +55,22 @@ func (t logonTask) entry(s Spec) (Entry, error) {
 	if t.env.User == "" {
 		return Entry{}, errors.New("the current Windows user is unknown")
 	}
-	inner := append([]string{s.Exe}, s.holocronArgs("up", "--detach")...)
-	e := Entry{Mode: Logon, Name: s.Name, Exe: s.Exe, WorkDir: s.WorkDir(), Enabled: !s.Disabled,
-		Argv: append([]string{t.env.conhost(), "--headless"}, inner...)}
+	if err := CheckWindow(s.Window, Logon); err != nil {
+		return Entry{}, err
+	}
+	e := Entry{Mode: Logon, Name: s.Name, Exe: s.Exe, WorkDir: s.WorkDir(), Enabled: !s.Disabled, Window: WindowVisible,
+		Argv: append([]string{s.Exe}, s.holocronArgs("up")...)}
+	if s.Window == WindowHidden {
+		e.Window = WindowHidden
+		e.Argv = append([]string{t.env.conhost(), "--headless", s.Exe}, s.holocronArgs("up", "--detach")...)
+	}
 	principal := t.env.UID
 	if principal == "" {
 		principal = t.env.User
 	}
 	// a disabled (test) task gets a disabled logon trigger too: switching the task on with
 	// `autostart enable` then still leaves nothing that can fire
-	e.Content = taskXML(t.env.User, principal, e.Argv[0], "--headless "+winJoin(inner), e.WorkDir, e.Enabled, e.Enabled)
+	e.Content = taskXML(t.env.User, principal, e.Argv[0], winJoin(e.Argv[1:]), e.WorkDir, e.Enabled, e.Enabled)
 	got, err := parseTask(e.Content)
 	if err != nil {
 		return Entry{}, fmt.Errorf("the generated task XML does not parse: %w", err)
@@ -90,7 +96,7 @@ func taskXML(user, principal, command, args, workDir string, enabled, triggerEna
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Author>holocron install</Author>
-    <Description>Holocron NVR: starts the recorder, relay, live view and web app at logon (holocron up --detach). Created by holocron install; holocron uninstall removes it, holocron autostart disable switches it off.</Description>
+    <Description>Holocron NVR: starts the recorder, relay, live view and web app at logon. Created by holocron install; holocron uninstall removes it, holocron autostart disable switches it off.</Description>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -213,9 +219,9 @@ func parseTask(text string) (*Entry, error) {
 		x := d.Exec[0]
 		e.Argv = append([]string{strings.TrimSpace(x.Command)}, splitWin(x.Arguments)...)
 		e.WorkDir = strings.TrimSpace(x.WorkingDirectory)
-		e.Exe = e.Argv[0]
+		e.Exe, e.Window = e.Argv[0], WindowVisible
 		if len(e.Argv) > 2 && e.Argv[1] == "--headless" {
-			e.Exe = e.Argv[2]
+			e.Exe, e.Window = e.Argv[2], WindowHidden
 		}
 	}
 	user, trig := "", ""
