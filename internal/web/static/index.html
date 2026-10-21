@@ -17,6 +17,8 @@
       <button data-t="set">Settings</button>
       <button data-t="foot">Footage</button>
       <button data-t="live">Live</button>
+      <!-- Every signed-in user, on the HTTPS LAN listener only (detectAccess in app.js). -->
+      <button data-t="phone" class="hide" id="phoneTab">Phone</button>
       <!-- Shown to admins only (detectAccess in app.js); its code, admin.js, is served to admins only. -->
       <button data-t="admin" class="hide" id="adminTab">Admin</button>
     </nav>
@@ -163,6 +165,21 @@
       byte-order mark. A camera change is picked up by the running recorder within seconds;
       the settings above it reads when it starts.
     </footer>
+  </section>
+
+  <!-- ============== PHONE (every signed-in user; the Settings copy above is the admins') ============== -->
+  <section data-tab="phone" class="hide">
+    <div class="panel" id="phonePanel">
+      <header><h2>Connect a phone or another PC</h2></header>
+      <div class="form">
+        <p class="hint">Install this PC's own certificate authority once on each device so it trusts this address, then sign in again with your username and password. You must already be signed in to download it: open the page, accept the certificate warning once, sign in, download, install, then reopen the page.
+          Before you trust it, check that the device shows this fingerprint:</p>
+        <p><code id="phoneFingerprint" style="word-break:break-all"></code></p>
+        <div class="actions"><a class="btn primary" href="api/tls/ca.crt" download="ipcctv-local-ca.crt">Download the certificate</a></div>
+        <p class="hint">iPhone: open the file, install it under Settings &gt; General &gt; VPN &amp; Device Management, then turn it on under Settings &gt; General &gt; About &gt; Certificate Trust Settings.
+          Android: Settings &gt; Security &gt; Install a certificate &gt; CA certificate. Steps and removal are in docs/ui.md.</p>
+      </div>
+    </div>
   </section>
 
   <!-- ============== FOOTAGE ============== -->

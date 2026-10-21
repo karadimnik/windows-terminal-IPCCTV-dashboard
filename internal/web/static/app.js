@@ -1205,8 +1205,10 @@ el("fSegs").onclick = (event) => {
 // fragment falls back to the first tab.
 async function detectAccess() {
   let readOnly = false;
+  let onLan = false;
   try {
     readOnly = (await getJSON("api/tls/info")).readOnly === true;
+    onLan = true;
   } catch (err) {
     readOnly = false;
   }
@@ -1225,12 +1227,14 @@ async function detectAccess() {
   // Settings are the admins'; the Admin tab also needs a listener that is not view-only.
   document.querySelector('nav.tabs button[data-t="set"]').classList.toggle("hide", viewer);
   el("adminTab").classList.toggle("hide", viewer || readOnly);
+  // The phone panel is for every signed-in user, so a viewer (who has no Settings) keeps it.
+  el("phoneTab").classList.toggle("hide", !onLan);
   if (!viewer && !readOnly) await loadAdmin();
   if (roleTab(location.hash.slice(1))) showTab(location.hash.slice(1));
 }
 
-// roleTab: a screen that waits for detectAccess (Settings and Admin are the admins').
-const roleTab = (fragment) => /^(set|admin)(\/|$)/.test(fragment);
+// roleTab: a screen that waits for detectAccess (Settings and Admin are the admins'; Phone needs the LAN listener).
+const roleTab = (fragment) => /^(set|admin|phone)(\/|$)/.test(fragment);
 
 // admin.js is fetched only for an admin (the server refuses it to anyone else).
 let adminLoaded = null;
@@ -1253,6 +1257,7 @@ async function loadTlsPanel() {
   try {
     const info = await getJSON("api/tls/info");
     el("tlsFingerprint").textContent = info.caFingerprintSha256;
+    el("phoneFingerprint").textContent = info.caFingerprintSha256;
     el("tlsPanel").classList.remove("hide");
   } catch (err) {
     el("tlsPanel").classList.add("hide");
@@ -1276,7 +1281,7 @@ function showTab(fragment) {
     loadCameras();
     loadConfig();
   }
-  if (button.dataset.t === "set") loadTlsPanel();
+  if (button.dataset.t === "set" || button.dataset.t === "phone") loadTlsPanel();
   // Re-read on every visit: a recording camera has new segments by now, and
   // the pruner may have taken the oldest away.
   if (button.dataset.t === "foot") loadFootage();
