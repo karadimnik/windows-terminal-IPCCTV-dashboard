@@ -57,8 +57,11 @@ func (c check) data(d any) check                  { c.Data = d; return c }
 type doctorCheck struct {
 	id, group  string
 	concurrent bool
-	timeout    time.Duration // 0: doctorDeps.checkTimeout
-	run        func(ctx context.Context, r *drun) []check
+	// outsideBudget: a concurrent check that runs under its own timeout instead of the shared
+	// network budget (the growth sample waits longer than the probes do).
+	outsideBudget bool
+	timeout       time.Duration // 0: doctorDeps.checkTimeout
+	run           func(ctx context.Context, r *drun) []check
 }
 
 // doctorTable is the check list, in output order within each group.
@@ -276,7 +279,11 @@ func (r *drun) runAll(ctx context.Context, sel map[string]bool) []check {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				results[i] = r.one(budget, c)
+				if c.outsideBudget {
+					results[i] = r.one(ctx, c)
+				} else {
+					results[i] = r.one(budget, c)
+				}
 			}()
 		default:
 			results[i] = r.one(ctx, c)

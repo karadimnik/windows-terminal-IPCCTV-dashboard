@@ -12,6 +12,7 @@ import (
 	"holocron/internal/app"
 	"holocron/internal/archive"
 	"holocron/internal/config"
+	"holocron/internal/ffmpeg"
 )
 
 // setupTable is the doctor of before W19: the environment a start needs.
@@ -45,6 +46,9 @@ func setupFfmpeg(_ context.Context, r *drun) []check {
 	const fix = "install ffmpeg 5.0 or newer and point the configuration at it: holocron config set FfmpegPath <path to ffmpeg>"
 	if v, err := r.d.ffmpeg(ff); err != nil {
 		return []check{mk(lvFail, "ffmpeg", "%s: %v", ff, err).fix(fix)}
+	} else if v.Git {
+		// The product accepts a development build knowingly (internal/ffmpeg): not something to fix.
+		return []check{mk(lvInfo, "ffmpeg", "%s %s: development build; its release number is unknown, assumed %d.0 or later", ff, v.Raw, ffmpeg.MinMajor)}
 	} else if v.Warning != "" {
 		return []check{mk(lvWarn, "ffmpeg", "%s %s: %s", ff, v, v.Warning).fix(fix)}
 	} else {

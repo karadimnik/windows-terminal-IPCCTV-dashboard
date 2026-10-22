@@ -20,7 +20,7 @@ import (
 var recordingTable = []doctorCheck{
 	{id: "recording.heartbeat", group: "recording", run: recHeartbeat},
 	{id: "recording.camera", group: "recording", run: recCameras},
-	{id: "recording.growth", group: "recording", concurrent: true, run: recGrowth},
+	{id: "recording.growth", group: "recording", concurrent: true, outsideBudget: true, timeout: growthTimeout, run: recGrowth},
 	{id: "recording.gaps", group: "recording", run: recGaps},
 	{id: "recording.segment", group: "recording", timeout: 30 * time.Second, run: recSegments},
 }
@@ -31,7 +31,9 @@ func init() { doctorTable = append(doctorTable, recordingTable...) }
 const (
 	restartsWarn  = 3                // restarts in the last hour
 	restartsFail  = 10               // restarts in the last hour
-	growthWait    = 2 * time.Second  // between the two size samples
+	growthWait    = 2 * time.Second  // between two size samples
+	growthRounds  = 5                // a file that has not grown is sampled again up to this many times: growthWait * growthRounds is the window
+	growthTimeout = 13 * time.Second // the window plus a margin
 	closedMargin  = 60 * time.Second // a closed segment younger than SegmentSeconds plus this is recent (the archive scan's open grace)
 	gapLimit      = 2 * time.Second  // a hole between consecutive segments larger than this is a gap
 	gapEventSlack = 10 * time.Second // a log record this close to a gap explains it
@@ -237,7 +239,8 @@ func recCameras(_ context.Context, r *drun) []check {
 	return cs
 }
 
-// growthSample is the newest segment's live size twice, growthWait apart.
+// growthSample is the newest segment's live size at the start and after each growthWait until it
+// grew (the muxer writes in bursts, so one quiet 2 s sample is not a stall).
 type growthSample struct {
 	Newest       segFile
 	Found        bool
@@ -246,7 +249,11 @@ type growthSample struct {
 	ClosedMTime  time.Time // the newest closed segment's last write
 	Err          error
 	SampleMillis int64
+	Rounds       int // samples taken after the first
 }
+
+// window is how long the file was watched without growing.
+func (g growthSample) window() time.Duration { return time.Duration(g.Rounds) * growthWait }
 
 func (g growthSample) grew() bool { return g.Found && g.Err == nil && g.After > g.Before }
 
@@ -270,20 +277,32 @@ func (r *drun) growth(ctx context.Context) map[string]growthSample {
 			out[cam.Name] = g
 		}
 		start := r.d.now()
-		if err := r.d.sleep(ctx, growthWait); err != nil {
-			for k, g := range out {
-				g.Err = err
-				out[k] = g
+		// Every camera shares each wait, so six stalled cameras cost growthRounds waits, not six times that.
+		for round := 1; round <= growthRounds; round++ {
+			pending := false
+			for _, cam := range cams {
+				if g := out[cam.Name]; g.Found && g.Err == nil && !g.grew() {
+					pending = true
+				}
 			}
-			return out
-		}
-		for _, cam := range cams {
-			g := out[cam.Name]
-			if g.Found && g.Err == nil {
-				g.After, g.Err = r.d.liveSize(filepath.Join(r.files(cam).Dir, g.Newest.Name))
+			if !pending {
+				break
 			}
-			g.SampleMillis = r.d.now().Sub(start).Milliseconds()
-			out[cam.Name] = g
+			err := r.d.sleep(ctx, growthWait)
+			for _, cam := range cams {
+				g := out[cam.Name]
+				if !g.Found || g.Err != nil || g.grew() {
+					continue
+				}
+				if err != nil {
+					g.Err = err
+				} else {
+					g.After, g.Err = r.d.liveSize(filepath.Join(r.files(cam).Dir, g.Newest.Name))
+					g.Rounds = round
+					g.SampleMillis = r.d.now().Sub(start).Milliseconds()
+				}
+				out[cam.Name] = g
+			}
 		}
 		return out
 	}).(map[string]growthSample)
@@ -310,14 +329,14 @@ func recGrowth(ctx context.Context, r *drun) []check {
 		case g.Err != nil:
 			cs = append(cs, mk(lvWarn, cam.Name, "%s: the size could not be sampled: %v", g.Newest.Name, g.Err).fix("run holocron doctor --group recording again").data(data))
 		case !g.ClosedMTime.IsZero() && r.now.Sub(g.ClosedMTime) <= seg+closedMargin:
-			cs = append(cs, mk(lvWarn, cam.Name, "%s did not grow in %s; the newest closed segment ended %s ago", g.Newest.Name, growthWait, secs(r.now.Sub(g.ClosedMTime))).
+			cs = append(cs, mk(lvWarn, cam.Name, "%s did not grow in %s; the newest closed segment ended %s ago", g.Newest.Name, secs(g.window()), secs(r.now.Sub(g.ClosedMTime))).
 				fix("run holocron doctor --group recording again in a minute; if it repeats: %s", fix).data(data))
 		default:
 			last := g.Newest.MTime
 			if g.ClosedMTime.After(last) {
 				last = g.ClosedMTime
 			}
-			cs = append(cs, mk(lvFail, cam.Name, "not recording: no new data for %s (%s did not grow in %s)", secs(r.now.Sub(last)), g.Newest.Name, growthWait).fix("%s", fix).data(data))
+			cs = append(cs, mk(lvFail, cam.Name, "not recording: no new data for %s (%s did not grow in %s)", secs(r.now.Sub(last)), g.Newest.Name, secs(g.window())).fix("%s", fix).data(data))
 		}
 	}
 	return cs
