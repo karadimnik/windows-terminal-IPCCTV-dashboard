@@ -17,9 +17,15 @@ import (
 
 // webAdmin is the Admin tab's AdminTools in the holocron web role: each call runs the function the
 // matching command runs (configEdit, storeSecret, pruneDecide, collectStats, setLogLevel,
-// autostartSet, autostartReportOf) on a copy of the web role's env with the configuration read
-// again (the web app outlives edits) and the command's output captured as the page's message.
-type webAdmin struct{ e *env }
+// autostartSet, autostartReportOf, buildDoctor) on a copy of the web role's env with the
+// configuration read again (the web app outlives edits) and the command's output captured as the
+// page's message. health shares and caches the Health runs; nil runs each call alone.
+type webAdmin struct {
+	e      *env
+	health *healthCache
+}
+
+func newWebAdmin(e *env) webAdmin { return webAdmin{e: e, health: newHealthCache()} }
 
 // fresh is the env of one call: the configuration as it is on disk now, output into out.
 func (w webAdmin) fresh(out *bytes.Buffer) *env {
@@ -189,4 +195,22 @@ func (w webAdmin) SetAutostart(ctx context.Context, on, oldTasksOK bool) (string
 		return "", cli.Refuse("%s\n%s", strings.TrimPrefix(err.Error(), cli.ErrRefused.Error()+": "), strings.TrimSpace(out.String()))
 	}
 	return out.String(), adminErr(err)
+}
+
+// Health is `holocron doctor --json` run inside the web role (doctor_health.go): the same check
+// table and document, with the differences drun.inWeb documents.
+func (w webAdmin) Health(ctx context.Context, groups []string) (any, time.Time, error) {
+	sel, key, err := healthSelection(groups)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	run := func(ctx context.Context) doctorReport {
+		var out bytes.Buffer
+		return runHealth(ctx, w.fresh(&out), sel)
+	}
+	if w.health == nil {
+		return run(ctx), time.Now(), nil
+	}
+	rep, at, err := w.health.get(ctx, key, run)
+	return rep, at, err
 }

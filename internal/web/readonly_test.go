@@ -61,6 +61,8 @@ var roRoutes = []roRoute{
 	{"POST", "/api/admin/tls/rotate", jsonHdr, `{"confirm":"ROTATE"}`, false},
 	{"GET", "/api/admin/prune", nil, ``, false},
 	{"GET", "/api/admin/archive", nil, ``, false},
+	{"GET", "/api/admin/health", nil, ``, false},
+	{"GET", "/api/admin/health?group=setup,recording", nil, ``, false},
 	{"GET", "/api/admin/log", nil, ``, false},
 	{"POST", "/api/admin/log/level", jsonHdr, `{"component":"all","level":"debug"}`, false},
 	{"GET", "/api/admin/autostart", nil, ``, false},

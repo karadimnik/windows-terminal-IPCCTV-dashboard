@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
+	"time"
 
 	"holocron/internal/cli"
 )
@@ -43,6 +45,7 @@ const (
 	ActionAdminLogLevel     = "web.admin.log.level"
 	ActionAdminAutostart    = "web.admin.autostart.status"
 	ActionAdminAutostartSet = "web.admin.autostart.set"
+	ActionAdminHealth       = "web.admin.health"
 )
 
 // adminActions: name, mutating, audited read.
@@ -58,6 +61,7 @@ var adminActions = []struct {
 	{ActionAdminPrune, false, false}, {ActionAdminArchive, false, false},
 	{ActionAdminLogLevels, false, false}, {ActionAdminLogLevel, true, true},
 	{ActionAdminAutostart, false, true}, {ActionAdminAutostartSet, true, true},
+	{ActionAdminHealth, false, false}, // read-only and polled: its records stay at DEBUG, out of the audit stream
 }
 
 func init() {
@@ -92,7 +96,15 @@ type AdminTools interface {
 	Autostart(ctx context.Context) (any, error)
 	// SetAutostart is `holocron autostart enable|disable [--i-know-old-tasks-are-enabled]`.
 	SetAutostart(ctx context.Context, on, oldTasksOK bool) (message string, err error)
+	// Health is `holocron doctor --json` (the same checks and fields) for the groups given, all
+	// when none, run inside the web role, and when it ran. ctx ends the checks when the browser
+	// goes away; runs are shared between concurrent callers and cached for a few seconds.
+	Health(ctx context.Context, groups []string) (report any, checkedAt time.Time, err error)
 }
+
+// HealthGroups are the groups of `holocron doctor --group`, in output order (cmd/holocron tests
+// that they are the doctor's own).
+var HealthGroups = []string{"setup", "recording", "connections", "live", "web", "storage", "system"}
 
 // ConfigKey is one row of the settings-keys section.
 type ConfigKey struct {
@@ -143,6 +155,7 @@ func (a *API) adminRoutes(mux *http.ServeMux) {
 	handleAction(mux, a.runner, "POST /api/admin/log/level", ActionAdminLogLevel, a.handleAdminLogLevel)
 	handleAction(mux, a.runner, "GET /api/admin/autostart", ActionAdminAutostart, a.handleAdminAutostart)
 	handleAction(mux, a.runner, "POST /api/admin/autostart", ActionAdminAutostartSet, a.handleAdminAutostartSet)
+	handleAction(mux, a.runner, "GET /api/admin/health", ActionAdminHealth, a.handleAdminHealth)
 }
 
 // adminFailed answers an error of a helper with its status and its own words.
@@ -555,6 +568,38 @@ func (a *API) handleAdminLogLevels(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleAdminAutostart(w http.ResponseWriter, r *http.Request) {
 	a.adminRead(w, r, "autostart", AdminTools.Autostart)
+}
+
+// handleAdminHealth is GET /api/admin/health[?group=a,b]: the doctor's document under "health".
+// It runs on the request's own context (not actionCtx) so the checks stop when the browser goes.
+func (a *API) handleAdminHealth(w http.ResponseWriter, r *http.Request) {
+	var groups []string
+	for _, v := range r.URL.Query()["group"] {
+		for _, g := range strings.Split(v, ",") {
+			if g = strings.TrimSpace(g); g == "" {
+				continue
+			}
+			if !slices.Contains(HealthGroups, g) {
+				writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("group takes %s, got %q", strings.Join(HealthGroups, ", "), cleanLoggedName(g)))
+				return
+			}
+			groups = append(groups, g)
+		}
+	}
+	t, ok := a.tools(w)
+	if !ok {
+		return
+	}
+	setTarget(r, strings.Join(groups, ","))
+	rep, at, err := t.Health(r.Context(), groups)
+	if err != nil {
+		if r.Context().Err() != nil {
+			return // the browser is gone: nobody to answer
+		}
+		adminFailed(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "health": rep, "checkedAt": at})
 }
 
 func (a *API) handleAdminLogLevel(w http.ResponseWriter, r *http.Request) {
