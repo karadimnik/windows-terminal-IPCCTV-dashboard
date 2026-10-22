@@ -20,7 +20,7 @@ var setupTable = []doctorCheck{
 	{id: "setup.ffmpeg", group: "setup", timeout: 10 * time.Second, run: setupFfmpeg},
 	{id: "setup.mediamtx", group: "setup", timeout: 10 * time.Second, run: setupMediamtx},
 	{id: "setup.ports", group: "setup", run: setupPorts},
-	{id: "setup.webports", group: "setup", run: func(_ context.Context, r *drun) []check { return webPortChecks(r.e) }},
+	{id: "setup.webports", group: "setup", run: func(_ context.Context, r *drun) []check { return webPortChecks(r.e, r.d.listen) }},
 	{id: "setup.folders", group: "setup", run: setupFolders},
 	{id: "setup.root", group: "setup", run: setupRoot},
 	{id: "setup.clock", group: "setup", run: setupClock},
@@ -102,11 +102,11 @@ func setupPorts(_ context.Context, r *drun) []check {
 			cs = append(cs, mk(lvFail, a.what, "%v", err).fix("correct the address in %s", r.e.paths.Config))
 			continue
 		}
-		cs = append(cs, portCheck(a.what, "tcp", hp, r.running))
+		cs = append(cs, portCheck(r.d.listen, a.what, "tcp", hp, r.running))
 	}
 	if cfg.LiveViewEnabled {
-		cs = append(cs, portCheck("live WHEP", "tcp", cfg.LiveWhepAddress, r.running))
-		cs = append(cs, portCheck("live media", "udp", cfg.LiveUdpAddress, r.running))
+		cs = append(cs, portCheck(r.d.listen, "live WHEP", "tcp", cfg.LiveWhepAddress, r.running))
+		cs = append(cs, portCheck(r.d.listen, "live media", "udp", cfg.LiveUdpAddress, r.running))
 	}
 	return cs
 }
@@ -130,20 +130,25 @@ func portOf(addr string) string {
 	return port
 }
 
-// portCheck binds the address for a moment; in use is fine while our own supervisor runs.
-func portCheck(what, network, addr string, running bool) check {
-	var err error
+// bindFree binds the address for a moment (doctor's listen seam).
+func bindFree(network, addr string) error {
 	if network == "udp" {
-		var c net.PacketConn
-		if c, err = net.ListenPacket("udp", addr); err == nil {
+		c, err := net.ListenPacket("udp", addr)
+		if err == nil {
 			c.Close()
 		}
-	} else {
-		var l net.Listener
-		if l, err = net.Listen("tcp", addr); err == nil {
-			l.Close()
-		}
+		return err
 	}
+	l, err := net.Listen("tcp", addr)
+	if err == nil {
+		l.Close()
+	}
+	return err
+}
+
+// portCheck binds the address for a moment; in use is fine while our own supervisor runs.
+func portCheck(listen func(network, addr string) error, what, network, addr string, running bool) check {
+	err := listen(network, addr)
 	switch {
 	case err == nil:
 		return mk(lvOK, what, "%s %s is free", network, addr)
@@ -156,7 +161,7 @@ func portCheck(what, network, addr string, running bool) check {
 // webPortChecks warns (never fails) when web.listen or web.tlsListen is held by something that is
 // not this Holocron's web role: up would start a web role that cannot bind and crash-loops. Skipped
 // when the web app is off; a live web role of this root owns its ports.
-func webPortChecks(e *env) []check {
+func webPortChecks(e *env, listen func(network, addr string) error) []check {
 	if !e.cfg.Web.Enabled || webStatus(e).Running {
 		return nil
 	}
@@ -165,9 +170,8 @@ func webPortChecks(e *env) []check {
 		if a.addr == "" {
 			continue
 		}
-		l, err := net.Listen("tcp", a.addr)
+		err := listen("tcp", a.addr)
 		if err == nil {
-			l.Close()
 			cs = append(cs, mk(lvOK, a.what, "tcp %s is free", a.addr))
 			continue
 		}

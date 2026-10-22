@@ -82,8 +82,9 @@ type doctorDeps struct {
 	prober       func(cfg config.Config) shadow.Prober
 	platform     osx.Platform // its default folders: the relay and live secrets
 	listProcs    func() ([]osx.ProcEntry, error)
-	checkTimeout time.Duration // per check
-	netBudget    time.Duration // every concurrent check together
+	listen       func(network, addr string) error // binds an address for a moment (the set-up port checks)
+	checkTimeout time.Duration                    // per check
+	netBudget    time.Duration                    // every concurrent check together
 	parallel     int
 }
 
@@ -109,6 +110,7 @@ func defaultDoctorDeps() doctorDeps {
 		liveSize:     archive.LiveSize,
 		prober:       shadowProber,
 		listProcs:    osx.ListProcs,
+		listen:       bindFree,
 		checkTimeout: 3 * time.Second,
 		netBudget:    10 * time.Second,
 		parallel:     4,

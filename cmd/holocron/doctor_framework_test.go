@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -231,6 +232,12 @@ func (r *rig) doctorSeams() func(*doctorDeps) {
 		d.http = &http.Client{Transport: refuseRT{}}
 		d.sleep = func(context.Context, time.Duration) error { return nil }
 		d.listProcs = func() ([]osx.ProcEntry, error) { return nil, nil }
+		d.listen = func(network, addr string) error { // binds only the test range: never a port of a system running here
+			if p, _ := strconv.Atoi(portOf(addr)); p >= 18800 && p <= 18999 {
+				return bindFree(network, addr)
+			}
+			return nil
+		}
 		dirs := osx.Current().Dirs()
 		dirs.Auth, dirs.TLS = r.platformAuth(), filepath.Join(filepath.Dir(r.root), "platform-tls")
 		d.platform = dirsPlatform{osx.Current(), dirs}
