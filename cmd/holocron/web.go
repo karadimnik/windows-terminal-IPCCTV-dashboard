@@ -12,6 +12,16 @@ import (
 	"holocron/internal/web"
 )
 
+// webBase is the web role's starting configuration; the flags and the camui config file override it.
+// LiveSecretDir is the supervisor's auth folder, so both roles open the same live-view secret.
+func webBase(e *env) web.Config {
+	return web.Config{
+		Listen: e.cfg.Web.Listen, TLSListen: e.cfg.Web.TLSListen, TLSDir: e.cfg.Web.TLSDir, AuthDir: e.cfg.Web.AuthDir,
+		ArchiveRoot: e.paths.Root, CamerasPath: e.paths.Cameras, ConfigPath: e.paths.Config,
+		LiveSecretDir: e.opts.Platform.Dirs().Auth,
+	}
+}
+
 // cmdWeb is the web role: `holocron up` starts it as the host's managed child, and it can be run
 // by hand for diagnostics. It takes every camui flag and config-file key; the defaults come from
 // holocron.config.json (web.listen, web.tlsListen, web.tlsDir, web.authDir, RootPath), the flags
@@ -23,11 +33,7 @@ func cmdWeb(ctx context.Context, e *env) error {
 			out = e.out
 		}
 	}
-	base := web.Config{
-		Listen: e.cfg.Web.Listen, TLSListen: e.cfg.Web.TLSListen, TLSDir: e.cfg.Web.TLSDir, AuthDir: e.cfg.Web.AuthDir,
-		ArchiveRoot: e.paths.Root, CamerasPath: e.paths.Cameras, ConfigPath: e.paths.Config,
-	}
-	o, err := web.ParseFlagsTo(e.args, out, base)
+	o, err := web.ParseFlagsTo(e.args, out, webBase(e))
 	if err != nil {
 		var ue *web.UsageError
 		switch {

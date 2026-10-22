@@ -57,13 +57,10 @@ func DefaultAPICredentialPath(p osx.Platform) string {
 }
 
 // LiveSecretPath is Get-CamLiveSecretPath: LiveSecretPath, or live_view_secret.txt in the platform's
-// auth folder. (PowerShell used %LOCALAPPDATA%\IPCCTV on Windows; set LiveSecretPath to keep sharing
-// that file with camui during the shadow phase.)
+// auth folder, by config.LiveSecretFile (the web role resolves it by the same function). PowerShell
+// used %LOCALAPPDATA%\IPCCTV on Windows; set LiveSecretPath to share that file with camui.exe.
 func LiveSecretPath(p osx.Platform, cfg config.Config) string {
-	if strings.TrimSpace(cfg.LiveSecretPath) != "" {
-		return cfg.LiveSecretPath
-	}
-	return filepath.Join(p.Dirs().Auth, "live_view_secret.txt")
+	return config.LiveSecretFile(cfg.LiveSecretPath, p.Dirs().Auth)
 }
 
 // LoadAPICredential is Get-CamRelayApiCredential: user camrelayapi, the secret 32 random bytes as 64

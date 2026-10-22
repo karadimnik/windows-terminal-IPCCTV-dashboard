@@ -39,7 +39,8 @@ Types are strict: a JSON string is never accepted for a boolean or a number (Pow
 | RelayStartupWaitSeconds | 20 | whole number >= 0 (**Go**) | relay wait | no |
 | RelayReadyWaitSeconds, StartStaggerMs | 15, 300 | whole number; below 0 is raised to 0 with a warning | relay wait, stagger | no |
 | LiveViewEnabled | false | JSON boolean | live view | yes |
-| LiveExePath, LiveSecretPath | `` | string, not starting with `\\` | live view | no |
+| LiveExePath | `` | string, not starting with `\\` | live view | no |
+| LiveSecretPath | `` (the auth folder's `live_view_secret.txt`) | string, not starting with `\\`; `%NAME%` is replaced from the environment; the supervisor and the web role resolve it by the same rule | live view | no |
 | LiveConfigPath | `C:\mediamtx\mediamtx-live.yml` | non-blank, not starting with `\\` | live view | no |
 | LiveWhepAddress | `127.0.0.1:8889` | `127.0.0.1:<1-65535>`; not the relay's host:port | live view | no |
 | LiveUdpAddress | `127.0.0.1:8189` | `127.0.0.1`, `0.0.0.0` or one private IPv4, port 1-65535 | live view | yes |

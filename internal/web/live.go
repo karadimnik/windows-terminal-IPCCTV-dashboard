@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"holocron/internal/config"
 )
 
 // ---------------------------------------------------------------------------
@@ -63,7 +65,6 @@ var (
 	livePathPattern   = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 	liveSecretPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	liveSessionID     = regexp.MustCompile(`^[0-9a-f]{32}$`)
-	envVarPattern     = regexp.MustCompile(`%([A-Za-z0-9_]+)%`)
 )
 
 // liveSettings are the recorder.config.json keys live view needs.
@@ -139,8 +140,14 @@ func (a *API) liveRoutes(mux *http.ServeMux) {
 
 func (a *API) liveSettings() liveSettings {
 	settings := liveSettings{address: liveDefaultAddress}
-	if local := os.Getenv("LOCALAPPDATA"); local != "" {
-		settings.secretPath = filepath.Join(local, "IPCCTV", "live_view_secret.txt")
+	secretDir := a.cfg.LiveSecretDir
+	if secretDir == "" {
+		if local := os.Getenv("LOCALAPPDATA"); local != "" {
+			secretDir = filepath.Join(local, "IPCCTV")
+		}
+	}
+	if secretDir != "" {
+		settings.secretPath = config.LiveSecretFile("", secretDir)
 	}
 
 	raw, err := os.ReadFile(a.cfg.RecorderConfigFile())
@@ -156,9 +163,7 @@ func (a *API) liveSettings() liveSettings {
 		settings.address = value
 	}
 	if value := strings.TrimSpace(jsonString(parsed["LiveSecretPath"])); value != "" {
-		settings.secretPath = envVarPattern.ReplaceAllStringFunc(value, func(match string) string {
-			return os.Getenv(match[1 : len(match)-1])
-		})
+		settings.secretPath = config.LiveSecretFile(value, "")
 	}
 	return settings
 }

@@ -225,7 +225,7 @@ Open `C:\Holocron\holocron.config.json` and check:
    "LiveConfigPath": "C:\\Holocron\\mediamtx-live.yml"
    ```
 
-   (Not left out? Then the old system rewrites its `mediamtx.yml` at its next start when the login block is not its own: documented in [how-it-works.md](how-it-works.md#transport-the-relay) and untested by this page; it costs a restart, not footage.) Holocron keeps its relay login in `relay_api_secret.txt` and, unless the copied config sets `LiveSecretPath`, its live login in `live_view_secret.txt`, both in the auth folder (source-checked), not in the old `relay_api_creds.xml`; leave `LiveSecretPath` as it is (if it names the old system's file, Holocron shares that file, which its code allows but this page has not tried).
+   (Not left out? Then the old system rewrites its `mediamtx.yml` at its next start when the login block is not its own: documented in [how-it-works.md](how-it-works.md#transport-the-relay) and untested by this page; it costs a restart, not footage.) Holocron keeps its relay login in `relay_api_secret.txt` and, unless the copied config sets `LiveSecretPath`, its live login in `live_view_secret.txt`, both in the auth folder (source-checked; the supervisor and the web role resolve the live one by the same rule, so the key is not needed for them to agree), not in the old `relay_api_creds.xml`; leave `LiveSecretPath` as it is (if it names the old system's file, Holocron shares that file, which its code allows but this page has not tried).
 4. For the phone, the HTTPS address lives in THIS file, not in `camui.config.json`: `"web": { "tlsListen": "192.168.1.50:8443" }` (use the address from the old `camui.config.json`). `web.listen` stays `127.0.0.1:8787`.
 
 ```powershell
