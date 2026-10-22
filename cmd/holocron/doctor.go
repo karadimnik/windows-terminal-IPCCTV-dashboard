@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,7 +13,10 @@ import (
 	"time"
 
 	"holocron/internal/app"
+	"holocron/internal/archive"
+	"holocron/internal/config"
 	"holocron/internal/ffmpeg"
+	"holocron/internal/shadow"
 	"holocron/internal/status"
 )
 
@@ -73,6 +77,8 @@ type doctorDeps struct {
 	lookPath     func(string) (string, error)
 	ffmpeg       func(path string) (ffmpeg.Version, error)
 	mediamtx     func(exe string) check
+	liveSize     func(path string) (int64, error)
+	prober       func(cfg config.Config) shadow.Prober
 	checkTimeout time.Duration // per check
 	netBudget    time.Duration // every concurrent check together
 	parallel     int
@@ -97,6 +103,8 @@ func defaultDoctorDeps() doctorDeps {
 		lookPath:     exec.LookPath,
 		ffmpeg:       ffmpeg.CheckVersion,
 		mediamtx:     mediamtx,
+		liveSize:     archive.LiveSize,
+		prober:       shadowProber,
 		checkTimeout: 3 * time.Second,
 		netBudget:    10 * time.Second,
 		parallel:     4,
@@ -110,22 +118,31 @@ type drun struct {
 	now     time.Time
 	doc     *status.Document
 	running bool
-	why     string
+	why     string // app.Running's reason
+	downWhy string // the same for the not-running notice of the runtime groups
+	deep    bool
 
 	mu    sync.Mutex
-	cache map[string]any
+	cache map[string]*onceValue
 }
 
-// once returns the value build makes for key, built by the first caller (checks run concurrently).
+type onceValue struct {
+	once sync.Once
+	v    any
+}
+
+// once returns the value build makes for key, built by the first caller only; checks run
+// concurrently, and a slow build (the growth sample) blocks only the callers of its own key.
 func (r *drun) once(key string, build func() any) any {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if v, ok := r.cache[key]; ok {
-		return v
+	ov, ok := r.cache[key]
+	if !ok {
+		ov = &onceValue{}
+		r.cache[key] = ov
 	}
-	v := build()
-	r.cache[key] = v
-	return v
+	r.mu.Unlock()
+	ov.once.Do(func() { ov.v = build() })
+	return ov.v
 }
 
 type doctorSummary struct {
@@ -152,6 +169,7 @@ func cmdDoctor(ctx context.Context, e *env) error {
 	quiet := fs.Bool("quiet", false, "only the lines that are not ok, and the summary")
 	group := fs.String("group", "", "only these groups (comma-separated): "+strings.Join(doctorGroups, ", "))
 	setupOnly := fs.Bool("setup-only", false, "only the set-up checks, printed as before")
+	deep := fs.Bool("deep", false, "also ffprobe the newest closed segment of each camera")
 	pos, err := parseFlags(fs, e.args)
 	if err != nil {
 		return err
@@ -180,10 +198,14 @@ func cmdDoctor(ctx context.Context, e *env) error {
 	if e.doctor != nil {
 		e.doctor(&d)
 	}
-	r := &drun{e: e, d: d, cache: map[string]any{}}
+	r := &drun{e: e, d: d, deep: *deep, cache: map[string]*onceValue{}}
 	start := d.now()
 	r.now = start
 	r.doc, r.running, r.why = app.Running(e.paths, e.cfg, start)
+	r.downWhy = r.why
+	if errors.Is(readErr(e), status.ErrNoStatus) {
+		r.downWhy = "no status file has been written yet"
+	}
 	rep := doctorReport{Schema: 1, Root: e.paths.Root, Checks: r.runAll(ctx, sel)}
 	for _, g := range doctorGroups {
 		if sel[g] {
@@ -230,7 +252,7 @@ func (r *drun) runAll(ctx context.Context, sel map[string]bool) []check {
 		case runtimeGroups[c.group] && !r.running:
 			if !skipped[c.group] {
 				skipped[c.group] = true
-				results[i] = []check{mk(lvWarn, c.group, "not checked: nothing is running (%s)", r.why).fix("holocron up --detach")}
+				results[i] = []check{mk(lvWarn, c.group, "not checked: nothing is running (%s)", r.downWhy).fix("holocron up --detach")}
 				results[i][0].ID = c.group + ".running"
 			}
 		case c.concurrent:

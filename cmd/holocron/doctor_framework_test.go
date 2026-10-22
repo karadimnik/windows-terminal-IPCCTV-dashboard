@@ -207,6 +207,7 @@ func (r *rig) doctorTools(more func(*doctorDeps)) {
 	r.doctor = func(d *doctorDeps) {
 		d.ffmpeg = func(string) (ffmpeg.Version, error) { return ffmpeg.ParseVersion("ffmpeg version 7.1 Copyright") }
 		d.mediamtx = func(string) check { return mk(lvOK, "mediamtx", "v1.21.2") }
+		d.sleep = func(context.Context, time.Duration) error { return nil }
 		if more != nil {
 			more(d)
 		}

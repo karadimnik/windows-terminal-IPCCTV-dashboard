@@ -72,7 +72,7 @@ func TestLiveSizeOfAFileAnotherProcessWrites(t *testing.T) {
 			}
 		}
 	}
-	live, err := liveSize(path)
+	live, err := LiveSize(path)
 	if err != nil || live != 1<<20 {
 		t.Fatalf("live size %d (%v), want %d", live, err, 1<<20)
 	}
