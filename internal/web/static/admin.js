@@ -11,6 +11,20 @@
 
 (function () {
   const TEMPLATE = `
+  <div class="panel apanel" id="aHealthPanel">
+    <header><h2>Health</h2><span class="hbadge off" id="aHBadge">checking…</span></header>
+    <div class="form">
+      <div class="actions">
+        <button class="btn" id="aHRefresh" type="button">Refresh</button>
+        <label class="acheck"><input type="checkbox" id="aHAuto"> auto refresh every 30 s</label>
+      </div>
+      <p class="hint" id="aHNote" role="status"></p>
+      <div class="hint hbad hide" id="aHError"></div>
+      <div id="aHGroups"></div>
+      <p class="hint">The same checks as <code>holocron doctor</code>, run inside the web app; a line in warn or fail comes with the command that fixes it. The environment line describes the web app's own environment, not your window's.</p>
+    </div>
+  </div>
+
   <div class="panel apanel" id="aUsersPanel">
     <header><h2>Users</h2><span class="muted" id="aUsersCount"></span></header>
     <div class="ascroll"><table class="ausers">
@@ -142,6 +156,142 @@
       say(noteId, "bad", "The server could not be reached: " + (err.message || err));
       return null;
     }
+  }
+
+  // ---------------------------------------------------------------- health
+  // The same document `holocron doctor --json` prints (GET /api/admin/health). Every text from it
+  // (file names, log lines, fix commands) goes in with textContent, never as markup.
+  const VERDICT = { HEALTHY: "good", DEGRADED: "warn", BROKEN: "crit", "NOT RUNNING": "off" };
+  const HEALTH_EVERY_MS = 30000;
+  const HEALTH_GIVE_UP_MS = 20000; // the server answers within 13 s
+  let healthBusy = false;
+  let healthAt = 0;
+  let healthTimer = null;
+  const healthOpen = new Map(); // group -> what the user chose; absent: open only when it has a warn or fail
+
+  function node(tag, cls, content) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (content !== undefined) n.textContent = content;
+    return n;
+  }
+
+  function setBadge(verdict) {
+    const badge = el("aHBadge");
+    badge.className = "hbadge " + (VERDICT[verdict] || "off");
+    badge.textContent = verdict || "unknown";
+  }
+
+  async function copyText(button, value) {
+    let done = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(value); done = true; }
+    } catch (err) { /* fall back below */ }
+    if (!done) {
+      // a plain-http page (the PC's loopback address is secure, a LAN one is not) has no clipboard API
+      const area = document.createElement("textarea");
+      area.value = value;
+      area.setAttribute("readonly", "");
+      area.className = "hcopyarea";
+      document.body.appendChild(area);
+      area.select();
+      try { done = document.execCommand("copy"); } catch (err) { done = false; }
+      area.remove();
+    }
+    button.textContent = done ? "Copied" : "Select it by hand";
+    setTimeout(() => { button.textContent = "Copy"; }, 1800);
+  }
+
+  function checkRow(c) {
+    const row = node("div", "hcheck");
+    row.appendChild(node("span", "hlevel " + (["ok", "info", "warn", "fail"].includes(c.level) ? c.level : "info"), c.level));
+    row.appendChild(node("span", "htitle", c.title));
+    row.appendChild(node("span", "hdetail", c.detail));
+    if (c.fix && (c.level === "warn" || c.level === "fail")) {
+      const fix = node("div", "hfix");
+      fix.appendChild(node("pre", "hfixtext", c.fix));
+      const copy = node("button", "btn small", "Copy");
+      copy.type = "button";
+      copy.onclick = () => copyText(copy, c.fix);
+      fix.appendChild(copy);
+      row.appendChild(fix);
+    }
+    return row;
+  }
+
+  function renderHealth(rep, checkedAt) {
+    el("aHError").classList.add("hide");
+    const sum = rep.summary || {};
+    setBadge(sum.verdict);
+    const counts = [sum.failures + " failure(s)", sum.warnings + " warning(s)", sum.ok + " ok", sum.info + " info"];
+    const when = checkedAt ? new Date(checkedAt) : null;
+    el("aHNote").textContent = (when && !isNaN(when) ? "Checked " + when.toLocaleTimeString() + ", took " + ((sum.elapsedMs || 0) / 1000).toFixed(1) + " s. " : "") + counts.join(", ") + ".";
+    const box = el("aHGroups");
+    box.textContent = "";
+    for (const group of rep.groups || []) {
+      const checks = (rep.checks || []).filter((c) => c.group === group);
+      const bad = checks.filter((c) => c.level === "warn" || c.level === "fail");
+      const det = node("details", "hgroup");
+      det.open = healthOpen.has(group) ? healthOpen.get(group) : bad.length > 0;
+      const head = node("summary", "hhead");
+      head.appendChild(node("span", "hname", group));
+      head.appendChild(node("span", "hcount " + (checks.some((c) => c.level === "fail") ? "fail" : bad.length ? "warn" : "ok"),
+        bad.length ? bad.length + " to look at" : checks.length + " ok"));
+      head.onclick = () => healthOpen.set(group, !det.open); // the click comes before the toggle
+      det.appendChild(head);
+      for (const c of checks) det.appendChild(checkRow(c));
+      box.appendChild(det);
+    }
+  }
+
+  function healthFailed(message) {
+    setBadge("");
+    el("aHNote").textContent = "";
+    el("aHGroups").textContent = "";
+    const box = el("aHError");
+    box.textContent = message;
+    box.classList.remove("hide");
+  }
+
+  async function loadHealth() {
+    if (healthBusy) return;
+    healthBusy = true;
+    const button = el("aHRefresh");
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    el("aHNote").textContent = "checking… up to 13 s";
+    const abort = new AbortController();
+    const giveUp = setTimeout(() => abort.abort(), HEALTH_GIVE_UP_MS);
+    try {
+      const response = await fetch("api/admin/health", { cache: "no-store", signal: abort.signal });
+      const raw = await response.text();
+      if (!response.ok) {
+        healthFailed("The health check failed: HTTP " + response.status + " " + raw.trim().slice(0, 400));
+        return;
+      }
+      const payload = JSON.parse(raw);
+      renderHealth(payload.health || {}, payload.checkedAt);
+      healthAt = Date.now();
+    } catch (err) {
+      healthFailed("The health check could not be completed: " + (abort.signal.aborted ? "no answer within " + HEALTH_GIVE_UP_MS / 1000 + " s" : (err.message || err)));
+    } finally {
+      clearTimeout(giveUp);
+      healthBusy = false;
+      button.disabled = false;
+      button.removeAttribute("aria-busy");
+    }
+  }
+
+  // The timer only asks while the page is visible and the Admin tab is the one shown.
+  function healthTick() {
+    const section = document.querySelector('section[data-tab="admin"]');
+    if (document.hidden || section.classList.contains("hide")) return;
+    loadHealth();
+  }
+
+  function setHealthAuto() {
+    clearInterval(healthTimer);
+    healthTimer = el("aHAuto").checked ? setInterval(healthTick, HEALTH_EVERY_MS) : null;
   }
 
   // ---------------------------------------------------------------- users
@@ -420,11 +570,18 @@
     el("aLevelForm").onsubmit = setLevel;
     el("aAutoOn").onclick = () => setAutostart(true);
     el("aAutoOff").onclick = () => setAutostart(false);
+    el("aHRefresh").onclick = loadHealth;
+    el("aHAuto").onchange = setHealthAuto;
+    document.addEventListener("visibilitychange", () => {
+      // back on the page: catch up at once when the last run is older than one interval
+      if (!document.hidden && healthTimer && Date.now() - healthAt >= HEALTH_EVERY_MS) healthTick();
+    });
     built = true;
   }
 
   function show() {
     if (!built) build();
+    loadHealth();
     loadUsers();
     loadCamera();
     loadKeys();

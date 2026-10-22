@@ -385,6 +385,39 @@ body.authpage{display:grid;place-items:center;min-height:100vh;padding:18px}
 .awarn{color:#f0c27a !important}
 .abreak{word-break:break-all}
 .acheck{display:flex;gap:8px;align-items:center;font-size:13px;color:var(--ink-2)}
+
+/* Health section */
+.hbadge{margin-left:auto;border:1px solid var(--line);border-radius:999px;padding:2px 12px;font-size:12px;font-weight:600;letter-spacing:.03em;white-space:nowrap}
+.hbadge.good{color:#7ddc7d;border-color:#2c5a33;background:#16231a}
+.hbadge.warn{color:#f2cd7a;border-color:#5a4a1f;background:#3b3220}
+.hbadge.crit{color:#f09a9a;border-color:#5a2b2b;background:#2a1616}
+.hbadge.off{color:var(--ink-2);background:var(--surface-2)}
+.hbad{color:#f09a9a;overflow-wrap:anywhere;white-space:pre-wrap}
+.hgroup{border:1px solid var(--line-soft);border-radius:8px;margin-bottom:8px;overflow:hidden}
+.hhead{display:flex;align-items:center;gap:10px;padding:9px 12px;cursor:pointer;background:var(--surface-2);list-style:none}
+.hhead::-webkit-details-marker{display:none}
+.hhead::before{content:"\25B8";color:var(--ink-3);flex:none}
+.hgroup[open]>.hhead::before{content:"\25BE"}
+.hname{font-weight:600;text-transform:capitalize}
+.hcount{margin-left:auto;font-size:12px;color:var(--ink-3)}
+.hcount.warn{color:#f2cd7a} .hcount.fail{color:#f09a9a}
+.hcheck{display:grid;grid-template-columns:3.4em 9.5em minmax(0,1fr);gap:4px 10px;padding:8px 12px;border-top:1px solid var(--line-soft);align-items:baseline}
+.hlevel{font:600 11px/1.6 var(--mono);text-transform:uppercase;text-align:center;border-radius:5px;padding:0 4px;border:1px solid var(--line);color:var(--ink-2)}
+.hlevel.ok{color:#7ddc7d;border-color:#2c5a33}
+.hlevel.warn{color:#f2cd7a;border-color:#5a4a1f;background:#3b3220}
+.hlevel.fail{color:#f09a9a;border-color:#5a2b2b;background:#2a1616}
+.htitle{font-weight:500;overflow-wrap:anywhere}
+.hdetail{color:var(--ink-2);overflow-wrap:anywhere;min-width:0}
+.hfix{grid-column:1/-1;display:flex;gap:8px;align-items:flex-start;margin-top:2px}
+.hfixtext{flex:1;min-width:0;margin:0;padding:7px 9px;background:var(--surface-0);border:1px solid var(--line-soft);border-radius:6px;font:12px/1.5 var(--mono);color:var(--ink);white-space:pre-wrap;overflow-wrap:anywhere}
+.hcopyarea{position:fixed;left:-9999px;top:0}
+@media(max-width:760px){
+  .hcheck{grid-template-columns:3.4em minmax(0,1fr)}
+  .hdetail{grid-column:1/-1}
+  .hfix{flex-direction:column;align-items:stretch}
+  .hfix .btn{min-height:36px;align-self:flex-start}
+}
+
 @media(max-width:760px){
   .aform{grid-template-columns:1fr}
   .abtns .btn{min-height:36px}

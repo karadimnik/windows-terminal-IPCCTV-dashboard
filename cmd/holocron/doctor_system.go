@@ -257,6 +257,9 @@ func envFix(names ...string) string {
 // sysEnv: variables in this window that change what holocron does here (values never shown).
 func sysEnv(_ context.Context, r *drun) []check {
 	get := r.e.opts.Getenv
+	if r.inWeb {
+		return sysWebEnv(get)
+	}
 	var cs []check
 	if get(app.SandboxEnv) != "" {
 		cs = append(cs, mk(lvWarn, "environment", "%s is set in this window: every holocron started here refuses a root that could be the Operator's (tests only)", app.SandboxEnv).fix("%s", envFix(app.SandboxEnv)))
@@ -274,6 +277,21 @@ func sysEnv(_ context.Context, r *drun) []check {
 		cs = append(cs, mk(lvOK, "environment", "no %s, %s or %s in this window", app.SandboxEnv, app.EnvCameraUser, app.EnvCameraPassword))
 	}
 	return cs
+}
+
+// sysWebEnv is the environment line inside the web role: the same variables, but they are the web
+// process's, not the Operator's shell's, so it is context (info) and never a warning.
+func sysWebEnv(get func(string) string) []check {
+	var set []string
+	for _, k := range []string{app.SandboxEnv, app.EnvCameraUser, app.EnvCameraPassword} {
+		if get(k) != "" {
+			set = append(set, k)
+		}
+	}
+	if len(set) == 0 {
+		return []check{mk(lvInfo, "environment", "environment of the web role: no %s, %s or %s", app.SandboxEnv, app.EnvCameraUser, app.EnvCameraPassword)}
+	}
+	return []check{mk(lvInfo, "environment", "environment of the web role: %s set (values not shown); run holocron doctor in your own window to check that one", strings.Join(set, " and "))}
 }
 
 // sandboxRefused is doctor's whole report when the sandbox guard refused the root: one failure

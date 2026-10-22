@@ -85,6 +85,7 @@ var routeAccess = map[string]access{
 	"POST /api/admin/log/level":      accessAdmin,
 	"GET /api/admin/autostart":       accessAdmin,
 	"POST /api/admin/autostart":      accessAdmin,
+	"GET /api/admin/health":          accessAdmin,
 
 	// loopback only (the first-run page): never registered on the LAN listener
 	"GET /setup":           accessAdmin,

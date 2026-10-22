@@ -28,8 +28,8 @@ func serveAdmin(t *testing.T, r *rig) string {
 	}
 	lg, _ := app.NewLogger(app.LogOptions{Paths: paths, Config: cfg, Getenv: func(string) string { return "trace" }})
 	t.Cleanup(func() { lg.Close() })
-	e := &env{opts: app.Options{Root: r.root, ConfigPath: r.cfg, Platform: plat, Getenv: func(string) string { return "" }}, paths: paths, cfg: cfg, lg: lg,
-		out: io.Discard, errw: io.Discard, auto: *r.auto, inspector: fakeInspector{}, dial: func(string) (ctl, error) { return r.ctl, nil }}
+	e := &env{opts: app.Options{Root: r.root, ConfigPath: r.cfg, Platform: plat, Getenv: func(k string) string { return r.extraEnv[k] }}, paths: paths, cfg: cfg, lg: lg,
+		out: io.Discard, errw: io.Discard, auto: *r.auto, inspector: r.inspector(), doctor: r.doctorSeams(), dial: func(string) (ctl, error) { return r.ctl, nil }}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +37,7 @@ func serveAdmin(t *testing.T, r *rig) string {
 	addr := l.Addr().String()
 	l.Close()
 	o := web.Options{Config: web.Config{Listen: addr, ArchiveRoot: paths.Root, CamerasPath: paths.Cameras, ConfigPath: paths.Config,
-		AuthDir: cfg.Web.AuthDir, TLSDir: filepath.Join(r.base(), "tls")}, Logs: lg, GoSystem: true, Settings: webSettings{e: e}, Admin: webAdmin{e: e}}
+		AuthDir: cfg.Web.AuthDir, TLSDir: filepath.Join(r.base(), "tls")}, Logs: lg, GoSystem: true, Settings: webSettings{e: e}, Admin: newWebAdmin(e)}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- web.Run(ctx, o) }()
