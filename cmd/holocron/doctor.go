@@ -130,7 +130,11 @@ type drun struct {
 	why     string // app.Running's reason
 	downWhy string // the same for the not-running notice of the runtime groups
 	deep    bool
-	sem     chan struct{} // the network probes' pool
+	// inWeb: the run is the Admin tab's, inside the web role. The sandbox guard cannot fire (the
+	// role started), the environment describes the web process, not the Operator's shell (info),
+	// and the census never counts the web role: os.Getpid() and its children are known processes.
+	inWeb bool
+	sem   chan struct{} // the network probes' pool
 
 	mu    sync.Mutex
 	cache map[string]*onceValue
@@ -214,12 +218,30 @@ func cmdDoctor(ctx context.Context, e *env) error {
 		}
 		return quietFail("%v", e.sandboxErr)
 	}
+	rep := buildDoctor(ctx, e, sel, *deep, false)
+	switch {
+	case e.json:
+		printJSON(e.out, rep)
+	case *setupOnly:
+		printSetupOnly(e.out, rep.Checks)
+	default:
+		printDoctor(e.out, rep, *quiet)
+	}
+	if n := rep.Summary.Failures; n > 0 {
+		return quietFail("%d doctor check(s) failed", n)
+	}
+	return nil
+}
+
+// buildDoctor runs the selected groups and returns the document `doctor --json` prints. inWeb: it
+// runs inside the web role for the Admin tab's Health section (webadmin.go), see drun.inWeb.
+func buildDoctor(ctx context.Context, e *env, sel map[string]bool, deep, inWeb bool) doctorReport {
 	d := defaultDoctorDeps()
 	d.platform = e.opts.Platform
 	if e.doctor != nil {
 		e.doctor(&d)
 	}
-	r := &drun{e: e, d: d, deep: *deep, cache: map[string]*onceValue{}, sem: make(chan struct{}, max(d.parallel, 1))}
+	r := &drun{e: e, d: d, deep: deep, inWeb: inWeb, cache: map[string]*onceValue{}, sem: make(chan struct{}, max(d.parallel, 1))}
 	start := d.now()
 	r.now = start
 	r.doc, r.running, r.why = app.Running(e.paths, e.cfg, start)
@@ -234,18 +256,7 @@ func cmdDoctor(ctx context.Context, e *env) error {
 		}
 	}
 	rep.Summary = summarize(rep.Checks, r.running, d.now().Sub(start))
-	switch {
-	case e.json:
-		printJSON(e.out, rep)
-	case *setupOnly:
-		printSetupOnly(e.out, rep.Checks)
-	default:
-		printDoctor(e.out, rep, *quiet)
-	}
-	if n := rep.Summary.Failures; n > 0 {
-		return quietFail("%d doctor check(s) failed", n)
-	}
-	return nil
+	return rep
 }
 
 func contains(list []string, s string) bool {
