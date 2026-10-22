@@ -67,6 +67,7 @@ Update this file in the same push as each merge: `git log --first-parent --merge
 | 6445ed7 | 2026-10-22 | Merge Holocron W18: quickstart, cheat sheet, AI reference with llms.txt and AGENTS.md, README front door, drift guard |  |
 | 81edcbc | 2026-10-22 | Merge Holocron W19: doctor is a full health check (recording, connections, live, web, storage, system) with fix lines and JSON |  |
 | be8a0ef | 2026-10-22 | Merge Holocron W19b: doctor growth check waits for a burst, a development ffmpeg build is info |  |
+| 54bace1 | 2026-10-22 | Merge Holocron W20: Health section in the Admin tab, the same result as holocron doctor |  |
 
 ## Direct commits on the integration branch (advisor, one concern each)
 
@@ -118,3 +119,4 @@ Update this file in the same push as each merge: `git log --first-parent --merge
 | 7ff18e3 | 2026-10-22 | docs: ledger gains the W17 merge |
 | ed57b1a | 2026-10-22 | docs: ledger gains the W18 merge |
 | 415feed | 2026-10-22 | docs: ledger gains the W19 merge |
+| db7a4a6 | 2026-10-22 | docs: ledger gains the W19b merge |
