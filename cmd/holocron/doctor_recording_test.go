@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -178,6 +179,105 @@ func TestDoctorGrowthCatchesAStalledCamera(t *testing.T) {
 		if c.name == "frozen" {
 			t.Logf("incident fixture (stalled camera):\n%s\n     fix: %s", l, fix)
 		}
+	}
+}
+
+// The Matroska muxer writes in bursts: a file quiet for the first 2 s is not stalled. It is sampled
+// again every 2 s for up to 10 s; the first growth ends the wait, and a frozen file costs 10 s, no more.
+func TestDoctorGrowthWaitsForABurst(t *testing.T) {
+	now := time.Now()
+	for _, c := range []struct {
+		name       string
+		growOn     int // the sleep after which the file grows; 0: never
+		wantSleeps int
+		want       string
+	}{
+		{"first sample", 1, 1, "ok   Front          recording: "},
+		{"third sample", 3, 3, "ok   Front          recording: "},
+		{"last sample", 5, 5, "ok   Front          recording: "},
+		{"frozen", 0, 5, "fail Front          not recording: no new data for "},
+		{"frozen after a rollover", 0, 5, "warn Front          "},
+	} {
+		r := newRig(t)
+		r.running()
+		closed := 10 * time.Minute
+		if c.name == "frozen after a rollover" {
+			closed = 20 * time.Second
+		}
+		r.segment("Front", now.Add(-closed-time.Minute), now.Add(-closed), 4000)
+		cur := r.segment("Front", now.Add(-closed), now.Add(-closed+time.Second), 1000)
+		var sleeps int
+		var slept time.Duration
+		r.doctorTools(func(d *doctorDeps) {
+			d.sleep = func(_ context.Context, w time.Duration) error {
+				sleeps++
+				slept += w
+				if sleeps == c.growOn {
+					f, _ := os.OpenFile(cur, os.O_APPEND|os.O_WRONLY, 0)
+					f.Write(make([]byte, 5000))
+					f.Close()
+				}
+				return nil
+			}
+		})
+		out, _, _ := r.run("doctor", "--group", "recording")
+		l, _ := growthLine(out[strings.Index(out, "== recording =="):])
+		if !strings.HasPrefix(l, c.want) {
+			t.Errorf("%s: %q\n%s", c.name, l, out)
+		}
+		if c.growOn == 0 && !strings.Contains(l, "did not grow in 10 s") {
+			t.Errorf("%s: the window is not 10 s: %q", c.name, l)
+		}
+		if sleeps != c.wantSleeps || slept > 10*time.Second {
+			t.Errorf("%s: %d sleeps, %s slept; want %d sleeps within 10 s", c.name, sleeps, slept, c.wantSleeps)
+		}
+	}
+}
+
+// Six cameras share each wait: three frozen ones cost 10 s in all, not 30, and the ones that grow
+// are reported as soon as they do.
+func TestDoctorGrowthSharesTheWaitBetweenCameras(t *testing.T) {
+	now := time.Now()
+	names := []string{"Cam1", "Cam2", "Cam3", "Cam4", "Cam5", "Cam6"}
+	var cams []string
+	for _, n := range names {
+		cams = append(cams, `{"Name":"`+n+`","IP":"192.0.2.10","Record":true}`)
+	}
+	r := newRig(t)
+	if err := os.WriteFile(r.cameras(), []byte("["+strings.Join(cams, ",")+"]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.running()
+	cur := map[string]string{}
+	for _, n := range names {
+		r.segment(n, now.Add(-11*time.Minute), now.Add(-10*time.Minute), 4000)
+		cur[n] = r.segment(n, now.Add(-10*time.Minute), now.Add(-10*time.Minute+time.Second), 1000)
+	}
+	var sleeps int
+	var slept time.Duration
+	r.doctorTools(func(d *doctorDeps) {
+		d.sleep = func(_ context.Context, w time.Duration) error {
+			sleeps++
+			slept += w
+			if sleeps == 2 {
+				for _, n := range names[:3] {
+					f, _ := os.OpenFile(cur[n], os.O_APPEND|os.O_WRONLY, 0)
+					f.Write(make([]byte, 5000))
+					f.Close()
+				}
+			}
+			return nil
+		}
+	})
+	out, _, _ := r.run("doctor", "--group", "recording")
+	if n := len(regexp.MustCompile(`(?m)^ok   Cam\d +recording: `).FindAllString(out, -1)); n != 3 {
+		t.Errorf("%d growing cameras reported:\n%s", n, out)
+	}
+	if n := strings.Count(out, "not recording: no new data for "); n != 3 || !strings.Contains(out, "did not grow in 10 s") {
+		t.Errorf("%d stalled cameras reported:\n%s", n, out)
+	}
+	if sleeps != 5 || slept != 10*time.Second {
+		t.Errorf("%d waits, %s in all; want 5 waits, 10 s", sleeps, slept)
 	}
 }
 
