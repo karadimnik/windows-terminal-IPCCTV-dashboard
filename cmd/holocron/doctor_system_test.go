@@ -132,6 +132,7 @@ func TestDoctorLogAndEnvironment(t *testing.T) {
 			t.Errorf("no %q in\n%s", w, text)
 		}
 	}
+	r.useFileSecrets()
 	r.noCreds = true
 	if text := textOf(t, mustRun(r, "--json", "doctor", "--group", "system")); !strings.Contains(text, "system.env ok   environment") {
 		t.Errorf("%s", text)

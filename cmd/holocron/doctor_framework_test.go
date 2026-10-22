@@ -74,6 +74,7 @@ func TestDoctorExitCodeFollowsFailuresNotWarnings(t *testing.T) {
 	if lines := strings.Split(strings.TrimSpace(out), "\n"); !strings.HasPrefix(lines[len(lines)-1], "DEGRADED (") {
 		t.Errorf("summary:\n%s", out)
 	}
+	r.useFileSecrets() // never this machine's credential store
 	r.noCreds = true
 	out, _, code = r.run("doctor", "--group", "setup")
 	if code != 1 || !strings.Contains(out, "fail credentials") || !strings.Contains(out, "fix: holocron secret set camera.user") || !strings.Contains(out, "BROKEN (1 failure(s)") {
@@ -118,6 +119,7 @@ func TestDoctorGroupLimitsAndRejectsUnknownGroups(t *testing.T) {
 func TestDoctorSetupOnlyIsTheOldOutput(t *testing.T) {
 	r := newRig(t)
 	r.doctorTools(nil)
+	r.useFileSecrets() // never this machine's credential store
 	r.noCreds = true
 	out, _, code := r.run("doctor", "--setup-only")
 	if code != 1 || strings.Contains(out, "==") || strings.Contains(out, "fix:") || strings.Contains(out, "BROKEN") ||

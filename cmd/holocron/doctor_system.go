@@ -114,9 +114,6 @@ func (r *drun) strays(known map[int]bool) []check {
 			path = def
 		}
 		if res, err := r.d.lookPath(path); err == nil {
-			if abs, err := filepath.Abs(res); err == nil {
-				res = abs
-			}
 			exes[res] = kind
 		}
 	}
