@@ -301,3 +301,26 @@ The shadow's DST behaviour is covered by the comparison's handling of changing `
 not by a run across a clock change; the next one is 25 Oct 2026. The 3-day shadow (21 to 23 Oct 2026) ends before it, so that night is NOT covered by a
 run; cut over after 26 Oct or extend the shadow past it. The web app, the live view and the alerts are not part of the shadow. Real cameras, sleep and resume are
 Operator checks.
+
+## Result of the first run (21 Oct 2026 20:38 to 22 Oct 10:00, Athens)
+
+Two cameras (A: 2560x1440 at 15 fps, B: 2304x1296 at 25 fps), 13.4 hours, one midnight rollover, read through the PowerShell
+system's relay with `RelayExternal`. `holocron down` stopped it with 0 survivors. `holocron archive compare` against the
+PowerShell archive:
+
+| | Camera A | Camera B |
+|---|---|---|
+| Segments compared | 54 pairs | 53 pairs |
+| Start times | all +0.0 s | all +0.0 s |
+| Size new/old | median 0.999, min 0.999, max 1.000 | median 0.999, min 0.999, max 1.002 |
+| Durations, layout, audio | equal, h264 + pcm_alaw 8000 Hz mono | equal, same |
+| Result | 1 difference, explained below | EQUAL within tolerances |
+
+The one difference: at 06:05 the relay dropped camera A's path (404) for both systems. Holocron's ffmpeg exited and the
+supervisor restarted it after 3 s and then 6 s; the gap was 25.3 s against the PowerShell recorder's 21.3 s, so the first
+segment after the outage started 4 s later and is 2.3 s shorter than the old one (tolerance 2 s). Both end on the same
+clock boundary. It is the restart backoff, not a recording fault.
+
+Not covered by this run: the pruner acting on a full cap (it first acts after 1.5 days), the 25 Oct 2026 clock change, the
+four cameras that were not shadowed, the live view and the alerts. The pilot and run footage stays in `D:\holocron-shadow`
+until the Operator deletes it.
