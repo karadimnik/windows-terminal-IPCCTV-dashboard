@@ -168,6 +168,10 @@ func (a *API) liveSettings() liveSettings {
 	return settings
 }
 
+// LiveSecretFileOf is the live-view secret file a web role started with cfg opens for its WHEP
+// proxy (`holocron doctor` logs in with it to prove the live instance accepts it). Read only.
+func LiveSecretFileOf(cfg Config) string { return (&API{cfg: cfg}).liveSettings().secretPath }
+
 // liveSnapshot reads what the supervisor knows about live view. Everything
 // comes from the redacted status.json; the path names stay inside this
 // package.

@@ -11,6 +11,7 @@ the code, the embedded `static/` and the tests are the ones that were there. Sec
     func Main(args) int                     // camui.exe's whole main (cmd/camui): the above, text records on stdout, SIGINT/SIGTERM
     type Options struct{ Config; Logs cli.LogSource; Controller; Launch *HolocronLaunch; GoSystem bool; StopFile string; ... }
     func LoginUsers(authDir) (int, error)   // `holocron status`: does a login exist
+    func LiveSecretFileOf(cfg Config) string // the live secret file the web role's WHEP proxy reads (`holocron doctor`'s login probe)
     func Users(authDir, *slog.Logger) *UserAdmin   // `holocron user`: Add, AddRole, SetPassword, SetRole, Remove, List (no hashes), Unlock (admin.go); ErrUserExists, ErrNoSuchUser, ErrLastAdmin, IsInputError
     type AdminTools interface{ ConfigKeys; SetConfigKey; CameraLogin; SetCameraLogin; PrunePreview; ArchiveStats; LogLevels; SetLogLevel; Autostart; SetAutostart }  // Options.Admin (admin_api.go)
     func CAIfPresent(tlsDir) (CAInfo, bool, error)  // the CA without creating one
