@@ -125,8 +125,8 @@ is not in the repository.
 
    `up --detach` waits for an honest start and prints the pids. Started from a WSL shell or another job that forbids breakaway it
    warns that the background copy "may end with the terminal"; in the pilot it did not (it ran 31 minutes after the shell
-   returned), but start it from a normal PowerShell window for the long run. `doctor` reports `warn` for ffmpeg being a development build and
-   for the root not yet claimed; both are expected. The supervisor claims the root (writes the ownership marker
+   returned), but start it from a normal PowerShell window for the long run. `doctor` reports `info` for ffmpeg being a development build and
+   `warn` for the root not yet claimed; both are expected. The supervisor claims the root (writes the ownership marker
    `_state\archive-owner.json`) at its first start.
 
 Every later command needs the same `--config`. `holocron down` stops the shadow in order and proves it (exit 1 and the survivors

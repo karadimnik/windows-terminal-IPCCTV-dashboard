@@ -103,7 +103,7 @@ dir Env:HOLOCRON*
 & C:\ffmpeg\bin\ffmpeg.exe -version
 ```
 
-**Expect:** the first line shows version 5.0 or later (`doctor` fails below 5.0 and a cutover would stop with exit 21). A development build number is accepted with a `warn` from `doctor` (shadow.md). MediaMTX is the same `C:\mediamtx\mediamtx.exe` the old system runs; Holocron does not replace it. **Stop if:** older than 5.0.
+**Expect:** the first line shows version 5.0 or later (`doctor` fails below 5.0 and a cutover would stop with exit 21). A development build number is accepted: `doctor` shows it as `info ffmpeg` (not a warning, no fix line). MediaMTX is the same `C:\mediamtx\mediamtx.exe` the old system runs; Holocron does not replace it. **Stop if:** older than 5.0.
 
 ### P6. Disk
 
@@ -172,7 +172,7 @@ The `secret import` is YOURS to run, as the Windows user who owns `camera_creds.
 **Expect:**
 - `config validate`: `ok   ...holocron.config.json` and `ok   ...cameras.json (1 camera(s))`; `warn` lines for unknown keys are fine.
 - `secret import`: `imported camera.user and camera.password`. `secret list`: `2 secret(s) in the keyring store (names only)` (or `file store`) with `camera.password` and `camera.user`. The values are never shown.
-- `doctor`: no line starting `fail`. In this sandbox expect `ok` for configuration, ffmpeg, mediamtx, the two relay ports (`tcp 127.0.0.1:18554 is free`), folders and clock; `ok credentials` (`a camera login is present`); `warn archive root` ("not claimed yet": normal for a new root); `warn status` (no status file yet); `ok autostart` (not installed) and `ok old tasks` (the three, `disabled`). A `warn` on ffmpeg for a development build is expected.
+- `doctor`: no line starting `fail`. In this sandbox expect `ok` for configuration, ffmpeg, mediamtx, the two relay ports (`tcp 127.0.0.1:18554 is free`), folders and clock; `ok credentials` (`a camera login is present`); `warn archive root` ("not claimed yet": normal for a new root); `warn status` (no status file yet); `ok autostart` (not installed) and `ok old tasks` (the three, `disabled`). `info ffmpeg` for a development build is expected (it is not counted as a warning).
 - `install --dry-run`: prints `PowerShell system tasks (read only, never changed): IPCCTV-Recorder disabled, IPCCTV-Dashboard disabled, IPCCTV-Ui disabled`, the `schtasks` commands and the task XML, and `dry run: nothing is changed`. Look at the XML once: it should run `holocron.exe --config ... up` and no old script.
 
 **Stop if:** `secret import` fails (a different Windows account, a missing file, a Credential Manager that is unusable - the last falls back to the file store under `auto`); any `fail` from `doctor`; `install --dry-run` says one of the old tasks is ENABLED (you wanted them disabled: find out why before going on). Then close this window.

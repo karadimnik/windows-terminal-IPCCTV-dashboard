@@ -1,11 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+
+	"holocron/internal/ffmpeg"
 )
 
 // setConfig adds top-level keys (a JSON fragment such as `"A": 1,`) to the rig's configuration.
@@ -125,5 +128,46 @@ func TestDoctorSaysFreeWebPortIsFree(t *testing.T) {
 	out, _, _ := r.run("doctor")
 	if !strings.Contains(out, "ok   web listen") || warnLine(out, "web listen") != "" {
 		t.Errorf("free port:\n%s", out)
+	}
+}
+
+// A development build is accepted by the product (its number is unknown, 5.0 or later is assumed):
+// info, no fix, not a warning. A release older than 5.0 and an unreadable version stay failures.
+func TestDoctorFfmpegVersionLevels(t *testing.T) {
+	for _, c := range []struct {
+		name, version, level string
+		fix                  bool
+	}{
+		{"development build", "N-127579-g5cb9fcd211-20261016", lvInfo, false},
+		{"dated development build", "2026-07-06-git-c6498178bb-essentials_build", lvInfo, false},
+		{"release", "7.1.1-essentials_build", lvOK, false},
+		{"too old", "4.2.7", lvFail, true},
+		{"old development build", "git-2020-05-01-abcdef0", lvFail, true},
+		{"unreadable", "banana", lvFail, true},
+	} {
+		r := newRig(t)
+		r.doctorTools(func(d *doctorDeps) {
+			d.ffmpeg = func(string) (ffmpeg.Version, error) {
+				return ffmpeg.ParseVersion("ffmpeg version " + c.version + " Copyright")
+			}
+		})
+		var rep doctorReport
+		out, _, _ := r.run("doctor", "--json", "--group", "setup")
+		if err := json.Unmarshal([]byte(out), &rep); err != nil {
+			t.Fatalf("%s: %v\n%s", c.name, err, out)
+		}
+		var got *check
+		for i, ck := range rep.Checks {
+			if ck.ID == "setup.ffmpeg" {
+				got = &rep.Checks[i]
+			}
+		}
+		if got == nil || got.Level != c.level || (got.Fix != "") != c.fix {
+			t.Errorf("%s: %+v, want level %s and fix %v", c.name, got, c.level, c.fix)
+			continue
+		}
+		if c.level == lvInfo && !strings.HasSuffix(got.Detail, "development build; its release number is unknown, assumed 5.0 or later") {
+			t.Errorf("%s: detail %q", c.name, got.Detail)
+		}
 	}
 }
