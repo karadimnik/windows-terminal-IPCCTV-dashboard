@@ -11,6 +11,7 @@ One page of lookups. First time here: [holocron-quickstart.md](holocron-quicksta
 | start in this window (closing it stops everything) | `holocron up` |
 | see status as JSON | `holocron status --json` |
 | check everything when in doubt (recording, live view, connections, web, disk, processes) | `holocron doctor` ([health check](#health-check)) |
+| the same check without a terminal | the web app's Admin tab, **Health** section (admin only; same checks, fixes with a Copy button) |
 | only the problems / one group / for a script | `holocron doctor --quiet` / `holocron doctor --group recording` / `holocron doctor --json` |
 | add a camera (records at once with `--record`) | `holocron cam add --name Garage --ip 192.168.1.50:8554 --record` |
 | remove a camera (recordings stay) | `holocron cam remove Garage` |

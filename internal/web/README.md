@@ -13,7 +13,7 @@ the code, the embedded `static/` and the tests are the ones that were there. Sec
     func LoginUsers(authDir) (int, error)   // `holocron status`: does a login exist
     func LiveSecretFileOf(cfg Config) string // the live secret file the web role's WHEP proxy reads (`holocron doctor`'s login probe)
     func Users(authDir, *slog.Logger) *UserAdmin   // `holocron user`: Add, AddRole, SetPassword, SetRole, Remove, List (no hashes), Unlock (admin.go); ErrUserExists, ErrNoSuchUser, ErrLastAdmin, IsInputError
-    type AdminTools interface{ ConfigKeys; SetConfigKey; CameraLogin; SetCameraLogin; PrunePreview; ArchiveStats; LogLevels; SetLogLevel; Autostart; SetAutostart }  // Options.Admin (admin_api.go)
+    type AdminTools interface{ ConfigKeys; SetConfigKey; CameraLogin; SetCameraLogin; PrunePreview; ArchiveStats; LogLevels; SetLogLevel; Autostart; SetAutostart; Health }  // Options.Admin (admin_api.go)
     func CAIfPresent(tlsDir) (CAInfo, bool, error)  // the CA without creating one
     func CAFor(tlsDir) (CAInfo, error); CACertificatePEM(tlsDir); WriteCAInstructions(w, CAInfo); RotateCA(tlsDir)   // `holocron tls`
     type SettingsWriter interface{ PutCameras(ctx, path, []CameraPut); PutConfig(ctx, path, map[string]any) }  // Options.Settings
@@ -57,7 +57,11 @@ re-read from `users.json` on every request. The loopback listener and the token 
 `users.list`, `tls.ca`, `tls.print`, `secret.status`, `autostart.status`). Users and TLS use `UserAdmin` and the TLS facade of
 this package directly (with `Run` sharing one `authService` between both listeners when `TLSListen` is set, so lockouts are
 visible and an unlock applies at once); the rest goes to `Options.Admin` (`AdminTools`, supplied by `cmd/holocron`'s
-`webAdmin`; nil: 501). Key, camera-login, CA and autostart changes take the one-at-a-time lock of Settings and the controls (409 while another runs); role changes and removals are serialised inside `UserAdmin` with their last-admin check. `admin.js` (and so the tab's
+`webAdmin`; nil: 501). `GET /api/admin/health[?group=a,b]` (`web.admin.health`, read-only, not audited: its records are DEBUG) is
+`AdminTools.Health(ctx, groups) (report, checkedAt, err)`: `holocron doctor --json`'s document run inside the web role, answered as
+`{"ok":true,"health":...,"checkedAt":...}`; an unknown group is a 400 naming `HealthGroups`; the request's own context ends the checks
+when the browser goes away (cmd/holocron shares one run between concurrent requests and caches it 5 s). The Health section of `admin.js`
+fills its nodes with `textContent` only. Key, camera-login, CA and autostart changes take the one-at-a-time lock of Settings and the controls (409 while another runs); role changes and removals are serialised inside `UserAdmin` with their last-admin check. `admin.js` (and so the tab's
 markup) is served to admins only; `index.html` holds an empty placeholder.
 
 ## Rule R2 (`actions.go`)
