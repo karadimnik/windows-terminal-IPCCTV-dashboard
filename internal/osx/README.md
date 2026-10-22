@@ -49,6 +49,7 @@ Drive roots, UNC share roots and `/` are judged structurally by `archive.CheckRo
     func RegistryPath(stateDir) string; func NewRegistry(path) *ChildRegistry
     (r) Load() ([]ChildEntry, error); Add(ChildEntry) error; Remove(pid) error; Entries() []ChildEntry; Reset() error
     type Inspector interface{ Inspect(pid) (ProcInfo, error); Stop(ChildEntry) error }   // OSInspector{}, FakeInspector{Procs}
+    func ListProcs() ([]ProcEntry, error)           // every process: pid, parent pid, name (Linux /proc, Windows Toolhelp; not on macOS); read only, for doctor's stray-process check
     type ProcInfo struct{ Start, Image string; Group int }; var ErrNotRunning
     func Verify(e ChildEntry, in Inspector, goos string) (ok bool, why string)
     func Reap(reg *ChildRegistry, in Inspector, log *slog.Logger) ([]ReapVerdict, error)  // then the file is emptied

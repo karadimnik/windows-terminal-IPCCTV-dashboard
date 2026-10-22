@@ -80,7 +80,8 @@ type doctorDeps struct {
 	mediamtx     func(exe string) check
 	liveSize     func(path string) (int64, error)
 	prober       func(cfg config.Config) shadow.Prober
-	platform     osx.Platform  // its default folders: the relay and live secrets
+	platform     osx.Platform // its default folders: the relay and live secrets
+	listProcs    func() ([]osx.ProcEntry, error)
 	checkTimeout time.Duration // per check
 	netBudget    time.Duration // every concurrent check together
 	parallel     int
@@ -107,6 +108,7 @@ func defaultDoctorDeps() doctorDeps {
 		mediamtx:     mediamtx,
 		liveSize:     archive.LiveSize,
 		prober:       shadowProber,
+		listProcs:    osx.ListProcs,
 		checkTimeout: 3 * time.Second,
 		netBudget:    10 * time.Second,
 		parallel:     4,
@@ -196,6 +198,16 @@ func cmdDoctor(ctx context.Context, e *env) error {
 			}
 			sel[g] = true
 		}
+	}
+	if e.sandboxErr != nil {
+		rep := doctorReport{Schema: 1, Root: e.paths.Root, Groups: []string{"setup"}, Checks: []check{sandboxRefused(e.sandboxErr)}}
+		rep.Summary = summarize(rep.Checks, false, 0)
+		if e.json {
+			printJSON(e.out, rep)
+		} else {
+			printDoctor(e.out, rep, *quiet)
+		}
+		return quietFail("%v", e.sandboxErr)
 	}
 	d := defaultDoctorDeps()
 	d.platform = e.opts.Platform

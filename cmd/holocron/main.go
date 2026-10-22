@@ -63,14 +63,15 @@ type env struct {
 	warns   []config.Warning
 	loadErr error
 
-	dial      func(root string) (ctl, error)
-	inspector osx.Inspector
-	exe       string // this executable (re-run as host / supervisor)
-	lg        *logx.Logger
-	stdin     io.Reader              // secrets are read from here and nowhere else
-	opener    func(url string) error // opens a browser (a fake in tests)
-	auto      autostart.Env          // the OS tools of install / uninstall / autostart (fakes in tests)
-	doctor    func(*doctorDeps)      // replaces doctor's seams (tests)
+	dial       func(root string) (ctl, error)
+	inspector  osx.Inspector
+	exe        string // this executable (re-run as host / supervisor)
+	lg         *logx.Logger
+	stdin      io.Reader              // secrets are read from here and nowhere else
+	opener     func(url string) error // opens a browser (a fake in tests)
+	auto       autostart.Env          // the OS tools of install / uninstall / autostart (fakes in tests)
+	doctor     func(*doctorDeps)      // replaces doctor's seams (tests)
+	sandboxErr error                  // doctor only: the sandbox guard refused the root
 }
 
 type envKey struct{}
@@ -220,11 +221,18 @@ func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int 
 		lg, _ = app.NewLogger(app.LogOptions{NoFile: true, Verbose: e.opts.Verbose, Stderr: verboseStderr(e), Getenv: e.opts.Getenv, Config: config.Defaults(e.opts.Platform)})
 	} else {
 		e.paths, e.cfg, e.warns, e.loadErr = app.Resolve(e.opts.Root, e.opts.ConfigPath, e.opts.Platform)
-		if errors.Is(e.loadErr, app.ErrSandbox) || (e.loadErr == nil && e.paths.Root == "") {
+		refused := errors.Is(e.loadErr, app.ErrSandbox)
+		switch {
+		case refused && cmd.path == "doctor":
+			// doctor names the variable and its fix; it touches nothing of the refused root (no log file)
+			e.sandboxErr = e.loadErr
+		case refused || (e.loadErr == nil && e.paths.Root == ""):
 			fmt.Fprintln(errw, "holocron:", e.loadErr)
 			return exitUsage
 		}
-		if e.loadErr != nil {
+		if e.sandboxErr != nil {
+			lg, _ = app.NewLogger(app.LogOptions{NoFile: true, Verbose: e.opts.Verbose, Stderr: verboseStderr(e), Getenv: e.opts.Getenv, Config: config.Defaults(e.opts.Platform)})
+		} else if e.loadErr != nil {
 			e.cfg = config.Defaults(e.opts.Platform)
 			if e.opts.Root != "" {
 				e.cfg.RootPath = e.opts.Root
@@ -233,7 +241,9 @@ func run(ctx context.Context, argv []string, out, errw io.Writer, s *seams) int 
 				e.paths.Root = e.cfg.RootPath
 			}
 		}
-		lg, _ = app.NewLogger(app.LogOptions{Paths: e.paths, Config: e.cfg, Getenv: e.opts.Getenv, Verbose: e.opts.Verbose, Stderr: verboseStderr(e)})
+		if lg == nil {
+			lg, _ = app.NewLogger(app.LogOptions{Paths: e.paths, Config: e.cfg, Getenv: e.opts.Getenv, Verbose: e.opts.Verbose, Stderr: verboseStderr(e)})
+		}
 	}
 	defer lg.Close()
 	e.lg = lg

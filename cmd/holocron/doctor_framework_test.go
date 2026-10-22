@@ -230,6 +230,7 @@ func (r *rig) doctorSeams() func(*doctorDeps) {
 		d.dial = func(context.Context, string, string) (net.Conn, error) { return nil, errRefusedInTest }
 		d.http = &http.Client{Transport: refuseRT{}}
 		d.sleep = func(context.Context, time.Duration) error { return nil }
+		d.listProcs = func() ([]osx.ProcEntry, error) { return nil, nil }
 		dirs := osx.Current().Dirs()
 		dirs.Auth, dirs.TLS = r.platformAuth(), filepath.Join(filepath.Dir(r.root), "platform-tls")
 		d.platform = dirsPlatform{osx.Current(), dirs}

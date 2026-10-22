@@ -95,6 +95,7 @@ type rig struct {
 	auto      *autostart.Env
 	exe       string // this executable as the commands see it
 	doctor    func(*doctorDeps)
+	extraEnv  map[string]string // more variables the commands see
 }
 
 const rigConfig = "\xef\xbb\xbf{\n    \"SegmentSeconds\":  60,\n    \"HealthStripHeightPx\":  -1,\n    \"Unknown\":  {\"x\": 1},\n    \"StopTimeoutSeconds\":  1,\n    \"alerts\": {\"desktop\": {\"enabled\": false}, \"eventlog\": {\"enabled\": false}},\n    \"web\": {\"authDir\": \"%AUTH%\", \"listen\": \"127.0.0.1:18821\"}\n}\n"
@@ -152,6 +153,9 @@ func (r *rig) run(args ...string) (string, string, int) {
 		getenv: func(k string) string {
 			if r.noCreds && (k == app.EnvCameraUser || k == app.EnvCameraPassword) {
 				return ""
+			}
+			if v, ok := r.extraEnv[k]; ok {
+				return v
 			}
 			return map[string]string{app.EnvCameraUser: "u", app.EnvCameraPassword: "p", "HOLOCRON_LOG": r.logSpec}[k]
 		},
