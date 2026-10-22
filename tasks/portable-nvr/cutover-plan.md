@@ -61,3 +61,23 @@ falling below the reserve without the pruner acting; the Operator says so.
 
 Record the time, the `holocron version` line, the "before" `archive stats` and the first `status` in this file (C10).
 Keep the old system untouched for one good week; the week ends with a separate decision about removing it.
+
+## Record: the cutover of 22 Oct 2026 (executed by the Advisor on the Operator's "the date is now")
+
+| Step | Time (Athens) | Result |
+|---|---|---|
+| Preconditions | 14:27 | Import done (`camera.user`, `camera.password` in the keyring), 0 `HOLOCRON_*` variables, old tasks Disabled, old system healthy (supervisor up 44 h, 6 ffmpeg, relay 6 paths, UI serving), `E:` free 22.9 GB |
+| C3 `cam.ps1 -Stop` | 14:28:19 to 14:28:44 | stopped, nothing left behind, exit 0 |
+| C4 old UI | 14:29 | `camui.exe` pid 2320 stopped by pid |
+| C5 | 14:29:06 | no listeners on 8554/9997/8787/8443/8889/8189, no ffmpeg/mediamtx/camui/holocron |
+| C6 | 14:29:15 | marker present, `doctor` no fail, `prune --dry-run` would delete 0, `archive stats` 2083 segments 277.17 GB |
+| C7 `up --detach` | 14:29:24 | `RECORDING: supervisor pid 8440 ... 6 camera(s)` after 1.6 s, web app answering |
+| C8 | 14:29 to 14:46 | all 6 `recording relay`, 0 restarts at start; first partials closed at 14:30:00 with h264 + pcm_alaw 8000 Hz mono; full segments 14:30 closed 133 to 180 MB, as the old ones (about 150 MB) |
+| C9 | 14:30 | logon task `Holocron` installed, enabled, console window visible; old tasks Disabled and unchanged |
+| Recording gap | | old last stop 14:28:34 to Holocron 14:29:26 (about 52 s; per camera 57 s between the last old file and the first new one) |
+| Build | | `holocron 9bd63b7`, Defender: no detection (8 old ones unchanged) |
+
+Findings during the first hour:
+1. **Live view 502 (product bug, fixed on this install by hand).** The supervisor wrote the live-view secret under `...\IPCCTV\camui\auth\`, the web role read `...\IPCCTV\live_view_secret.txt`, so the live MediaMTX refused the web proxy's login. Workaround: `LiveSecretPath` set in `C:\Holocron\holocron.config.json` to the supervisor's file and the web role restarted (14:34, the host restarted it, recording untouched). Permanent fix: W17.
+2. **Car Garage** camera stream ended at 14:32:52 (EOF on the relay path); two restarts (3 s, 6 s), one attempt used the direct input and failed, then it recovered on the relay at 14:33:25 (33 s gap). Not a Holocron fault; to be watched.
+3. The web role restart counts as one crash in the host's 30-minute window (alert 104 needs 5).
