@@ -91,7 +91,7 @@ func TestDoctorLiveOffIsOneInfoLine(t *testing.T) {
 	r.running()
 	r.doctorTools(nil)
 	out, _, _ := r.run("--json", "doctor", "--group", "live")
-	if text := textOf(t, out); strings.Count(text, "info live view      off (LiveViewEnabled false)") != 3 || strings.Contains(text, "fail") {
+	if text := textOf(t, out); strings.Count(text, "info live view      off (LiveViewEnabled false)") != 1 || strings.Contains(text, "fail") {
 		t.Errorf("%s", text)
 	}
 }

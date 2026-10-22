@@ -22,7 +22,7 @@ var liveTable = []doctorCheck{
 
 func init() { doctorTable = append(doctorTable, liveTable...) }
 
-// liveOff is the one line of the live group when live view is off.
+// liveOff is the one line of the live group when live view is off (the first check says it).
 func liveOff(r *drun) []check {
 	if r.e.cfg.LiveViewEnabled {
 		return nil
@@ -55,8 +55,8 @@ func (r *drun) liveSecretFiles() (webFile, supFile string) {
 }
 
 func liveLogin(ctx context.Context, r *drun) []check {
-	if off := liveOff(r); off != nil {
-		return off
+	if !r.e.cfg.LiveViewEnabled {
+		return nil
 	}
 	webFile, supFile := r.liveSecretFiles()
 	return liveLoginProbe(ctx, r, webFile, supFile)
@@ -170,8 +170,8 @@ func (r *drun) liveOptions(ctx context.Context, u, secret string, timeout time.D
 // livePaths: every enabled camera has its live paths in the supervisor's live view rows (main from
 // the relay, sub from the camera when it differs).
 func livePaths(_ context.Context, r *drun) []check {
-	if off := liveOff(r); off != nil {
-		return off
+	if !r.e.cfg.LiveViewEnabled {
+		return nil
 	}
 	cams, _ := r.enabled()
 	want, err := relay.LivePaths(cams, r.e.cfg)

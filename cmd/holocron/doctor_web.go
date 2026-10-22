@@ -40,9 +40,10 @@ func webOff(r *drun) []check {
 	return []check{mk(lvInfo, "web app", "off (web.enabled false): nothing to check")}
 }
 
+// tlsOff is the one line of the HTTPS checks when the listener is off (webTLS says it).
 func tlsOff(r *drun) []check {
-	if off := webOff(r); off != nil {
-		return off
+	if !r.e.cfg.Web.Enabled {
+		return []check{}
 	}
 	if r.e.cfg.Web.TLSListen == "" {
 		return []check{mk(lvInfo, "https", "the HTTPS listener is off (web.tlsListen is not set)")}
@@ -64,8 +65,8 @@ func webProcess(_ context.Context, r *drun) []check {
 // webHTTP: the loopback listener answers GET /api/status (loopback needs no login; no credential is
 // sent) and says which control path the web app uses.
 func webHTTP(ctx context.Context, r *drun) []check {
-	if off := webOff(r); off != nil {
-		return off
+	if !r.e.cfg.Web.Enabled {
+		return nil
 	}
 	u := "http://" + dialable(r.e.cfg.Web.Listen) + "/api/status"
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
@@ -182,8 +183,8 @@ func fingerprintOf(der []byte) string {
 }
 
 func webUsers(_ context.Context, r *drun) []check {
-	if off := tlsOff(r); off != nil {
-		return off
+	if !r.e.cfg.Web.Enabled || r.e.cfg.Web.TLSListen == "" {
+		return nil
 	}
 	n, err := web.LoginUsers(r.e.cfg.Web.AuthDir)
 	switch {
@@ -197,8 +198,8 @@ func webUsers(_ context.Context, r *drun) []check {
 
 // webErrors: ERROR records of the web role in the last hour.
 func webErrors(_ context.Context, r *drun) []check {
-	if off := webOff(r); off != nil {
-		return off
+	if !r.e.cfg.Web.Enabled {
+		return nil
 	}
 	since := r.now.Add(-time.Hour)
 	n, first := 0, ""

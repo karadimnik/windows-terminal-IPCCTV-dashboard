@@ -107,7 +107,10 @@ func connRelay(ctx context.Context, r *drun) []check {
 	if perr := r.probe(ctx, func() { set, err = api.Ready(ctx) }); perr != nil {
 		err = perr
 	}
-	const logs = "holocron logs --component relay --since 10m"
+	logs := "holocron logs --component relay --since 10m"
+	if !cfg.RestreamerEnabled {
+		logs = "check the relay this system does not run (RelayExternal)"
+	}
 	switch {
 	case err != nil && cfg.RestreamerEnabled:
 		return []check{mk(lvFail, "relay", "%s does not answer: %v", which, err).fix("%s ; holocron restart --detach", logs)}
