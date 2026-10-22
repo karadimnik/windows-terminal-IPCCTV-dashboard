@@ -94,6 +94,7 @@ type rig struct {
 	tools     *autostart.FakeTools // schtasks / systemctl / launchctl
 	auto      *autostart.Env
 	exe       string // this executable as the commands see it
+	doctor    func(*doctorDeps)
 }
 
 const rigConfig = "\xef\xbb\xbf{\n    \"SegmentSeconds\":  60,\n    \"HealthStripHeightPx\":  -1,\n    \"Unknown\":  {\"x\": 1},\n    \"StopTimeoutSeconds\":  1,\n    \"alerts\": {\"desktop\": {\"enabled\": false}, \"eventlog\": {\"enabled\": false}},\n    \"web\": {\"authDir\": \"%AUTH%\", \"listen\": \"127.0.0.1:18821\"}\n}\n"
@@ -140,6 +141,7 @@ func (r *rig) run(args ...string) (string, string, int) {
 		inspector: r.inspector(),
 		exe:       r.exe,
 		auto:      r.auto,
+		doctor:    r.doctor,
 		stdin: func() io.Reader {
 			if r.stdinR != nil {
 				return r.stdinR

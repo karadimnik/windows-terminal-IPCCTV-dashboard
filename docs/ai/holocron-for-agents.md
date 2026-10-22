@@ -97,7 +97,7 @@ Registry: the slice `commands` in `cmd/holocron/commands.go`; `holocron --help` 
 | `log level <component\|all> <level> [--save]` | change a log level now through the control API (--save: also in the configuration) |
 | `logs [-f] [--component C] [--level L] [--since D] [--action A]` | read, filter and follow holocron.log |
 | `alert test [channel]` | send a test alert through one or every channel |
-| `doctor` | ffmpeg, MediaMTX, ports, folders, root, clock, credentials, status: ok/warn/fail |
+| `doctor [--quiet] [--json] [--group G[,G...]] [--setup-only]` | the health check: ok/warn/fail lines with a fix for each problem, grouped (setup, recording, connections, live, web, storage, system), then HEALTHY, DEGRADED, BROKEN or NOT RUNNING; exit 1 on any fail; read-only; --setup-only is the set-up preflight alone |
 | `version` | build and spec versions |
 | `help` | this list |
 | `web [-listen H:P] [-tls-listen IP:P] [-tls-dir D] [-auth-dir D] [-tls-readonly true\|false] [-config FILE] [-print-ca] [-set-password USER] [-unlock USER] [-version]` | run the web app alone (normally started by up): login page, Live grid, Footage, Settings; camui's flags and config file all work |
