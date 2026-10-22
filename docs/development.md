@@ -32,3 +32,7 @@ The Holocron track has a GitHub Actions workflow on the `portable-nvr` branch th
 ## Moving to Holocron, and back
 
 The Go program `holocron` runs beside the PowerShell system first ([shadow.md](shadow.md)); its autostart is [autostart.md](autostart.md). Moving the real NVR over, step by step with the stop conditions, is [cutover.md](cutover.md), and the way back, which leaves the old system untouched, is [rollback.md](rollback.md).
+
+## Documentation of the Holocron system, and its checks
+
+The guides are [holocron-quickstart.md](holocron-quickstart.md) and [holocron-cheatsheet.md](holocron-cheatsheet.md); the complete reference for AI agents is [ai/holocron-for-agents.md](ai/holocron-for-agents.md), indexed by `llms.txt` and with the repository rules in `AGENTS.md`, both at the repository root. Two checks keep them true. `cmd/holocron/docs_test.go` (part of `go test ./cmd/holocron`) fails when a `holocron ...` command in those documents, the README or AGENTS.md is not in the command registry, or when the command table of the agent reference differs from the registry (`HOLOCRON_DOCS_UPDATE=1 go test ./cmd/holocron -run TestAgentDocCommandTable` rewrites the table). The links and PowerShell switches of `README.md` and `docs/*.md` are checked by the harness: `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '.\tests\cam.tests.ps1' -Checks doclinks,docswitches"`.

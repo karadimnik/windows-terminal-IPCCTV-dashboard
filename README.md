@@ -1,5 +1,20 @@
 # Windows Terminal IPCCTV Dashboard
 
+## Holocron (the current system)
+
+Holocron is one Go program, `holocron` (`holocron.exe` on Windows), that records the cameras with ffmpeg, supervises itself, serves the web app and alerts. It is the live system since 22 Oct 2026; the PowerShell system further down is the legacy fallback.
+
+1. Put `holocron.exe` in a permanent folder (`./build-holocron.sh` in WSL builds it).
+2. Beside it, `holocron.config.json` (`{ "RootPath": "E:\\cameras" }` is enough) and `cameras.json` (`Name`, `IP`, `Quality`, `Record`).
+3. `holocron secret set camera.user` and `holocron secret set camera.password`, then `holocron doctor`.
+4. `holocron up --detach`, then `holocron open` for the web app and `holocron install` to start at logon.
+
+* **Guides** - [quickstart](docs/holocron-quickstart.md) (the four steps with the result of each) and the [cheat sheet](docs/holocron-cheatsheet.md) (commands by intent, files, ports, exit codes, alerts, the ten likeliest problems).
+* **For AI agents** - [docs/ai/holocron-for-agents.md](docs/ai/holocron-for-agents.md), [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt).
+* **Moving between the systems** - [cutover](docs/cutover.md) and [rollback](docs/rollback.md); [autostart](docs/autostart.md), [the web app](docs/ui.md), [alerts](docs/alerts.md).
+
+## The original PowerShell system (legacy, still in the repository)
+
 A PowerShell toolkit that turns a Windows desktop into a camera wall and a 24/7 recorder: a self-healing grid of RTSP streams tiled with Windows Terminal and `mpv`, a health strip reporting what the recorder is doing, an independent supervisor recording every camera you opt in with audio to local disk, and a browser UI that drives the lot. Nothing is recorded until you ask for it, per camera. The viewer and the recorder are separate programs that share nothing but a configuration file, so closing the dashboard does not stop recording and a recorder that is not installed does not stop you watching.
 
 ![The dashboard: six live feeds in a 3x2 grid with the health strip below them](docs/dashboard.png)
