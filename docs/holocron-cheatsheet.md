@@ -11,11 +11,11 @@ One page of lookups. First time here: [holocron-quickstart.md](holocron-quicksta
 | start in this window (closing it stops everything) | `holocron up` |
 | see status as JSON | `holocron status --json` |
 | check the machine (ffmpeg, MediaMTX, ports, folders, login) | `holocron doctor` |
-| add a camera (records at once with `--record`) | `holocron cam add --name Garage --ip 192.168.1.51 --record` |
+| add a camera (records at once with `--record`) | `holocron cam add --name Garage --ip 192.168.1.50:8554 --record` |
 | remove a camera (recordings stay) | `holocron cam remove Garage` |
 | record / stop recording one camera | `holocron cam enable Garage` / `holocron cam disable Garage` |
 | record / stop recording all cameras | `holocron cam enable all` / `holocron cam disable all` |
-| change a camera's address or stream | `holocron cam set Garage --ip 192.168.1.52 --quality stream2` |
+| change a camera's address or stream | `holocron cam set Garage --ip 192.168.1.50 --quality stream2` |
 | list cameras / test one (TCP and RTSP OPTIONS, no login) | `holocron cam list` / `holocron cam test Garage` |
 | read a config value / change / put back the default | `holocron config get ReserveGB` / `holocron config set ReserveGB 30` / `holocron config unset ReserveGB` |
 | check both config files / see every effective value | `holocron config validate` / `holocron config show` |
