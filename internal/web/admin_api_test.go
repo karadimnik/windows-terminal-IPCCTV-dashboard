@@ -528,3 +528,33 @@ func TestAdminHealthRoute(t *testing.T) {
 		t.Errorf("health results should be DEBUG records: %v", res)
 	}
 }
+
+// The Health section of the served admin.js: its hooks are there, and what comes from the document
+// (details contain file names and log lines) is only ever set with textContent.
+func TestAdminJSHealthSectionHooks(t *testing.T) {
+	a := newAdminRig(t)
+	src := a.do(tlsReq{path: "/admin.js", cookie: a.cookie}).Body.String()
+	i, j := strings.Index(src, "---- health\n"), strings.Index(src, "---- users\n")
+	if i < 0 || j < i {
+		t.Fatal("admin.js has no health section before the users section")
+	}
+	health := src[i:j]
+	for _, want := range []string{`"api/admin/health"`, `id="aHRefresh"`, `id="aHAuto"`, `auto refresh every 30 s`, `id="aHBadge"`, `checking… up to 13 s`,
+		`"visibilitychange"`, `document.hidden`, `HTTP " + response.status`, `node("span", "hdetail", c.detail)`, `node("span", "htitle", c.title)`,
+		`node("pre", "hfixtext", c.fix)`, `"details"`, `HEALTHY`, `DEGRADED`, `BROKEN`, `"NOT RUNNING"`} {
+		if !strings.Contains(src, want) {
+			t.Errorf("admin.js has no %s", want)
+		}
+	}
+	if !strings.Contains(health, "n.textContent = content") {
+		t.Error("the health nodes do not set their text with textContent")
+	}
+	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {
+		if strings.Contains(health, bad) {
+			t.Errorf("the health section uses %s on text from the document", bad)
+		}
+	}
+	if strings.Contains(src, "onclick=") || strings.Contains(src, "onchange=") {
+		t.Error("an inline event attribute in admin.js")
+	}
+}
