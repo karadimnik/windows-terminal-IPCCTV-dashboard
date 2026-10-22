@@ -1,10 +1,26 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 )
+
+var envVarRE = regexp.MustCompile(`%([A-Za-z0-9_]+)%`)
+
+// LiveSecretFile is the one decision of which file holds the live-view login, used by the
+// supervisor (it writes the live MediaMTX config from it) and by the web role (its WHEP proxy sends
+// it): LiveSecretPath with each %NAME% replaced from the environment, else live_view_secret.txt in
+// defaultDir. A mismatch makes the live instance refuse the login, so there is no second copy of
+// this rule.
+func LiveSecretFile(configured, defaultDir string) string {
+	if v := strings.TrimSpace(configured); v != "" {
+		return envVarRE.ReplaceAllStringFunc(v, func(m string) string { return os.Getenv(m[1 : len(m)-1]) })
+	}
+	return filepath.Join(defaultDir, "live_view_secret.txt")
+}
 
 var (
 	whepRE    = regexp.MustCompile(`^127\.0\.0\.1:([0-9]{1,5})$`)

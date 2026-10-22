@@ -96,6 +96,11 @@ type Config struct {
 	// role sets them to its own files (same key names); they are not part of the camui config file.
 	CamerasPath string `json:"-"`
 	ConfigPath  string `json:"-"`
+
+	// LiveSecretDir is the folder of live_view_secret.txt when LiveSecretPath is not set. The
+	// holocron web role sets the platform's auth folder, the one the supervisor uses; empty is
+	// camui.exe's %LOCALAPPDATA%\IPCCTV, where the PowerShell system keeps it.
+	LiveSecretDir string `json:"-"`
 }
 
 // defaultLiveHiddenGrace is the grace period used when nothing is configured.
