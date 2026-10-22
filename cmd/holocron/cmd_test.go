@@ -141,7 +141,7 @@ func (r *rig) run(args ...string) (string, string, int) {
 		inspector: r.inspector(),
 		exe:       r.exe,
 		auto:      r.auto,
-		doctor:    r.doctor,
+		doctor:    r.doctorSeams(),
 		stdin: func() io.Reader {
 			if r.stdinR != nil {
 				return r.stdinR

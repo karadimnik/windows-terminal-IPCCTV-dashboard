@@ -345,3 +345,12 @@ func TestNewReadySet(t *testing.T) {
 		t.Fatalf("unavailable: %+v", u)
 	}
 }
+
+func TestReadyCountsReaders(t *testing.T) {
+	f := &fakeRelay{t: t, handle: serve(`{"pageCount":1,"items":[{"name":"a","ready":true,"readers":[{"type":"rtspSession","id":"1"},{"type":"webRTCSession","id":"2"}]},{"name":"b","ready":true,"readers":[]},{"name":"c","ready":false,"readers":[{"type":"x"}]}]}`)}
+	_, api := f.start()
+	set, err := api.Ready(context.Background())
+	if err != nil || set.Readers("a") != 2 || set.Readers("b") != 0 || set.Readers("c") != 0 || set.Readers("zz") != 0 {
+		t.Errorf("readers: %v a=%d b=%d c=%d", err, set.Readers("a"), set.Readers("b"), set.Readers("c"))
+	}
+}

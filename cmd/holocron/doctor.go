@@ -16,6 +16,7 @@ import (
 	"holocron/internal/archive"
 	"holocron/internal/config"
 	"holocron/internal/ffmpeg"
+	"holocron/internal/osx"
 	"holocron/internal/shadow"
 	"holocron/internal/status"
 )
@@ -79,6 +80,7 @@ type doctorDeps struct {
 	mediamtx     func(exe string) check
 	liveSize     func(path string) (int64, error)
 	prober       func(cfg config.Config) shadow.Prober
+	platform     osx.Platform  // its default folders: the relay and live secrets
 	checkTimeout time.Duration // per check
 	netBudget    time.Duration // every concurrent check together
 	parallel     int
@@ -121,6 +123,7 @@ type drun struct {
 	why     string // app.Running's reason
 	downWhy string // the same for the not-running notice of the runtime groups
 	deep    bool
+	sem     chan struct{} // the network probes' pool
 
 	mu    sync.Mutex
 	cache map[string]*onceValue
@@ -195,10 +198,11 @@ func cmdDoctor(ctx context.Context, e *env) error {
 		}
 	}
 	d := defaultDoctorDeps()
+	d.platform = e.opts.Platform
 	if e.doctor != nil {
 		e.doctor(&d)
 	}
-	r := &drun{e: e, d: d, deep: *deep, cache: map[string]*onceValue{}}
+	r := &drun{e: e, d: d, deep: *deep, cache: map[string]*onceValue{}, sem: make(chan struct{}, max(d.parallel, 1))}
 	start := d.now()
 	r.now = start
 	r.doc, r.running, r.why = app.Running(e.paths, e.cfg, start)
@@ -237,13 +241,12 @@ func contains(list []string, s string) bool {
 }
 
 // runAll runs the selected checks: the sequential ones in table order, the concurrent ones at the
-// same time in a pool of d.parallel inside d.netBudget. A runtime group of a system that is not
-// running is one warning instead of its checks.
+// same time inside d.netBudget (their network probes share a pool of d.parallel, see probe). A
+// runtime group of a system that is not running is one warning instead of its checks.
 func (r *drun) runAll(ctx context.Context, sel map[string]bool) []check {
 	results := make([][]check, len(doctorTable))
 	budget, cancel := context.WithTimeout(ctx, r.d.netBudget)
 	defer cancel()
-	sem := make(chan struct{}, max(r.d.parallel, 1))
 	var wg sync.WaitGroup
 	skipped := map[string]bool{}
 	for i, c := range doctorTable {
@@ -259,13 +262,7 @@ func (r *drun) runAll(ctx context.Context, sel map[string]bool) []check {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				select {
-				case sem <- struct{}{}:
-					defer func() { <-sem }()
-					results[i] = r.one(budget, c)
-				case <-budget.Done():
-					results[i] = []check{timedOut(c, r.d.netBudget, "the network budget")}
-				}
+				results[i] = r.one(budget, c)
 			}()
 		default:
 			results[i] = r.one(ctx, c)
@@ -290,6 +287,18 @@ func (r *drun) runAll(ctx context.Context, sel map[string]bool) []check {
 	return out
 }
 
+// probe runs one network probe in the run's pool of d.parallel; it gives up when ctx ends first.
+func (r *drun) probe(ctx context.Context, fn func()) error {
+	select {
+	case r.sem <- struct{}{}:
+		defer func() { <-r.sem }()
+		fn()
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // one runs a check with its timeout; a check that does not return in time is a warning, so doctor
 // never hangs on a dead disk or a silent peer.
 func (r *drun) one(parent context.Context, c doctorCheck) []check {
@@ -305,7 +314,11 @@ func (r *drun) one(parent context.Context, c doctorCheck) []check {
 	select {
 	case out = <-done:
 	case <-ctx.Done():
-		out = []check{timedOut(c, t, "its timeout")}
+		select {
+		case out = <-done: // the check saw its context end and says what it found
+		case <-time.After(200 * time.Millisecond):
+			out = []check{timedOut(c, t)}
+		}
 	}
 	log := r.e.lg.For("doctor")
 	for _, res := range out {
@@ -318,8 +331,8 @@ func (r *drun) one(parent context.Context, c doctorCheck) []check {
 	return out
 }
 
-func timedOut(c doctorCheck, t time.Duration, what string) check {
-	return mk(lvWarn, c.id, "not checked: no answer within %s (%s)", t, what).fix("run holocron doctor --group %s again; if it repeats, holocron logs --level warn --since 10m", c.group)
+func timedOut(c doctorCheck, t time.Duration) check {
+	return mk(lvWarn, c.id[strings.LastIndexByte(c.id, '.')+1:], "not checked: no answer within %s", t).fix("run holocron doctor --group %s again; if it repeats, holocron logs --level warn --since 10m", c.group)
 }
 
 func summarize(cs []check, running bool, elapsed time.Duration) doctorSummary {

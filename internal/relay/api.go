@@ -47,8 +47,9 @@ var (
 // Has is true for every path, because the relay is up and a consumer sent direct by a configuration
 // fault would put the camera password on a command line and take the camera's second session.
 type ReadySet struct {
-	State State
-	paths map[string]struct{}
+	State   State
+	paths   map[string]struct{}
+	readers map[string]int
 }
 
 // NewReadySet is an OK answer serving exactly the given paths (for callers and tests that build a
@@ -77,6 +78,9 @@ func (r ReadySet) Has(path string) bool {
 	_, ok := r.paths[path]
 	return r.State == OK && ok
 }
+
+// Readers is how many readers a serving path has (0 when it is not in the answer).
+func (r ReadySet) Readers(path string) int { return r.readers[path] }
 
 // Names are the serving paths, sorted. Empty when Denied or Unavailable (the view is lost).
 func (r ReadySet) Names() []string {
@@ -177,12 +181,13 @@ type pathList struct {
 }
 
 type pathItem struct {
-	Name  string `json:"name"`
-	Ready bool   `json:"ready"`
+	Name    string            `json:"name"`
+	Ready   bool              `json:"ready"`
+	Readers []json.RawMessage `json:"readers"`
 }
 
 func (a *API) list(ctx context.Context, auth bool) (ReadySet, error) {
-	set := ReadySet{State: OK, paths: map[string]struct{}{}}
+	set := ReadySet{State: OK, paths: map[string]struct{}{}, readers: map[string]int{}}
 	for page := 0; ; page++ {
 		body, err := a.get(ctx, fmt.Sprintf("v3/paths/list?itemsPerPage=%d&page=%d", itemsPerPage, page), auth)
 		if err != nil {
@@ -196,6 +201,7 @@ func (a *API) list(ctx context.Context, auth bool) (ReadySet, error) {
 		for _, it := range items {
 			if it.Ready && it.Name != "" {
 				set.paths[it.Name] = struct{}{}
+				set.readers[it.Name] = len(it.Readers)
 			}
 		}
 		if page+1 >= l.PageCount || page+1 >= maxPages {

@@ -238,9 +238,15 @@ func rtspTarget(cam config.Camera) string {
 
 // probeRTSP connects and sends OPTIONS (no login: a 401 is an answer too).
 func probeRTSP(ctx context.Context, cam config.Camera, timeout time.Duration) (string, error) {
+	return probeRTSPWith(ctx, (&net.Dialer{}).DialContext, cam, timeout)
+}
+
+// probeRTSPWith is probeRTSP through dial (doctor's seam).
+func probeRTSPWith(ctx context.Context, dial func(ctx context.Context, network, addr string) (net.Conn, error), cam config.Camera, timeout time.Duration) (string, error) {
 	addr := rtspTarget(cam)
-	d := net.Dialer{Timeout: timeout}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := dial(ctx, "tcp", addr)
 	if err != nil {
 		return "", fmt.Errorf("TCP %s: %v", addr, err)
 	}

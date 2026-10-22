@@ -3,7 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"holocron/internal/ffmpeg"
+	"holocron/internal/osx"
 )
 
 func TestDoctorJSONIsOneDocumentWithTheSchemaFields(t *testing.T) {
@@ -207,9 +211,46 @@ func (r *rig) doctorTools(more func(*doctorDeps)) {
 	r.doctor = func(d *doctorDeps) {
 		d.ffmpeg = func(string) (ffmpeg.Version, error) { return ffmpeg.ParseVersion("ffmpeg version 7.1 Copyright") }
 		d.mediamtx = func(string) check { return mk(lvOK, "mediamtx", "v1.21.2") }
-		d.sleep = func(context.Context, time.Duration) error { return nil }
 		if more != nil {
 			more(d)
 		}
 	}
+}
+
+var errRefusedInTest = errors.New("connection refused (test)")
+
+type refuseRT struct{}
+
+func (refuseRT) RoundTrip(*http.Request) (*http.Response, error) { return nil, errRefusedInTest }
+
+// doctorSeams: a rig's doctor dials, requests and waits for nothing real unless the test says so
+// (r.doctor), so no test reaches a port of a system running on this machine.
+func (r *rig) doctorSeams() func(*doctorDeps) {
+	return func(d *doctorDeps) {
+		d.dial = func(context.Context, string, string) (net.Conn, error) { return nil, errRefusedInTest }
+		d.http = &http.Client{Transport: refuseRT{}}
+		d.sleep = func(context.Context, time.Duration) error { return nil }
+		dirs := osx.Current().Dirs()
+		dirs.Auth, dirs.TLS = r.platformAuth(), filepath.Join(filepath.Dir(r.root), "platform-tls")
+		d.platform = dirsPlatform{osx.Current(), dirs}
+		if r.doctor != nil {
+			r.doctor(d)
+		}
+	}
+}
+
+// dirsPlatform is this OS with other default folders (the auth folder of a test).
+type dirsPlatform struct {
+	osx.Platform
+	dirs osx.Dirs
+}
+
+func (p dirsPlatform) Dirs() osx.Dirs { return p.dirs }
+
+// platformAuth is the auth folder doctor sees in a rig (the relay and live secrets): inside the
+// test, never this user's.
+func (r *rig) platformAuth() string {
+	d := filepath.Join(filepath.Dir(r.root), "platform-auth")
+	os.MkdirAll(d, 0o700)
+	return d
 }
