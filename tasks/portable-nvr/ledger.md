@@ -64,6 +64,7 @@ Update this file in the same push as each merge: `git log --first-parent --merge
 | ccd36bd | 2026-10-21 | Merge Holocron W14b: suite green natively on Windows; CheckRoot follows junctions and 8.3 names |  |
 | eeae710 | 2026-10-22 | Merge Holocron W16: Phone tab for viewers, osx test race, external-relay text, doctor port check, per-command help, shadow web recipe |  |
 | e17efc6 | 2026-10-22 | Merge Holocron W17: supervisor and web role resolve the live-view secret file the same way |  |
+| 6445ed7 | 2026-10-22 | Merge Holocron W18: quickstart, cheat sheet, AI reference with llms.txt and AGENTS.md, README front door, drift guard |  |
 
 ## Direct commits on the integration branch (advisor, one concern each)
 
@@ -112,3 +113,4 @@ Update this file in the same push as each merge: `git log --first-parent --merge
 | 9bd63b7 | 2026-10-22 | docs/shadow: result of the first shadow run |
 | fae099c | 2026-10-22 | docs: cutover plan with owners, preconditions, stop rules and this machine's rollback |
 | eb4ee94 | 2026-10-22 | docs: record of the 22 Oct 2026 cutover and its first-hour findings |
+| 7ff18e3 | 2026-10-22 | docs: ledger gains the W17 merge |
