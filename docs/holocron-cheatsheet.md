@@ -10,7 +10,8 @@ One page of lookups. First time here: [holocron-quickstart.md](holocron-quicksta
 | start / stop / restart everything | `holocron up --detach` / `holocron down` / `holocron restart --detach` |
 | start in this window (closing it stops everything) | `holocron up` |
 | see status as JSON | `holocron status --json` |
-| check the machine (ffmpeg, MediaMTX, ports, folders, login) | `holocron doctor` |
+| check everything when in doubt (recording, live view, connections, web, disk, processes) | `holocron doctor` ([health check](#health-check)) |
+| only the problems / one group / for a script | `holocron doctor --quiet` / `holocron doctor --group recording` / `holocron doctor --json` |
 | add a camera (records at once with `--record`) | `holocron cam add --name Garage --ip 192.168.1.50:8554 --record` |
 | remove a camera (recordings stay) | `holocron cam remove Garage` |
 | record / stop recording one camera | `holocron cam enable Garage` / `holocron cam disable Garage` |
@@ -41,6 +42,22 @@ One page of lookups. First time here: [holocron-quickstart.md](holocron-quicksta
 | see the version | `holocron version` |
 
 Names with a space need quotes: `holocron cam enable "Front Door"`. `--since` takes `10m`, `24h` or a time like `2026-10-22T09:00:00+03:00`, not `1d`.
+
+## Health check
+
+`holocron doctor` is read-only: it starts, stops and restarts nothing, opens no camera session beyond RTSP OPTIONS and writes only two probe files it removes again. Every line is `ok`, `info`, `warn` or `fail`; every `warn` and `fail` has a `fix:` line under it with the command or the edit. The last line is `HEALTHY`, `DEGRADED (n warning(s))`, `BROKEN (n failure(s))` or `NOT RUNNING` (then each runtime group says `not checked: nothing is running`). Exit 1 when any line is `fail`, else 0.
+
+| Group | Checks |
+| --- | --- |
+| `setup` | configuration, ffmpeg, MediaMTX, ports, folders, archive root, clock, camera login, status, autostart, the PowerShell tasks (`--setup-only` prints only these, as before W19) |
+| `recording` | heartbeat age, each camera alive, input `relay` (`direct` warns), restarts in the last hour (warn 3, fail 10), the newest segment GROWS on disk in 2 s, gaps above 2 s in the last 24 h, the newest closed segment against the median rate of 2 h (`--deep`: ffprobe it for video and `pcm_alaw` audio) |
+| `connections` | each camera answers TCP and RTSP OPTIONS (as `cam test`), the relay serves every camera's path (with its readers), the expected listeners answer |
+| `live` | the live instance alive, the web role's live-secret login accepted by it (the 22 Oct 502), every camera's live paths |
+| `web` | the web role alive, `GET /api/status` on loopback (control path), HTTPS handshake, certificate days left, the CA's fingerprint, a login user, web errors of the last hour |
+| `storage` | free space against the reserve (at the reserve edge is normal), the pruner's last run (blocked fails, circuit breaker warns), the ownership marker, segments per camera in 24 h |
+| `system` | stray or orphan processes, the old system's supervisor, two supervisors, autostart runs this executable with this config, log errors of 24 h, alert channels, version, `HOLOCRON_SANDBOX_ONLY` / camera login variables in this window |
+
+`--json` prints one document: `schema` 1, `root`, `groups`, `checks` (`id`, `group`, `level`, `title`, `detail`, `fix`, `data`) and `summary` (`verdict`, `running`, counts, `elapsedMs`).
 
 ## Files and folders
 
@@ -97,6 +114,8 @@ Names with a space need quotes: `holocron cam enable "Front Door"`. `--since` ta
 | 130 | Error | the relay refused Holocron's login: `holocron restart --detach` |
 
 ## The ten likeliest problems
+
+Whatever the symptom, `holocron doctor --quiet` first: it prints each problem with its fix.
 
 | Symptom | Fix |
 | --- | --- |
