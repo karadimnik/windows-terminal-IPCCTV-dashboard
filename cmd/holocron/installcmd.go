@@ -416,29 +416,31 @@ func autostartChecks(e *env) []check {
 	var cs []check
 	switch {
 	case st.Detail != "" && !st.Installed:
-		cs = append(cs, check{"warn", "autostart", st.Summary()})
+		cs = append(cs, mk(lvWarn, "autostart", "%s", st.Summary()).fix("holocron autostart status, then holocron install"))
 	case !st.Installed:
-		cs = append(cs, check{"ok", "autostart", st.Summary()})
+		cs = append(cs, mk(lvOK, "autostart", "%s", st.Summary()))
 	case !st.ExeExists || !st.Recorded:
-		cs = append(cs, check{"warn", "autostart", st.Summary()})
+		cs = append(cs, mk(lvWarn, "autostart", "%s", st.Summary()).fix("holocron install (run from the executable that should start at logon)"))
 	default:
-		cs = append(cs, check{"ok", "autostart", st.Summary()})
+		cs = append(cs, mk(lvOK, "autostart", "%s", st.Summary()))
 	}
 	if e.auto.GOOS != "windows" {
 		return cs
 	}
 	olds := autostart.QueryOldTasks(e.auto)
-	v := "ok"
+	v := lvOK
 	for _, o := range olds {
 		if o.Enabled && st.Installed && st.Enabled {
-			v = "warn"
+			v = lvWarn
 		}
 	}
 	text := oldTasksText(olds)
-	if v == "warn" {
-		text += " - both systems would start at logon"
+	c := mk(v, "old tasks", "%s", text)
+	if v == lvWarn {
+		c.Detail += " - both systems would start at logon"
+		c = c.fix("switch the enabled PowerShell task off yourself: schtasks /Change /TN <task> /DISABLE (holocron never changes it)")
 	}
-	return append(cs, check{v, "old tasks", text})
+	return append(cs, c)
 }
 
 // serviceGate is what --mode service says and checks BEFORE it asks: elevation, the account's

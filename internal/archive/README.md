@@ -22,6 +22,7 @@ Naming, scanning and root-safety rules. The pruner planner/executor (W3) builds 
     type DirScan struct { Dir string; ScannedAt time.Time; Files int; Bytes int64; OldestWrite, NewestWrite, NewestClosedWrite time.Time
                           Newest string; NewestMTime time.Time; NewestBytes int64; Recent, Anomaly bool }
     func NewTracker() *Tracker; (*Tracker).Observe(DirScan) time.Time /* first-seen of Newest */; (*Tracker).Forget(dir string)
+    func LiveSize(path string) (int64, error)       // the size of a file another process is writing (doctor samples growth with it)
 
     // root guards and ownership
     func CheckRoot(path string, p osx.Platform) (problem string)
@@ -41,7 +42,7 @@ Naming, scanning and root-safety rules. The pruner planner/executor (W3) builds 
   name) ordered by mtime, ties by later name; name order is wrong across a fall-back. The PRUNER always protects `Newest`. `Recent` = its mtime is
   within segmentSeconds+60 s of now (a future mtime counts as recent); only the stall watchdog and the down alert use it. `Anomaly` = mtime more than
   60 s in the future (clock skew). `Files`/`Bytes` count every non-directory entry, as `Get-CamDirScan`; sizes come from the listing, except
-  `Newest`, whose size is read through an open handle (`liveSize`, the `Get-CamLiveFileLength` port: on NTFS the listing shows the open
+  `Newest`, whose size is read through an open handle (`LiveSize`, the `Get-CamLiveFileLength` port: on NTFS the listing shows the open
   segment's size as of its creation until ffmpeg closes it; Windows opens it read-only sharing read, write and delete, elsewhere a stat;
   a refused open keeps the listing's size). `NewestBytes` and `Bytes` use it; closed files are fresh in the listing. Proved on Windows by
   `TestLiveSizeOfAFileAnotherProcessWrites` (a child writer holds the file open: listing 0 bytes, live 1 MiB). A missing directory is an

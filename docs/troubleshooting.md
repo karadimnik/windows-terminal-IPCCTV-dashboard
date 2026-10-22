@@ -1,5 +1,7 @@
 # Troubleshooting
 
+**Holocron** (the Go system): run `holocron doctor --quiet` first. It checks recording, live view, connections, the web app, the disk and the processes, and prints a `fix:` under every problem ([health check](holocron-cheatsheet.md#health-check)). The table below is the PowerShell system's.
+
 ## Something is wrong
 
 | Symptom | Likely cause | What to do |

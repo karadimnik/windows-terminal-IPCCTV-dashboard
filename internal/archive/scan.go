@@ -48,7 +48,7 @@ const futureTolerance = 60 * time.Second
 
 // newestSize reads the live size of the newest segment; a test replaces it to stand in for a
 // listing that is stale (NTFS while the writer's handle is open).
-var newestSize = liveSize
+var newestSize = LiveSize
 
 // Scan reads one camera directory with DefaultMatcher. See Matcher.Scan.
 func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, error) {
@@ -60,7 +60,7 @@ func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, er
 // directory is an empty scan, not an error. This replaces NTFS creation time as the "which file is
 // open" signal (HLD section 6). The listing's size of the file being written is stale on Windows
 // (NTFS updates a directory entry when the writer closes its handle), so the newest segment's size
-// is read live through an open handle (liveSize, as Get-CamLiveFileLength); a refused open keeps the
+// is read live through an open handle (LiveSize, as Get-CamLiveFileLength); a refused open keeps the
 // listing's size. Closed files are fresh in the listing. Only the size is re-read, as in PowerShell:
 // the open file's listing mtime may lag too, but never before its creation, and a healthy segment is
 // closed before it is SegmentSeconds+60 s old, so Recent is not changed by the lag.

@@ -39,7 +39,7 @@ func DefaultAPICredentialPath(p) string; func LiveSecretPath(p, cfg) string
 func NewAPI(base string, login Login, timeout time.Duration) *API
 func (a *API) Ready(ctx) (ReadySet, error)                     // ONE GET /v3/paths/list per cycle
 func (a *API) WaitStarted(ctx, ReadinessPolicy, exited <-chan struct{}) (ReadySet, bool)
-type ReadySet struct{ State State; ... }                       // Has(path), Names()
+type ReadySet struct{ State State; ... }                       // Has(path), Names(), Readers(path) (doctor reports it)
 func NewReadySet(paths []string) ReadySet; DeniedReadySet(); UnavailableReadySet() // sets without a request
 State: OK | Denied | Unavailable                               // errors.Is(err, ErrUnavailable / ErrMalformed)
 type LoginWatch ...  Observe(State) Transition                 // LoginRefused once per episode (alert 130), LoginAccepted

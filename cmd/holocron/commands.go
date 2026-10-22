@@ -55,7 +55,7 @@ func init() {
 		{path: "log level", usage: "<component|all> <level> [--save]", about: "change a log level now through the control API (--save: also in the configuration)", action: "log.level", mutating: true, run: cmdLogLevel},
 		{path: "logs", usage: "[-f] [--component C] [--level L] [--since D] [--action A]", about: "read, filter and follow holocron.log", action: "logs.read", run: cmdLogs},
 		{path: "alert test", usage: "[channel]", about: "send a test alert through one or every channel", action: "alert.test", mutating: true, run: cmdAlertTest},
-		{path: "doctor", about: "ffmpeg, MediaMTX, ports, folders, root, clock, credentials, status: ok/warn/fail", action: "doctor.run", run: cmdDoctor},
+		{path: "doctor", usage: "[--quiet] [--json] [--group G[,G...]] [--setup-only] [--deep]", about: "the health check: ok/warn/fail lines with a fix for each problem, grouped (setup, recording, connections, live, web, storage, system), then HEALTHY, DEGRADED, BROKEN or NOT RUNNING; exit 1 on any fail; read-only; --setup-only is the set-up preflight alone; --deep also ffprobes the newest closed segments", action: "doctor.run", run: cmdDoctor},
 		{path: "version", about: "build and spec versions", action: "version.show", noRoot: true, run: cmdVersion},
 		{path: "help", about: "this list", action: "help.show", noRoot: true, run: func(ctx context.Context, e *env) error { printHelp(e.out); return nil }},
 
