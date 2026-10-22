@@ -74,7 +74,7 @@ func TestDoctorProcesses(t *testing.T) {
 		r.doctorTools(func(d *doctorDeps) {
 			d.listProcs = func() ([]osx.ProcEntry, error) { return c.procs, nil }
 			d.lookPath = func(p string) (string, error) {
-				if p == "ffmpeg" {
+				if strings.Contains(p, "ffmpeg") { // FfmpegPath: "ffmpeg", or C:\ffmpeg\bin\ffmpeg.exe by default on Windows
 					return "/opt/ff/ffmpeg", nil
 				}
 				return "", os.ErrNotExist
