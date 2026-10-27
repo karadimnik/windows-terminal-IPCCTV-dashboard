@@ -1,6 +1,6 @@
 # Troubleshooting
 
-**Holocron** (the Go system): run `holocron doctor --quiet` first. It checks recording, live view, connections, the web app, the disk and the processes, and prints a `fix:` under every problem ([health check](holocron-cheatsheet.md#health-check)). The table below is the PowerShell system's.
+**Holocron** (the Go system): run `holocron doctor --quiet` first. It checks recording, live view, connections, the web app, the disk and the processes, and prints a `fix:` under every problem ([health check](holocron-cheatsheet.md#health-check)). The first table below is the PowerShell system's; [Holocron: archive layout](#holocron-archive-layout) covers the spool and day folders.
 
 ## Something is wrong
 
@@ -19,6 +19,19 @@
 | **MediaMTX exits immediately with `ReadDirectoryChanges: Incorrect function`.** | `RestreamerConfigPath` is on the WSL share, which does not implement it. | Point it at a local NTFS path such as `C:\mediamtx\mediamtx.yml`. |
 | **Autostart did nothing at logon.** | Usually the repository's path was not reachable yet - [limitation 10](limitations.md). | Read `%LOCALAPPDATA%\IPCCTV\autostart.log`, and confirm the task with `schtasks /query /tn IPCCTV-Recorder /fo list`. |
 | **The camera password needs changing.** | - | Delete `camera_creds.xml` and run the dashboard again for a fresh prompt. Tapo cameras keep a separate RTSP account from the TP-Link cloud login; changing the cloud password does nothing here. |
+
+## Holocron: archive layout
+
+Holocron keeps `<root>\<Camera>\` for the segment being written and the newest closed one, and files the rest into `<root>\<Camera>\YYYY-MM-DD\` ([how it works](how-it-works.md#the-mover)). Three things go wrong there; `holocron doctor` (group `storage`) names each, with the `fix:` line quoted below.
+
+| Symptom | Cause | What to do |
+| --- | --- | --- |
+| `warn spool backlog`: `the mover is not keeping up ...: more than 4 segments in the spool of <camera> N` (`storage.backlog`) | The mover is not filing. The archive is still read and pruned, but the camera folder grows again. Reasons are in the log: the supervisor is not running, the mover is refused (no valid ownership marker), a conflict (`not filed <path>: the destination ... already exists; neither file was touched`), or a file another program holds open (busy, retried each cycle, debug level). With `MoveToDayFolders` false the check is `info`, not a warning. | `fix: holocron logs --component prune --since 1h (action archive.file names the reason) ; holocron status (is the supervisor running?)`. For a conflict compare the two files and keep one; `holocron archive migrate --now` files what is left and reports it. |
+| `warn unseen files`: `N file(s) the pruner cannot see, so it never deletes them and they fill the disk` (`storage.unseen`); or a camera line in `storage.cameras` saying `N segment(s) are MISFILED` | A segment is in a day folder that is not the date in its name, there is something else in a day folder (a foreign file, another camera's segment), or a segment-like name sits deeper than a day folder or in a folder that is not a day. None of them is footage, so none is deleted or counted. | `fix: holocron archive stats ; move each segment into E:\cameras\<camera> or its YYYY-MM-DD day folder, and move anything else out of the camera folders` (your root in place of `E:\cameras`). For `storage.cameras` the fix is `holocron archive stats ; move each to the YYYY-MM-DD folder of its name in E:\cameras\<camera>`. Move by hand only these strays; never write into a day folder otherwise. |
+| `holocron archive migrate --now` lists files as `in use by another program` (busy), `changed or gone`, or ends `INCOMPLETE, see above` | Windows: another process holds the file open, so the rename was refused (a sharing violation). Nothing was lost; the file stays in the camera folder. | Close whatever holds it and run `holocron archive migrate --now` again (or wait: the mover retries every cycle). A `CONFLICT` or `ERROR` (exit 1) names the files: compare, keep one, run again. |
+| `holocron archive flatten` says `REFUSED: the recorder is running: stop it before putting the day folders back into the spool (...)` | Holocron (supervisor, control endpoint or host process) still runs, and its mover would race the files coming back. | `fix: holocron down`, then `holocron archive flatten --now`. |
+
+The PowerShell system sees none of this: it lists only the files directly in a camera folder, so it never shows or prunes a filed day. Before it runs again, `holocron archive flatten --now` ([rollback R2a](rollback.md#r2a-put-the-archive-back-flat)). Windows Explorer shows the day folders as ordinary folders inside each camera folder.
 
 ## When something stops unexpectedly
 

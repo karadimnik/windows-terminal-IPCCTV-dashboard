@@ -27,8 +27,9 @@ One page of lookups. First time here: [holocron-quickstart.md](holocron-quicksta
 | follow the log | `holocron logs -f` |
 | change a log level now (needs the supervisor running) | `holocron log level supervisor debug` (all components: `holocron log level all info`; keep it: add `--save`) |
 | archive size, GB per day, days left | `holocron archive stats` |
-| file the flat history into day folders (the plan, then apply it; safe while recording) | `holocron archive migrate`, then `holocron archive migrate --now` |
-| put the archive back flat (rollback to the PowerShell system; Holocron stopped) | `holocron archive flatten`, then `holocron archive flatten --now` |
+| know how many days are kept | retention is the free-space watermark (`ReserveGB`), not a day count: about 3.7 days at 78 GB/day on the 466 GB disk (measured 2026-10-27). It moves with bitrate, camera count and `ReserveGB`, not with the day-folder layout; read the live projection from `holocron archive stats` |
+| file the flat history into day folders now (the plan, then apply it; safe while recording; the mover does it by itself within minutes of a start, so this is optional) | `holocron archive migrate`, then `holocron archive migrate --now` |
+| put the archive back flat (required before the PowerShell system runs again, which reads only the camera folder itself; Holocron stopped first with `holocron down`) | `holocron archive flatten`, then `holocron archive flatten --now` |
 | preview what the pruner would delete | `holocron prune --dry-run` (deleting: `holocron prune --now --yes`, only with no supervisor running) |
 | compare two archives (read only) | `holocron archive compare --old E:\cameras --new D:\holocron-shadow` |
 | add / change password / list users | `holocron user add anna`, `holocron user passwd anna`, `holocron user list` (password on standard input) |
@@ -57,7 +58,7 @@ Names with a space need quotes: `holocron cam enable "Front Door"`. `--since` ta
 | `connections` | each camera answers TCP and RTSP OPTIONS (as `cam test`), the relay serves every camera's path (with its readers), the expected listeners answer |
 | `live` | the live instance alive, the web role's live-secret login accepted by it (the 22 Oct 502), every camera's live paths |
 | `web` | the web role alive, `GET /api/status` on loopback (control path), HTTPS handshake, certificate days left, the CA's fingerprint, a login user, web errors of the last hour |
-| `storage` | free space against the reserve (at the reserve edge is normal), the pruner's last run (blocked fails, circuit breaker warns), the ownership marker, segments per camera in 24 h, files the pruner cannot see (a misfiled segment, anything else in a day folder, a segment in a folder it does not enter: warns) |
+| `storage` | free space against the reserve (at the reserve edge is normal), the pruner's last run (blocked fails, circuit breaker warns), the ownership marker, segments per camera in 24 h (a misfiled segment warns), files the pruner cannot see (`storage.unseen`: a misfiled segment, anything else in a day folder, a segment in a folder it does not enter: warns), spool backlog (`storage.backlog`: warns when a camera folder holds more than 4 segments 15 minutes after the supervisor started, so the mover is stuck) |
 | `system` | stray or orphan processes, the old system's supervisor, two supervisors, autostart runs this executable with this config, log errors of 24 h, alert channels, version, `HOLOCRON_SANDBOX_ONLY` / camera login variables in this window |
 
 `--json` prints one document: `schema` 1, `root`, `groups`, `checks` (`id`, `group`, `level`, `title`, `detail`, `fix`, `data`) and `summary` (`verdict`, `running`, counts, `elapsedMs`).
@@ -74,7 +75,8 @@ Names with a space need quotes: `holocron cam enable "Front Door"`. `--since` ta
 | ownership marker (pruner deletes only here) | `<root>\_state\archive-owner.json` | the supervisor claims the root |
 | autostart record | `<config folder>\_state\install.json` | `holocron install` |
 | logs | `<root>\_logs\holocron.log` (+ `.1`), `audit.log` | every role and command |
-| recordings | `<root>\<Camera_Name>\<Camera_Name>_YYYYMMDD_HHMMSS+0300.mkv` | ffmpeg, 15-minute segments |
+| recordings, the spool (the open segment and the newest closed one) | `<root>\<Camera_Name>\<Camera_Name>_YYYYMMDD_HHMMSS+0300.mkv` | ffmpeg, 15-minute segments |
+| recordings, filed days (the local date in the file name; never write here by hand) | `<root>\<Camera_Name>\YYYY-MM-DD\<Camera_Name>_YYYYMMDD_HHMMSS+0300.mkv` | the mover (`MoveToDayFolders`), `archive migrate`; undone by `archive flatten` |
 | web users, sessions, relay and live secrets | `%LOCALAPPDATA%\IPCCTV\camui\auth` (`users.json`, `sessions.json`, `relay_api_secret.txt`, `live_view_secret.txt`) | web role, supervisor; never open or copy them |
 | local CA and server certificate | `%LOCALAPPDATA%\IPCCTV\tls` (`ca.crt`, `ca.key`, `leaf.crt`, `leaf.key`) | `tls ca`, first HTTPS start |
 | camera login | Windows Credential Manager (`holocron/camera.user`, `holocron/camera.password`); file backend: `secrets.enc` + `secrets.key` in the auth folder | `secret set`, `secret import` |
@@ -96,7 +98,7 @@ Names with a space need quotes: `holocron cam enable "Front Door"`. `--since` ta
 | Code | Meaning |
 | --- | --- |
 | 0 | ok (`status`: running) |
-| 1 | refused, blocked or failed: `NOT RECORDING`, survivors after `down`, a `doctor` fail, a refused `config set`, `status`: not running (no status file, stale heartbeat, stopped), `prune` refused, `archive compare` found differences |
+| 1 | refused, blocked or failed: `NOT RECORDING`, survivors after `down`, a `doctor` fail, a refused `config set`, `status`: not running (no status file, stale heartbeat, stopped), `prune` refused, `archive compare` found differences, `archive migrate` or `archive flatten` refused or left a conflict or an error |
 | 2 | usage: unknown command, bad flag, missing input, sandbox guard |
 | 20 | another supervisor holds the archive (not restarted) |
 | 21 | configuration fault: no camera login, ffmpeg older than 5.0 (alert 102) |
@@ -137,7 +139,7 @@ Whatever the symptom, `holocron doctor --quiet` first: it prints each problem wi
 
 Full procedure and the rehearsal: [rollback.md](rollback.md).
 
-1. `holocron down` (expect `stopped: 0 survivors`), then `holocron autostart disable`.
+1. `holocron down` (expect `stopped: 0 survivors`), then `holocron archive flatten --now` (dry run first; the old system reads only the files directly in a camera folder, so filed days must come back), then `holocron autostart disable`.
 2. In the old folder, start the old system as you wrote down in cutover P7 (this machine: `.\cam.recorder.ps1 -Nvr`, then `camui.exe`; not `.\cam.ps1 -Start`, see [rollback.md](rollback.md#r5-start-the-old-system)).
 3. `.\cam.ps1 -Status` shows the supervisor, the ffmpeg children, the relay and the UI.
-4. Leave the footage and the Holocron files where they are; both systems never record at once.
+4. Leave the Holocron files where they are (the footage is flat again after step 1); both systems never record at once, and do not start Holocron again before step 2 (its mover would file the segments again).
