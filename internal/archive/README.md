@@ -1,6 +1,9 @@
 # archive
 
-Naming, scanning and root-safety rules. The pruner planner/executor (W3) builds on this; nothing here deletes anything.
+Naming, scanning, the archive layout and root-safety rules. The pruner planner/executor (W3) builds on this; nothing here deletes anything.
+Every reader lists and resolves a camera's folder and segments through `Layout` (task L1, decision D20): it is the one place that builds a path
+under the root, so the day-folder layout of D20 changes this package only. `TestNothingOutsideArchiveListsOrJoinsTheArchive` fails when a
+non-test file elsewhere lists a folder or joins a root with a camera (allow-list with reasons in `guard_test.go`).
 
     // names
     func SafeName(name string) (string, error)       // == Get-CamSafeName; *NameError{Name, Kind, Stem} (KindNoLegalCharacters, KindReservedDevice); messages equal PowerShell's
@@ -23,6 +26,22 @@ Naming, scanning and root-safety rules. The pruner planner/executor (W3) builds 
                           Newest string; NewestMTime time.Time; NewestBytes int64; Recent, Anomaly bool }
     func NewTracker() *Tracker; (*Tracker).Observe(DirScan) time.Time /* first-seen of Newest */; (*Tracker).Forget(dir string)
     func LiveSize(path string) (int64, error)       // the size of a file another process is writing (doctor samples growth with it)
+
+    // layout (flat today: <Root>/<camera>/<camera>_<stamp><ext>; the camera folder is the "spool" ffmpeg writes into)
+    type Layout struct { Root string; Matcher Matcher; Container string; Cache *Cache }   // a plain value, build one where needed
+    func (Layout) CameraDir(camera string) string    // <Root>/<camera>: where ffmpeg writes and the supervisor mkdirs
+    func (Layout) Folders() ([]Entry, error)         // root entries not starting with "_", name order, as listed (os.ReadDir's error)
+    func (Layout) Cameras() ([]CameraFolder, error)  // Folders checked with os.Lstat: folders, and links (Link true, refused by readers)
+    func (Layout) Entries(camera) ([]Entry, error)   // every entry of the camera's folder(s), never cached
+    func (Layout) Files(camera) ([]File, error)      // non-directory entries with DirEntry.Info, name order; through Cache when set
+    func (Layout) Segments(camera) ([]Segment, error); (Layout) Newest(camera) (Segment, bool, error)   // regular strict segments, newest first (mtime, later name on a tie)
+    func (Layout) Scan(camera, now, segmentSeconds) (DirScan, error)   // Matcher.Scan of the camera, through Cache when set
+    func (Layout) Resolve(camera, name string) (Entry, error)          // MATCHES name against the listing (exact, then case-folded where Matcher folds); never joins it
+    func (Layout) Classify(path string) (camera, name string, ok bool) // lexical: <Root>/<camera>/<segment of camera>
+    type Entry struct { fs.DirEntry; Path, Dir, Day string }          // Day: the day folder, "" for the spool (always "" until day folders exist)
+    type File struct { Entry; Info fs.FileInfo }; (File) Created() time.Time; type Segment struct { File; Start time.Time }
+    func CreatedTime(fs.FileInfo) time.Time          // NTFS creation time; zero elsewhere
+    func NewCache() *Cache; (*Cache).Stats() CacheStats; (*Cache).Invalidate(dir); (*Cache).InvalidateAll(); (Layout).Invalidate(camera)
 
     // root guards and ownership
     func CheckRoot(path string, p osx.Platform) (problem string)
@@ -59,4 +78,19 @@ Naming, scanning and root-safety rules. The pruner planner/executor (W3) builds 
   of an open handle, so junctions and 8.3 short names resolve too; elsewhere `filepath.EvalSymlinks`), and it is compared with the protected
   paths as given and in their real form (mount points as given). A root that does not exist yet passes (claiming checks existence).
   A folder inside a protected one is accepted (the marker decides), as in PowerShell.
+- **Layout** (L1): the readers keep their own stat semantics because `Entry` carries the listing's `DirEntry` and the built `Path`: the pruner
+  and the empty-segment cleanup still `os.Lstat` every entry, archive compare still `os.Stat`s, the scan, the Footage index, `archive stats`
+  and the doctor use the listing's `Info`. Each moved reader is proved equal to its old code (kept as a reference function in the test) over
+  the 200-tree prune corpus and the tables, the names goldens and 120 generated trees (spaces, case, foreign files, links and junctions,
+  zero-byte, 8.3-style names, +0300 and +0200 in one folder, future-dated files, sub-folders): `*layout_equiv_test.go` in each package.
+- **Cache** (L1): every call still lists the folder, so the names are always exact (no ghost file, no hidden new file). File information is
+  reused only while the folder is the same folder (`os.SameFile`) with the same mtime and was not changed within 2 s of its last listing
+  (any create, delete or rename, also over an existing name, re-reads everything); even then the `Hot` (2) newest by mtime, the 2 last names,
+  anything modified within `Fresh` (2 min) of its last read, new names and changed type bits are re-read, and every `FullEvery`-th (30) call
+  re-reads all. The one possible staleness is an old file changed in place, for at most 29 calls; recorder segments never are. On Windows
+  `os.ReadDir` already returns every entry's size and times (`DirEntry.Info` is no system call), so the cache reuses nothing there and is
+  exactly the uncached result. Bounded to `MaxDirs` (256) folders; per process; nothing on disk. The supervisor's status tick and archive
+  scan share one Cache, the web role has its own; the pruner, the claim rule, the cleanup, the CLI and the doctor use none. Measured on
+  Linux (`TestCacheStatCount`, 360 files, 12 ticks a minute, a roll and a prune every 15 minutes, identical results at every tick): 4332
+  entry stats per minute before, 215 with the defaults (95 with `FullEvery` 180).
 - Not here: the per-file prune predicate (`Get-CamPruneRefusal`: reparse, inside-root, parent equals root, no `_` folder, `IsSegmentOf`) - W3 composes it from these parts.

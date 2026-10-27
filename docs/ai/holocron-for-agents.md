@@ -48,7 +48,7 @@ Why separate processes and one writer: [HLD](../../tasks/portable-nvr/os-indepen
 | [cmd/camui](../../cmd/camui/main.go) | four-line main of the legacy stand-alone web app; the code is `internal/web` |
 | [internal/alerts](../../internal/alerts/README.md) | alert events, non-blocking dispatcher, channels log, webhook, push, desktop, eventlog |
 | [internal/app](../../internal/app/README.md) | production wiring: paths, config resolve and edit helpers, census, `Down`, `RunHost`, `Running` |
-| [internal/archive](../../internal/archive/README.md) | safe names, segment names, scans, root guards and the ownership marker |
+| [internal/archive](../../internal/archive/README.md) | safe names, segment names, scans, root guards and the ownership marker; `Layout`, the only way to list a camera folder or resolve a segment path (with an incremental scan cache; guard test) |
 | [internal/autostart](../../internal/autostart/README.md) | logon task, Windows service, systemd user unit, launchd agent; install record |
 | [internal/cli](../../internal/cli/doc.go) | the action contract: `Action`, `Registry`, `Runner`, `AssertAllExposedAreActions` |
 | [internal/clock](../../internal/clock/README.md) | the one time seam: UTC wall clock plus monotonic intervals, fakes |
@@ -227,6 +227,7 @@ A pid registry applies on every OS: each child's pid, start time and image are w
 - Windows rules: AUX, CON, NUL, PRN, COM1 and LPT1 are reserved device names, so no file may be named `aux.go` or `aux.json` (this broke `git checkout` on windows-latest; ledger commit `c359133`); `%TEMP%` may be an 8.3 short name (`USERNA~1`), which `archive.CheckRoot` resolves through the final path of an open handle (`internal/archive/README.md`), so compare resolved paths; real-process tests run from a short local folder with `TMP`/`TEMP` set and `WSLENV` passing the variables (recipe in `cmd/holocron/README.md`); run PowerShell from a local folder, never from `\\wsl.localhost`.
 - Windows PowerShell 5.1 quirks that bit this project: `-File` binds a comma list as one string, so use `-Command "& 'script.ps1' -Checks a,b"` ([development.md](../development.md)); it pipes ASCII to a program, so a password piped to `holocron user add` must be ASCII ([ui.md](../ui.md)).
 - Documentation checks: `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& '<path>\tests\cam.tests.ps1' -Checks doclinks,docswitches"` (every relative link and anchor in `README.md` and `docs/*.md`; capitalised `-Switch` tokens must be declared script parameters) and the Go drift guard `cmd/holocron/docs_test.go` (every `holocron ...` in the quickstart, cheat sheet, this file, `README.md` and `AGENTS.md` names a registered command; the table in section 5 equals the registry; a line marked `# ignore` is skipped).
+- Archive layout: list camera folders and segments and build their paths only through `archive.Layout` (`TestNothingOutsideArchiveListsOrJoinsTheArchive` fails otherwise); a reader moved onto it keeps its old code as a reference function and is compared over the trees of `internal/archive/archivetest` (`*layout_equiv_test.go`).
 - Never test against the Operator's live system: use a throwaway root, `HOLOCRON_SANDBOX_ONLY=1`, and the freshly built binary.
 
 ## 12. How to add a command
