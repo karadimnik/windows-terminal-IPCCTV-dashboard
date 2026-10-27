@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"holocron/internal/archive"
+	"holocron/internal/status"
 )
 
 var storageTable = []doctorCheck{
@@ -16,6 +17,7 @@ var storageTable = []doctorCheck{
 	{id: "storage.marker", group: "storage", run: storageMarker},
 	{id: "storage.cameras", group: "storage", run: storageCameras},
 	{id: "storage.unseen", group: "storage", run: storageUnseen},
+	{id: "storage.backlog", group: "storage", run: storageBacklog},
 }
 
 func init() { doctorTable = append(doctorTable, storageTable...) }
@@ -202,4 +204,56 @@ func storageUnseen(_ context.Context, r *drun) []check {
 		n, strings.Join(kinds, ", "), strings.Join(examples, ", ")).
 		fix("holocron archive stats ; move each segment into %s or its YYYY-MM-DD day folder, and move anything else out of the camera folders",
 			l.CameraDir("<camera>")).data(data)}
+}
+
+// storageBacklog: with the mover on (MoveToDayFolders, decision D20) a camera's spool holds the
+// segment being written and the newest closed one, plus one younger than MoveMarginSeconds. More
+// than 4 once the supervisor has run for 15 minutes (a first run over a flat archive files
+// MoveMaxPerCycle per cycle) means the mover is stuck: the archive is still read and pruned, but
+// the camera folder grows again.
+func storageBacklog(_ context.Context, r *drun) []check {
+	if !r.e.cfg.MoveToDayFolders {
+		return []check{mk(lvInfo, "spool backlog", "the mover is off (MoveToDayFolders false): nothing is filed into day folders, which is fine for a flat archive")}
+	}
+	l := archive.Layout{Root: r.e.paths.Root, Matcher: archive.MatcherFor(r.e.opts.Platform), Container: r.ext()}
+	cams, err := l.Cameras()
+	if err != nil {
+		return []check{mk(lvInfo, "spool backlog", "not checked: %v", err)}
+	}
+	const limit, settle = 4, 15 * time.Minute
+	var heavy []string
+	spools := map[string]int{}
+	for _, cam := range cams {
+		if cam.Link {
+			continue
+		}
+		files, _, err := l.Spool(cam.Name)
+		if err != nil {
+			continue
+		}
+		n := 0
+		for _, f := range files {
+			if f.Info.Mode().IsRegular() && l.Classify(f.Path).Kind == archive.Spooled {
+				n++
+			}
+		}
+		spools[cam.Name] = n
+		if n > limit {
+			heavy = append(heavy, fmt.Sprintf("%s %d", cam.Name, n))
+		}
+	}
+	data := map[string]any{"spools": spools, "limit": limit}
+	if len(heavy) == 0 {
+		return []check{mk(lvOK, "spool backlog", "every camera folder holds at most %d segments; the rest are filed in day folders", limit).data(data)}
+	}
+	since := ""
+	if d := r.doc; d.State == status.StateRunning && d.UptimeSeconds != nil {
+		up := time.Duration(*d.UptimeSeconds * float64(time.Second))
+		if up < settle {
+			return []check{mk(lvOK, "spool backlog", "the mover is catching up (the supervisor started %s ago): %s segment(s) in the spool", up.Round(time.Second), strings.Join(heavy, ", ")).data(data)}
+		}
+		since = fmt.Sprintf(" %s after the supervisor started", up.Round(time.Minute))
+	}
+	return []check{mk(lvWarn, "spool backlog", "the mover is not keeping up%s: more than %d segments in the spool of %s", since, limit, strings.Join(heavy, ", ")).
+		fix("holocron logs --component prune --since 1h (action archive.file names the reason) ; holocron status (is the supervisor running?)").data(data)}
 }
