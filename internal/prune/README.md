@@ -25,11 +25,12 @@ specification and `testdata/golden/prune/` holds its recorded decisions.
                            Guard string; GuardMTime time.Time /* the protected newest it must stay strictly older than */ }
 
     // the executor
-    type FS interface { Remove(path string) error; Stat(path string) (Info, error) /* lstat */; FreeBytes(root string) (uint64, error) }
+    type FS interface { Remove(path string) error; RemoveDir(path string) error; Stat(path string) (Info, error) /* lstat */; FreeBytes(root string) (uint64, error) }
     type OSFS struct{ Platform osx.Platform }          // Remove = unlink / DeleteFile: never a directory, never recursive
+                                                       // RemoveDir = rmdir / RemoveDirectory: one EMPTY directory, ErrDirNotEmpty otherwise
     type Executor struct { FS FS; Log *slog.Logger; Actor string; DryRun bool; Sandbox string }
     func (e *Executor) Run(in Inputs, st *State) (Result, error)
-    type Result struct { Decision /* what was done */; Plan Decision; DryRun bool; Skipped []Skip; Alerts []Alert; Episode Episode }
+    type Result struct { Decision /* what was done */; Plan Decision; DryRun bool; Skipped []Skip; Alerts []Alert; Episode Episode; DaysRemoved []string }
 
     // episodes and alerts (returned, not sent)
     type State struct { RefusalAlerted string; ClockRefused, BlockedAlerted, AgeBreakerTripped bool; DeletedTotal int; FreedBytes int64; Blocked bool; LastMessage string }
@@ -73,6 +74,15 @@ still plain folders and not links or junctions, still passes the allowlist, stil
 its guard) and skips it otherwise; when the plan runs out before the target the
 run is `Short` (not `Blocked`) and the next run continues. Every deletion is logged at INFO with
 `action=prune.delete`, `target`, `bytes`, `reason`, `result`; each run ends with its stop line.
+
+Empty day folders (D20). After a real run that no gate refused, the executor removes each listed day
+folder dated before today's local date that the run emptied (every file listed in it was deleted) or
+that was already empty when Collect listed it: re-checked first (inside the sandbox, a plain folder
+named like a real date, directly in a plain camera folder directly under the root), then `RemoveDir`,
+which refuses anything that is not empty. Today's and later days stay (the mover may be filing into
+them), as do the camera folder and every other folder. A folder it keeps or cannot remove is logged
+(`action=prune.rmdir`: not empty at DEBUG, a failed re-check or removal at WARN) and tried again by
+the next run; removed ones are logged at INFO and listed in `Result.DaysRemoved`.
 
 ## Tests
 

@@ -149,6 +149,12 @@ func replayed(t *testing.T, s gScenario, fold bool, moved map[string]string) (st
 	steps := make([]any, len(r.results))
 	for i, g := range r.results {
 		res := g.res
+		for _, d := range res.DaysRemoved {
+			if !archive.IsDayName(filepath.Base(d)) || exists(d) {
+				t.Errorf("%s: removed %s, which is not a day folder or is still there", s.Name, d)
+			}
+		}
+		res.DaysRemoved = nil // the day folders a run removed: only the filed archive has them
 		removed := make([]string, len(g.removed))
 		for j, p := range g.removed {
 			if f, ok := moved[p]; ok {
@@ -636,6 +642,130 @@ func TestFiledNewestSurvives(t *testing.T) {
 					t.Errorf("spool %d reserve %v %s: %d segments left, want only the newest", spool, reserve, c.Name, len(g.Footage))
 				}
 			}
+		}
+	}
+}
+
+// ---- empty day folders (B4) ----
+
+// TestEmptyDayFolders: after a real run the day folders it emptied and the ones already empty go,
+// when dated before today; a folder still holding anything, today's and a later day's, a folder
+// that is not a day, an invalid date, a link named like a day and the camera folder stay. A second
+// run removes nothing more; a dry run removes nothing.
+func TestEmptyDayFolders(t *testing.T) {
+	r := newRig(t)
+	cam := filepath.Join(r.root, "Cam")
+	local := r.now.In(time.Local)
+	dayOf := func(d int) string { return local.AddDate(0, 0, d).Format("2006-01-02") }
+	segIn := func(d int, hour int) string { // a segment of the local day d, named in the local zone
+		day := local.AddDate(0, 0, d)
+		st := time.Date(day.Year(), day.Month(), day.Day(), hour, 0, 0, 0, time.Local)
+		return r.put(filepath.Join(cam, st.Format("2006-01-02"), "Cam_"+st.Format("20060102_150405-0700")+".mkv"), unit/64, st.Add(15*time.Minute))
+	}
+	for k := 0; k < 3; k++ {
+		st := r.now.Add(-time.Duration(45-15*k) * time.Minute)
+		mt := st.Add(15 * time.Minute)
+		if k == 2 {
+			mt = r.now.Add(-5 * time.Second)
+		}
+		r.put(filepath.Join(cam, segName("Cam", st, ".mkv")), unit/64, mt)
+	}
+	segIn(-3, 1)
+	segIn(-3, 2)                                                // emptied by the run: removed
+	segIn(-2, 3)                                                // emptied but for:
+	r.put(filepath.Join(cam, dayOf(-2), "notes.txt"), 1, r.now) // a foreign file: kept
+	mk := func(p string) string {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	stray := mk(filepath.Join(cam, dayOf(-4)))            // already empty: removed
+	nested := mk(filepath.Join(cam, dayOf(-5), "deeper")) // holds a folder: kept
+	keep := []string{
+		filepath.Join(cam, dayOf(-2)), filepath.Dir(nested), nested,
+		mk(filepath.Join(cam, dayOf(0))), mk(filepath.Join(cam, dayOf(1))), // today, tomorrow: kept
+		mk(filepath.Join(cam, "old")), mk(filepath.Join(cam, "2026-02-30")), mk(filepath.Join(r.root, "_tmp", dayOf(-6))),
+	}
+	outside := mk(filepath.Join(r.dir, "outside"))
+	link := filepath.Join(cam, dayOf(-7))
+	if _, n := (archivetest.Tree{Nodes: []archivetest.Node{{Path: "archive/Cam/" + dayOf(-7), Kind: "junction", Target: "outside"}}}).Build(t, r.dir); n == 1 {
+		keep = append(keep, link, outside)
+	}
+	r.claimAny()
+	r.rules.ReserveGB = 1e6
+	r.fs.Reset(0)
+
+	if res := r.run(true); len(res.DaysRemoved) != 0 || !exists(stray) {
+		t.Fatalf("a dry run removed %v", res.DaysRemoved)
+	}
+	res := r.run(false)
+	want := []string{filepath.Join(cam, dayOf(-4)), filepath.Join(cam, dayOf(-3))}
+	sort.Strings(want)
+	got := append([]string{}, res.DaysRemoved...)
+	sort.Strings(got)
+	if !eqList(got, want) {
+		t.Fatalf("removed %v, want %v (deleted %d)", got, want, len(res.Deletions))
+	}
+	for _, p := range append(keep, cam) {
+		if !exists(p) {
+			t.Errorf("%s was removed", p)
+		}
+	}
+	for _, p := range want {
+		if exists(p) {
+			t.Errorf("%s is still there", p)
+		}
+	}
+	if again := r.run(false); len(again.DaysRemoved) != 0 {
+		t.Fatalf("the second run removed %v", again.DaysRemoved)
+	}
+	for _, p := range append(keep, cam) {
+		if !exists(p) {
+			t.Errorf("%s was removed by the second run", p)
+		}
+	}
+}
+
+// TestEmptyDayFolderRevalidated: a day folder that is swapped for a link, or that something is
+// written into, after Collect listed it empty is not removed; untouched (the control) it is.
+func TestEmptyDayFolderRevalidated(t *testing.T) {
+	for _, change := range []string{"none", "link", "file"} {
+		r := newRig(t)
+		cam := filepath.Join(r.root, "Cam")
+		r.put(filepath.Join(cam, segName("Cam", r.now.Add(-15*time.Minute), ".mkv")), unit/64, r.now.Add(-5*time.Second))
+		day := filepath.Join(cam, r.now.In(time.Local).AddDate(0, 0, -3).Format("2006-01-02"))
+		if err := os.MkdirAll(day, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r.claimAny()
+		in := r.inputs(false)
+		switch change {
+		case "link":
+			os.Remove(day)
+			os.MkdirAll(filepath.Join(r.dir, "outside"), 0o755)
+			rel, _ := filepath.Rel(r.dir, day)
+			if _, n := (archivetest.Tree{Nodes: []archivetest.Node{{Path: filepath.ToSlash(rel), Kind: "junction", Target: "outside"}}}).Build(t, r.dir); n != 1 {
+				t.Skip("no directory link could be made")
+			}
+		case "file":
+			r.put(filepath.Join(day, segName("Cam", r.now.Add(-72*time.Hour), ".mkv")), 1, r.now.Add(-72*time.Hour))
+		}
+		res, err := r.exec(false).Run(in, &r.st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if change == "none" {
+			if len(res.DaysRemoved) != 1 || exists(day) {
+				t.Fatalf("control: %v, still there %v", res.DaysRemoved, exists(day))
+			}
+			continue
+		}
+		if len(res.DaysRemoved) != 0 || !exists(day) {
+			t.Fatalf("%s: removed %v", change, res.DaysRemoved)
+		}
+		if change == "link" && !exists(filepath.Join(r.dir, "outside")) {
+			t.Fatal("the link's target is gone")
 		}
 	}
 }

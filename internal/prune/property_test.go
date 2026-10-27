@@ -61,6 +61,7 @@ func (m *memFS) Remove(p string) error {
 	return nil
 }
 
+func (m *memFS) RemoveDir(string) error           { return fmt.Errorf("memFS holds no folders") }
 func (m *memFS) FreeBytes(string) (uint64, error) { return m.base + uint64(m.freed), nil }
 
 type genTree struct {

@@ -27,6 +27,7 @@ type Info struct {
 // FS is the filesystem the executor deletes through: OSFS in production, a fake in tests.
 type FS interface {
 	Remove(path string) error              // one file; never a directory, never recursive
+	RemoveDir(path string) error           // one empty directory (rmdir); never a file, never recursive; ErrDirNotEmpty when it holds anything
 	Stat(path string) (Info, error)        // lstat semantics: a link is reported, not followed
 	FreeBytes(root string) (uint64, error) // available to the user on the root's volume
 }
@@ -36,6 +37,13 @@ type OSFS struct{ Platform osx.Platform }
 
 // Remove unlinks a single non-directory entry (removeFile refuses directories).
 func (OSFS) Remove(path string) error { return removeFile(path) }
+
+// RemoveDir removes one empty directory (removeDir: rmdir / RemoveDirectory, which refuse a
+// directory that holds anything, atomically).
+func (OSFS) RemoveDir(path string) error { return removeDir(path) }
+
+// ErrDirNotEmpty is RemoveDir's answer for a directory that holds anything.
+var ErrDirNotEmpty = errors.New("the folder is not empty")
 
 func (OSFS) Stat(path string) (Info, error) {
 	fi, err := os.Lstat(path)
@@ -120,6 +128,8 @@ type Result struct {
 	Skipped []Skip
 	Alerts  []Alert
 	Episode Episode
+	// DaysRemoved are the empty day folders the run removed (see Executor.Run).
+	DaysRemoved []string
 }
 
 func (e *Executor) sandbox() string {
@@ -151,7 +161,11 @@ func (e *Executor) actor() string {
 }
 
 // Run plans one prune run from in and performs it, updating st. Alerts are returned, not sent.
-// An error means nothing was attempted (a root outside the sandbox).
+// An error means nothing was attempted (a root outside the sandbox). After a real run that no gate
+// refused it removes each listed day folder (decision D20) dated before today's local date that
+// the run emptied or that was already empty when Collect listed it - only when it is still a plain
+// folder of a plain camera folder directly under the root, and empty (never recursively): the
+// mover may be filing into today's. A folder it cannot remove stays for the next run.
 func (e *Executor) Run(in Inputs, st *State) (Result, error) {
 	log := e.logger()
 	prefix := e.sandbox()
@@ -169,14 +183,14 @@ func (e *Executor) Run(in Inputs, st *State) (Result, error) {
 		res = Result{Decision: plan, Plan: plan, DryRun: e.DryRun}
 		res.Message = finalMessage(plan, e.DryRun)
 	} else {
-		act := &realActor{e: e, in: in, prefix: prefix, planned: map[string]bool{}}
+		act := &realActor{e: e, in: in, prefix: prefix, planned: map[string]bool{}, emptied: map[string]int{}}
 		for _, d := range plan.Deletions {
 			act.planned[d.Path+"|"+d.Reason] = true
 		}
 		d := run(in, act)
 		d.Failed = act.failed
 		d.Message = finalMessage(d, false)
-		res = Result{Decision: d, Plan: plan, Skipped: act.skipped}
+		res = Result{Decision: d, Plan: plan, Skipped: act.skipped, DaysRemoved: act.removeEmptyDays()}
 	}
 	if st == nil {
 		st = &State{}
@@ -243,6 +257,7 @@ type realActor struct {
 	failed  int
 	skipped []Skip
 	freeErr bool
+	emptied map[string]int // deletions per day folder path
 }
 
 func (a *realActor) free() float64 {
@@ -281,6 +296,9 @@ func (a *realActor) remove(s *seg, reason, detail string) (bool, bool) {
 		a.failed++
 		log.Error("prune: FAILED to delete "+s.path, logx.Action("prune.delete"), logx.Actor(a.e.actor()), logx.Target(s.path), logx.Result(logx.ResultFail), slog.String("reason", reason), logx.Err(err))
 		return false, false
+	}
+	if s.f.Day != "" {
+		a.emptied[filepath.Join(s.dir, s.f.Day)]++
 	}
 	log.Info("prune: deleted "+s.path, logx.Action("prune.delete"), logx.Actor(a.e.actor()), logx.Target(s.path), logx.Result(logx.ResultOK),
 		slog.String("file", s.f.Name), slog.Int64("bytes", s.f.Size), slog.String("reason", reason), slog.String("detail", detail), slog.Time("written", s.f.MTime))
@@ -322,6 +340,61 @@ func (a *realActor) revalidate(s *seg) string {
 	}
 	if !s.f.MTime.Before(gi.MTime) {
 		return "it is no longer strictly older than its folder's newest segment " + s.guard.f.Name
+	}
+	return ""
+}
+
+// removeEmptyDays removes the day folders Run describes and returns them.
+func (a *realActor) removeEmptyDays() []string {
+	log := a.e.logger()
+	today := a.in.Now.In(time.Local).Format("2006-01-02")
+	var out []string
+	for _, cam := range a.in.Cameras {
+		listed := map[string]int{}
+		for _, f := range cam.Files {
+			listed[f.Day]++
+		}
+		for _, day := range cam.Days {
+			dir := filepath.Join(cam.Dir, day)
+			if day >= today || listed[day] != a.emptied[dir] {
+				continue // today's or later, or something in it was not deleted
+			}
+			attrs := []any{logx.Action("prune.rmdir"), logx.Actor(a.e.actor()), logx.Target(dir)}
+			if why := a.revalidateDay(cam, day); why != "" {
+				log.Warn("prune: kept the day folder "+dir+": "+why, append(attrs, logx.Result(logx.ResultRefused))...)
+				continue
+			}
+			if err := a.e.FS.RemoveDir(dir); err != nil {
+				if errors.Is(err, ErrDirNotEmpty) {
+					log.Debug("prune: kept the day folder "+dir+": it is not empty", append(attrs, logx.Result(logx.ResultOK))...)
+				} else {
+					log.Warn("prune: could not remove the empty day folder "+dir+"; the next run tries again", append(attrs, logx.Result(logx.ResultFail), logx.Err(err))...)
+				}
+				continue
+			}
+			log.Info("prune: removed the empty day folder "+dir, append(attrs, logx.Result(logx.ResultOK))...)
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// revalidateDay re-checks a day folder just before it is removed; "" means it may go.
+func (a *realActor) revalidateDay(cam Camera, day string) string {
+	fsys, in := a.e.FS, a.in
+	dir := filepath.Join(cam.Dir, day)
+	if err := CheckSandbox(dir, a.prefix); err != nil {
+		return err.Error()
+	}
+	if cam.Reparse || strings.HasPrefix(filepath.Base(cam.Dir), "_") || !archive.IsDayName(day) ||
+		!in.same(filepath.Dir(filepath.Clean(cam.Dir)), filepath.Clean(in.Root)) {
+		return "it fails the allowlist"
+	}
+	if ci, err := fsys.Stat(cam.Dir); err != nil || !ci.Dir || ci.Reparse {
+		return "its camera folder is gone or became a link"
+	}
+	if di, err := fsys.Stat(dir); err != nil || !di.Dir || di.Reparse {
+		return "it is gone or became a link"
 	}
 	return ""
 }
