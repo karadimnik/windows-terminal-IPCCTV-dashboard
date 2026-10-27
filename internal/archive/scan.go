@@ -98,8 +98,8 @@ func (l Layout) ScanAll(camera string, now time.Time, segmentSeconds int) (DirSc
 }
 
 // ScanSpool is the scan of the spool alone, as before day folders: no day folder is read, so
-// Newest is "" when the spool holds no segment. The pruner uses it until task L3 teaches it the
-// day folders; it must not see a Newest it cannot list.
+// Newest is "" when the spool holds no segment: the flat view, the reference the tests compare
+// the layout's readers with.
 func (l Layout) ScanSpool(camera string, now time.Time, segmentSeconds int) (DirScan, error) {
 	return l.scan(camera, now, segmentSeconds, scanSpool)
 }

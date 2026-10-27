@@ -65,7 +65,11 @@ func TestWebHealthIsTheDoctorDocumentAndShowsAStalledCamera(t *testing.T) {
 	var sleeps atomic.Int32
 	r := stalledRig(t, &sleeps, nil)
 	fixed, seams := time.Now(), r.doctor
-	r.doctor = func(d *doctorDeps) { seams(d); d.now = func() time.Time { return fixed } } // ages in the details equal in both runs
+	r.doctor = func(d *doctorDeps) { // ages and free space in the details equal in both runs
+		seams(d)
+		d.now = func() time.Time { return fixed }
+		d.platform = freePlatform{d.platform, 100 * gb}
+	}
 	base := serveAdmin(t, r)
 	code, got, raw := healthOf(t, base, "")
 	if code != 200 {

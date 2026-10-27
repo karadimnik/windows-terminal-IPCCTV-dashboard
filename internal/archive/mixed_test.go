@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -499,4 +500,60 @@ func TestClaimRuleAcceptsDayFolders(t *testing.T) {
 			t.Errorf("%s: ClaimProblem = %q, want %q", tc.name, got, tc.want)
 		}
 	}
+}
+
+// TestStraysOverMixedTrees: on the awkward seeded trees, Strays names exactly the misfiled
+// segments and the other regular files of the day folders the brute-force walk finds, and as
+// nested only segment-named regular files in folders no reader enters; never footage, never a
+// spool file, never anything behind a link.
+func TestStraysOverMixedTrees(t *testing.T) {
+	fold := runtime.GOOS == "windows"
+	kinds := map[StrayKind]int{}
+	for _, tr := range archivetest.Mixed(20261028, 120) {
+		root, _ := tr.Build(t, t.TempDir())
+		truth := archivetest.Walk(t, root, tr.Container, fold)
+		l := Layout{Root: root, Matcher: Matcher{FoldCase: fold}, Container: tr.Container}
+		for _, c := range truth.Cameras {
+			want := map[string]StrayKind{}
+			footage := map[string]bool{}
+			for _, s := range c.Footage {
+				footage[s.Path] = true
+			}
+			for _, s := range c.Misfiled {
+				want[s.Path] = StrayMisfiled
+			}
+			for _, files := range c.DayFiles {
+				for _, f := range files {
+					if _, ok := want[f.Path]; !ok && f.Mode.IsRegular() && !footage[f.Path] {
+						want[f.Path] = StrayLoose
+					}
+				}
+			}
+			strays, err := l.Strays(c.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := map[string]StrayKind{}
+			for _, s := range strays {
+				kinds[s.Kind]++
+				if s.Kind == StrayNested {
+					rel, _ := filepath.Rel(c.Dir, s.Path)
+					parts := strings.Split(rel, string(filepath.Separator))
+					fi, err := os.Lstat(s.Path)
+					if _, _, ok := ParseSegment(filepath.Base(s.Path)); !ok || err != nil || !fi.Mode().IsRegular() || len(parts) < 2 || (len(parts) == 2 && IsDayName(parts[0])) {
+						t.Errorf("%s: nested stray %s is not a segment in a folder no reader enters", tr.Name, s.Path)
+					}
+					continue
+				}
+				got[s.Path] = s.Kind
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("%s/%s: strays\n got  %v\n want %v", tr.Name, c.Name, got, want)
+			}
+		}
+	}
+	if kinds[StrayMisfiled] == 0 || kinds[StrayLoose] == 0 || kinds[StrayNested] == 0 {
+		t.Fatalf("not every kind exercised: %v", kinds)
+	}
+	t.Logf("strays found: %d misfiled, %d loose, %d nested", kinds[StrayMisfiled], kinds[StrayLoose], kinds[StrayNested])
 }

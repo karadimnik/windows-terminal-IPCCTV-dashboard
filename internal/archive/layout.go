@@ -30,7 +30,7 @@ import (
 // the open segment AND the newest closed segment in the spool. When the spool holds fewer than
 // two segments, Newest and Scan also read day folders, newest first, until they have seen two
 // segments (so with one segment in the spool a status tick is two listings, and the answer is
-// still exact). ScanSpool reads the spool and nothing else (the pruner, until task L3).
+// still exact). ScanSpool reads the spool and nothing else (the flat view, the reference the tests compare with).
 // Everything that shows or counts footage reads the spool and every day folder: Files, Segments
 // and ScanAll (the archive-wide scan, the footage index, archive stats, archive compare, the
 // doctor). Resolve reads the spool and at most the one day folder a segment name implies.
@@ -387,6 +387,56 @@ func (l Layout) classOf(camera, day, name string) Class {
 		c.Kind = Misfiled
 	}
 	return c
+}
+
+// StrayKind is why a file under a camera folder is a Stray.
+type StrayKind uint8
+
+const (
+	StrayMisfiled StrayKind = iota + 1 // a segment of the camera in a day folder that is not the date in its name
+	StrayLoose                         // anything else in a day folder that is not footage: a foreign file, another camera's segment
+	StrayNested                        // a segment-like name in a folder the layout never enters: deeper than a day folder, or a sub-folder that is not a day
+)
+
+// Stray is a regular file under a camera folder that no reader lists as footage, so the pruner
+// never deletes it.
+type Stray struct {
+	Path string
+	Kind StrayKind
+}
+
+// Strays walks the camera's folder, never following a link or junction (filepath.WalkDir), and
+// returns its strays in walk order. The camera folder's own files (the spool) are never strays:
+// each reader judges those. The doctor reports them (storage.unseen). The error is the camera
+// folder's.
+func (l Layout) Strays(camera string) ([]Stray, error) {
+	dir := l.CameraDir(camera)
+	if _, err := os.Lstat(dir); err != nil {
+		return nil, err
+	}
+	var out []Stray
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil // an unreadable folder or a vanished entry: skipped, as every reader does
+		}
+		rel, _ := filepath.Rel(dir, path)
+		parts := strings.Split(rel, string(filepath.Separator))
+		inDay := len(parts) == 2 && IsDayName(parts[0])
+		c := l.Classify(path)
+		switch {
+		case len(parts) == 1 || c.Footage():
+		case inDay && c.Kind == Misfiled:
+			out = append(out, Stray{path, StrayMisfiled})
+		case inDay:
+			out = append(out, Stray{path, StrayLoose})
+		default:
+			if _, _, ok := ParseSegment(d.Name()); ok {
+				out = append(out, Stray{path, StrayNested})
+			}
+		}
+		return nil
+	})
+	return out, err
 }
 
 // segment is f as footage of camera: a regular file that is Spooled or Filed where it was listed.

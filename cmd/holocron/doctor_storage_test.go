@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -93,5 +94,71 @@ func TestDoctorCameraWithFarFewerSegments(t *testing.T) {
 	text := textOf(t, mustRun(r, "--json", "doctor", "--group", "storage"))
 	if !strings.Contains(text, "storage.cameras warn Back           3 segment(s), 0.00 GB in the last 24 h, against a median of 10") || !strings.Contains(text, "storage.cameras ok   Front") {
 		t.Errorf("%s", text)
+	}
+}
+
+// TestDoctorUnseenFiles: storage.unseen is ok on a flat archive and on a healthy filed one, and
+// warns with its fix for each kind of file the pruner cannot see; the Admin health panel shows it.
+func TestDoctorUnseenFiles(t *testing.T) {
+	r := newRig(t)
+	r.running()
+	now := time.Now()
+	start := now.Add(-3 * time.Hour).Truncate(time.Minute)
+	for i := 0; i < 3; i++ {
+		r.segment("Front", start.Add(time.Duration(i)*time.Hour), start.Add(time.Duration(i+1)*time.Hour), 100)
+	}
+	r.doctorTools(nil)
+	unseen := func() string {
+		for _, line := range strings.Split(textOf(t, mustRun(r, "--json", "doctor", "--group", "storage")), "\n") {
+			if strings.HasPrefix(line, "storage.unseen ") {
+				return line
+			}
+		}
+		t.Fatal("no storage.unseen check")
+		return ""
+	}
+	if got := unseen(); got != "storage.unseen ok   unseen files   none: the pruner sees every segment under the camera folders" {
+		t.Fatalf("flat: %q", got)
+	}
+	cam := filepath.Join(r.root, "Front")
+	old := now.Add(-50 * time.Hour)
+	name := archive.FormatSegmentName("Front", old, ".mkv")
+	put := func(p string) {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, st, _ := archive.ParseSegment(name)
+	put(filepath.Join(cam, archive.DayName(st), name)) // filed where it belongs
+	if got := unseen(); !strings.HasPrefix(got, "storage.unseen ok ") {
+		t.Fatalf("healthy filed: %q", got)
+	}
+	other := archive.FormatSegmentName("Front", old.Add(-48*time.Hour), ".mkv")
+	put(filepath.Join(cam, archive.DayName(st), other))                                          // misfiled
+	put(filepath.Join(cam, archive.DayName(st), "notes.txt"))                                    // loose
+	put(filepath.Join(cam, archive.DayName(st), "deeper", other))                                // nested deeper than a day
+	put(filepath.Join(cam, "old", other))                                                        // a folder that is not a day
+	put(filepath.Join(cam, "old", "readme.txt"))                                                 // not a segment, not a day: not reported
+	put(filepath.Join(cam, archive.DayName(st), archive.FormatSegmentName("Back", old, ".mkv"))) // another camera's: loose
+	out, _, _ := r.run("doctor", "--group", "storage")
+	got := unseen()
+	for _, w := range []string{"storage.unseen warn unseen files   5 file(s) the pruner cannot see", "1 misfiled in a day folder", "2 not footage, in a day folder", "2 segments in a folder the pruner does not enter"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("no %q in %q", w, got)
+		}
+	}
+	if !strings.Contains(out, "fix: holocron archive stats ; move each segment into") {
+		t.Errorf("no fix line:\n%s", out)
+	}
+	code, rep, raw := healthOf(t, serveAdmin(t, r), "")
+	found := false
+	for _, c := range rep.Checks {
+		if c.ID == "storage.unseen" {
+			found = c.Level == lvWarn && strings.HasPrefix(c.Fix, "holocron archive stats")
+		}
+	}
+	if code != 200 || !found {
+		t.Fatalf("the Admin health panel does not show it: %d %s", code, raw)
 	}
 }

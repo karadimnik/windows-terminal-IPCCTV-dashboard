@@ -15,6 +15,7 @@ var storageTable = []doctorCheck{
 	{id: "storage.prune", group: "storage", run: storagePrune},
 	{id: "storage.marker", group: "storage", run: storageMarker},
 	{id: "storage.cameras", group: "storage", run: storageCameras},
+	{id: "storage.unseen", group: "storage", run: storageUnseen},
 }
 
 func init() { doctorTable = append(doctorTable, storageTable...) }
@@ -155,4 +156,50 @@ func storageCameras(_ context.Context, r *drun) []check {
 		cs = append(cs, mk(lvOK, cam.Name, "%s", text).data(data))
 	}
 	return cs
+}
+
+// storageUnseen: files the pruner cannot see. It reads each camera folder and its day folders
+// (decision D20) and deletes only footage, so the strays of archive.Layout (a misfiled segment,
+// anything else in a day folder, a segment in a folder it does not enter) are never deleted and
+// never counted: the disk fills with them.
+func storageUnseen(_ context.Context, r *drun) []check {
+	l := archive.Layout{Root: r.e.paths.Root, Matcher: archive.MatcherFor(r.e.opts.Platform), Container: r.ext()}
+	cams, err := l.Cameras()
+	if err != nil {
+		return []check{mk(lvInfo, "unseen files", "not checked: %v", err)}
+	}
+	count := map[archive.StrayKind]int{}
+	var examples []string
+	for _, cam := range cams {
+		if cam.Link {
+			continue // the pruner refuses it whole, and says so
+		}
+		strays, _ := l.Strays(cam.Name)
+		for _, s := range strays {
+			count[s.Kind]++
+			if len(examples) < 5 {
+				examples = append(examples, s.Path)
+			}
+		}
+	}
+	misfiled, loose, nested := count[archive.StrayMisfiled], count[archive.StrayLoose], count[archive.StrayNested]
+	data := map[string]any{"misfiled": misfiled, "loose": loose, "nested": nested}
+	n := misfiled + loose + nested
+	if n == 0 {
+		return []check{mk(lvOK, "unseen files", "none: the pruner sees every segment under the camera folders").data(data)}
+	}
+	data["examples"] = examples
+	var kinds []string
+	for _, k := range []struct {
+		n    int
+		what string
+	}{{misfiled, "misfiled in a day folder that is not the date in the name"}, {loose, "not footage, in a day folder"}, {nested, "segments in a folder the pruner does not enter"}} {
+		if k.n > 0 {
+			kinds = append(kinds, fmt.Sprintf("%d %s", k.n, k.what))
+		}
+	}
+	return []check{mk(lvWarn, "unseen files", "%d file(s) the pruner cannot see, so it never deletes them and they fill the disk: %s; e.g. %s",
+		n, strings.Join(kinds, ", "), strings.Join(examples, ", ")).
+		fix("holocron archive stats ; move each segment into %s or its YYYY-MM-DD day folder, and move anything else out of the camera folders",
+			l.CameraDir("<camera>")).data(data)}
 }
