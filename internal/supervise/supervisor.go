@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"holocron/internal/archive"
@@ -103,6 +104,7 @@ type SupervisorDeps struct {
 	Scope    ProcessScope   // default NoScope{}
 	Scanner  RootScanner    // default ArchiveScanner for the configured container
 	Pruner   Pruner         // default ArchivePruner over RootPath
+	Mover    Mover          // default ArchiveMover over RootPath (decision D20)
 	Alerts   Alerts         // default: none (the ALERT log line is always written)
 
 	// Credentials hands out camera logins (relay source environment, direct input).
@@ -179,6 +181,8 @@ type Supervisor struct {
 
 	relayM, liveM *mtxChild // liveM changes at run time (Reload): read it under mu, replace it under liveMu and mu
 	liveMu        sync.Mutex
+	archMu        sync.Mutex  // a prune run and a mover cycle never overlap on the root
+	moveOn        atomic.Bool // MoveToDayFolders, re-read at each reconcile (the kill switch)
 	watch         relay.LoginWatch
 
 	reloadCh       chan chan struct{}
@@ -195,6 +199,7 @@ type Supervisor struct {
 	cameras   []config.Camera
 	archive   *ArchiveScan
 	pruneView status.Prune
+	owned     bool // the start-up claim found or wrote a valid ownership marker; the mover runs only then
 	api       RelayAPI
 	fault     string
 	report    StopReport
@@ -425,8 +430,8 @@ func (s *Supervisor) setup(cfg config.Config) error {
 	if !ok {
 		return &ConfigFault{fmt.Errorf("Container %q has no entry in ContainerProfiles", cfg.Container)}
 	}
-	if cfg.SegmentSeconds <= 0 || cfg.StatusIntervalSeconds <= 0 || cfg.ReconcileSeconds <= 0 || cfg.PruneIntervalSeconds <= 0 {
-		return &ConfigFault{errors.New("SegmentSeconds, StatusIntervalSeconds, ReconcileSeconds and PruneIntervalSeconds must be positive")}
+	if cfg.SegmentSeconds <= 0 || cfg.StatusIntervalSeconds <= 0 || cfg.ReconcileSeconds <= 0 || cfg.PruneIntervalSeconds <= 0 || cfg.MoveIntervalSeconds <= 0 {
+		return &ConfigFault{errors.New("SegmentSeconds, StatusIntervalSeconds, ReconcileSeconds, PruneIntervalSeconds and MoveIntervalSeconds must be positive")}
 	}
 	if cfg.RelayExternal && cfg.RestreamerEnabled {
 		return &ConfigFault{errors.New("RelayExternal needs RestreamerEnabled false: with an external relay no MediaMTX of its own is started")}
@@ -450,6 +455,10 @@ func (s *Supervisor) setup(cfg config.Config) error {
 	if d.Pruner == nil {
 		d.Pruner = ArchivePruner{Root: cfg.RootPath, Platform: d.Platform, Rules: prune.RulesFrom(cfg), Container: prof.Extension, Log: s.plog}
 	}
+	if d.Mover == nil {
+		d.Mover = ArchiveMover{Root: cfg.RootPath, Platform: d.Platform, Container: prof.Extension, Margin: seconds(cfg.MoveMarginSeconds), Max: cfg.MoveMaxPerCycle}
+	}
+	s.moveOn.Store(cfg.MoveToDayFolders)
 	if d.APILogin == nil {
 		p := d.Platform
 		d.APILogin = func() (relay.Login, error) {
@@ -485,6 +494,7 @@ func (s *Supervisor) setup(cfg config.Config) error {
 // recording: a root that cannot be claimed leaves pruning disabled, which the first prune run reports.
 func (s *Supervisor) claim() {
 	res, err := s.d.Pruner.Claim(s.clk.Now())
+	s.owned = err == nil && res.Owned
 	switch {
 	case err != nil:
 		s.plog.Warn(fmt.Sprintf("WARNING: could not claim %s as this recorder's archive, so pruning stays disabled: %v", s.cfg.RootPath, err),
@@ -571,6 +581,14 @@ func (s *Supervisor) supervise(ctx context.Context) {
 	}
 	pruneDone := make(chan struct{})
 	go s.pruneLoop(pruneDone)
+	moveDone := make(chan struct{})
+	if s.owned {
+		go s.moveLoop(moveDone)
+	} else {
+		close(moveDone)
+		s.plog.Warn("the mover does not run: the archive root is not owned (see the claim above), so nothing is filed into day folders",
+			logx.Action("archive.file"), logx.Target(s.cfg.RootPath), logx.Result(logx.ResultRefused))
+	}
 	close(s.running)
 	go s.startControl()
 
@@ -588,7 +606,7 @@ func (s *Supervisor) supervise(ctx context.Context) {
 		req = stopRequest{StopUnexpected, "the supervisor loop failed: " + s.fault}
 	}
 	s.mu.Unlock()
-	s.teardown(req, loopQuit, loopDone, pruneDone, hbCancel, hbDone)
+	s.teardown(req, loopQuit, loopDone, pruneDone, moveDone, hbCancel, hbDone)
 }
 
 // requestStop is the loop's way to stop (the stop-request file).

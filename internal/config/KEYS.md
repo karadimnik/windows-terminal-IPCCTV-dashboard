@@ -24,6 +24,10 @@ Types are strict: a JSON string is never accepted for a boolean or a number (Pow
 | PruneIntervalSeconds | 300 | number > 0 (**Go**) | pruner cycle | no |
 | MaxRetentionDays | null | null (off) or number > 0 (**Go**: PowerShell treated <= 0 as off) | age rule | yes |
 | MaxAgePruneFraction | 0.5 | number 0.01-1.0 (PowerShell also parsed a numeric string; Go wants a number) | age-rule breaker | yes |
+| MoveToDayFolders | true | JSON boolean | NEW in holocron (decision D20): the mover files closed spool segments into `<camera>\<YYYY-MM-DD>\`; false stops filing (filed days stay and are still read and pruned); applied at the next reconcile, no restart | no |
+| MoveIntervalSeconds | 60 | number >= 10 | NEW: mover cycle | no |
+| MoveMarginSeconds | 120 | number >= 30 | NEW: a spool segment written less than this long ago is not filed | no |
+| MoveMaxPerCycle | 200 | whole number >= 1 | NEW: files filed per camera per cycle (a first run over a flat archive spreads its IO) | no |
 | ReconcileSeconds, StatusIntervalSeconds, ArchiveScanSeconds | 5, 5, 60 | number > 0 (**Go**) | supervisor loops | no |
 | CameraDownAlertMinutes, CameraDownRepeatHours, StopTimeoutSeconds | 15, 12, 30 | number > 0 (**Go**) | alerts, stop wait | yes |
 | BackoffStartSeconds, BackoffMaxSeconds, HealthyResetSeconds | 3, 60, 300 | whole number >= 1; Max >= Start (**Go**) | restart backoff | no |

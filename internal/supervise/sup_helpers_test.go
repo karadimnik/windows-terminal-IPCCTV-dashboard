@@ -380,6 +380,7 @@ type srig struct {
 	root  string
 	cfg   config.Config
 	src   *fakeSource
+	mv    *fakeMover
 	st    *fakeStarter
 	api   *fakeAPI
 	pr    *fakePruner
@@ -443,6 +444,7 @@ func newSRig(t *testing.T, cams []config.Camera, mod func(*config.Config)) *srig
 	}
 	r.api.set = relay.NewReadySet(paths)
 	r.pr = &fakePruner{clk: clk}
+	r.mv = &fakeMover{clk: clk}
 	r.al = &syncAlerts{}
 	r.sc = &syncScanner{scans: map[string]archive.DirScan{}}
 	r.lock = &MemoryLock{Owner: "test-supervisor"}
@@ -452,7 +454,7 @@ func newSRig(t *testing.T, cams []config.Camera, mod func(*config.Config)) *srig
 		Sink: logx.FanOut(r.logs, r.ring), Now: clk.Now, Location: time.UTC})
 	lg.Redactor().Register(fakeCamPass)
 	r.deps = SupervisorDeps{
-		Source: r.src, Lock: r.lock, Clock: clk, Platform: plat, Starter: r.st, Scanner: r.sc, Pruner: r.pr, Alerts: r.al,
+		Source: r.src, Lock: r.lock, Clock: clk, Platform: plat, Starter: r.st, Scanner: r.sc, Pruner: r.pr, Mover: r.mv, Alerts: r.al,
 		Credentials: fixedCreds{},
 		APILogin:    func() (relay.Login, error) { return relay.Login{User: relay.APIUser, Secret: fakeAPIPass}, nil },
 		LiveLogin: func() (relay.Login, error) {

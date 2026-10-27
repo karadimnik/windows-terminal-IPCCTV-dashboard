@@ -223,6 +223,10 @@ func TestValidationClasses(t *testing.T) {
 		{"retention text", `{"MaxRetentionDays":"30"}`, "MaxRetentionDays", "number"},
 		{"reserve negative", `{"ReserveGB":-1}`, "ReserveGB", "at least 0"},
 		{"interval zero", `{"PruneIntervalSeconds":0}`, "PruneIntervalSeconds", "greater than 0"},
+		{"mover switch as string", `{"MoveToDayFolders":"false"}`, "MoveToDayFolders", "JSON boolean"},
+		{"mover interval below 10", `{"MoveIntervalSeconds":9}`, "MoveIntervalSeconds", "at least 10"},
+		{"mover margin below 30", `{"MoveMarginSeconds":29.5}`, "MoveMarginSeconds", "at least 30"},
+		{"mover max zero", `{"MoveMaxPerCycle":0}`, "MoveMaxPerCycle", "at least 1"},
 		{"backoff inverted", `{"BackoffStartSeconds":30,"BackoffMaxSeconds":10}`, "BackoffMaxSeconds", "less than BackoffStartSeconds"},
 		{"transport typo", `{"RtspTransport":"tpc"}`, "RtspTransport", "one of tcp"},
 		{"relay url without host", `{"RelayBase":"rtsp://"}`, "RelayBase", "no host:port"},
@@ -304,6 +308,20 @@ func TestAllProblemsAtOnce(t *testing.T) {
 		if !strings.Contains(err.Error(), key+": ") {
 			t.Errorf("%s missing from %q", key, err.Error())
 		}
+	}
+}
+
+// The mover keys (D20): defaults on, 60 s, 120 s, 200; the floors are accepted.
+func TestMoverKeys(t *testing.T) {
+	for _, p := range []osx.Platform{winP, linP} {
+		d := Defaults(p)
+		if !d.MoveToDayFolders || d.MoveIntervalSeconds != 60 || d.MoveMarginSeconds != 120 || d.MoveMaxPerCycle != 200 {
+			t.Errorf("defaults: %v %v %v %v", d.MoveToDayFolders, d.MoveIntervalSeconds, d.MoveMarginSeconds, d.MoveMaxPerCycle)
+		}
+	}
+	c, w, err := Parse([]byte(`{"MoveToDayFolders":false,"MoveIntervalSeconds":10,"MoveMarginSeconds":30,"MoveMaxPerCycle":1}`), linP)
+	if err != nil || c.MoveToDayFolders || c.MoveIntervalSeconds != 10 || c.MoveMarginSeconds != 30 || c.MoveMaxPerCycle != 1 || len(w) != 0 {
+		t.Errorf("parsed %v %v %v %v, warnings %v, err %v", c.MoveToDayFolders, c.MoveIntervalSeconds, c.MoveMarginSeconds, c.MoveMaxPerCycle, w, err)
 	}
 }
 

@@ -100,6 +100,15 @@ non-test file elsewhere lists a folder or joins a root with a camera (allow-list
   scan share one Cache, the web role has its own; the pruner, the claim rule, the cleanup, the CLI and the doctor use none. Measured on
   Linux (`TestCacheStatCount`, 360 files, 12 ticks a minute, a roll and a prune every 15 minutes, identical results at every tick): 4332
   entry stats per minute before, 215 with the defaults (95 with `FullEvery` 180).
+- **The mover** (L4a, D20, `move.go`). `FileDays(layout, MoveOptions, cameras...)` files closed spool segments into their day folders and
+  `UnfileDays` is its inverse (refused while `RecorderRunning`); both return a `MoveReport` (Moved, Bytes, per-camera counts, Skipped,
+  Conflicts, Busy, Errors, Left, Deferred, DaysRemoved) and take `DryRun`, so the L4b commands are thin wrappers. Eligible: a plain file that
+  Classifies Spooled, not one of the two newest spool segments (the L2 contract), last written at least `Margin` ago; oldest first, `Max` per
+  camera. Gates: a valid ownership marker and the sandbox (`CheckSandbox`, `SANDBOX_ONLY`, moved here from prune). Every path is lstat-checked
+  just before its rename; the rename never replaces (`MoveFileW` without `MOVEFILE_REPLACE_EXISTING` on Windows, because Go's `os.Rename`
+  replaces there; link then unlink elsewhere, an interrupted one finished by the next run). Residual: a file swapped for a link in the instant
+  between that check and the rename is moved as a link, never followed. Day folders are made with one `os.Mkdir` in the camera folder;
+  `UnfileDays` removes only day folders it emptied (rmdir). Nothing is journaled: a rename is atomic, the next run sees the result.
 - **Spool and day folders** (L2, D20). A day folder is a sub-folder of a camera folder whose name is `YYYY-MM-DD` in ASCII digits and a
   calendar date (`2026-02-30`, `2026-13-45`, `2026-1-05` are not) and whose listed type is a plain directory: a symbolic link, a junction or any
   other reparse point named like a day is never entered (on Windows Go reports a junction or symbolic link as no directory and any other reparse

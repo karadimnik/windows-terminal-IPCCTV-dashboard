@@ -162,3 +162,64 @@ func TestDoctorUnseenFiles(t *testing.T) {
 		t.Fatalf("the Admin health panel does not show it: %d %s", code, raw)
 	}
 }
+
+// TestDoctorSpoolBacklog: storage.backlog is info with the mover off, ok on a small spool and
+// while a just-started supervisor catches up, and warns with its fix on a stuck mover, in text,
+// in --json and in the Admin health panel.
+func TestDoctorSpoolBacklog(t *testing.T) {
+	now := time.Now()
+	line := func(r *rig, args ...string) string {
+		for _, l := range strings.Split(textOf(t, mustRun(r, append([]string{"--json"}, args...)...)), "\n") {
+			if strings.HasPrefix(l, "storage.backlog ") {
+				return l
+			}
+		}
+		t.Fatal("no storage.backlog check in", textOf(t, mustRun(r, append([]string{"--json"}, args...)...)))
+		return ""
+	}
+	build := func(spool int, started time.Duration, moverOff bool) *rig {
+		r := newRig(t)
+		r.runningWith(func(d *status.Document) { up := started.Seconds(); d.UptimeSeconds = &up })
+		start := now.Add(-time.Duration(spool) * 15 * time.Minute).Truncate(time.Minute)
+		for i := 0; i < spool; i++ {
+			r.segment("Front", start.Add(time.Duration(i)*15*time.Minute), start.Add(time.Duration(i+1)*15*time.Minute), 100)
+		}
+		if moverOff {
+			b, _ := os.ReadFile(r.cfg)
+			os.WriteFile(r.cfg, []byte(strings.Replace(string(b), "{", `{"MoveToDayFolders":false,`, 1)), 0o644)
+		}
+		r.doctorTools(nil)
+		return r
+	}
+	for _, c := range []struct {
+		name    string
+		spool   int
+		started time.Duration
+		off     bool
+		want    string
+	}{
+		{"healthy spool", 2, time.Hour, false, "storage.backlog ok   spool backlog  every camera folder holds at most 4 segments"},
+		{"flat archive, mover off", 30, time.Hour, true, "storage.backlog info spool backlog  the mover is off"},
+		{"catching up", 30, 5 * time.Minute, false, "storage.backlog ok   spool backlog  the mover is catching up"},
+		{"stuck", 5, time.Hour, false, "storage.backlog warn spool backlog  the mover is not keeping up 1h0m0s after the supervisor started: more than 4 segments in the spool of Front 5"},
+	} {
+		r := build(c.spool, c.started, c.off)
+		if got := line(r, "doctor", "--group", "storage"); !strings.HasPrefix(got, c.want) {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	r := build(5, time.Hour, false)
+	if out, _, _ := r.run("doctor", "--group", "storage"); !strings.Contains(out, "fix: holocron logs --component prune --since 1h (action archive.file") {
+		t.Errorf("no fix line in the text output:\n%s", out)
+	}
+	code, rep, raw := healthOf(t, serveAdmin(t, r), "")
+	found := false
+	for _, c := range rep.Checks {
+		if c.ID == "storage.backlog" {
+			found = c.Level == lvWarn && strings.HasPrefix(c.Fix, "holocron logs")
+		}
+	}
+	if code != 200 || !found {
+		t.Fatalf("the Admin health panel does not show it: %d %s", code, raw)
+	}
+}

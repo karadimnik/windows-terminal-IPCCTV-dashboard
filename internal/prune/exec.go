@@ -55,51 +55,15 @@ func (OSFS) Stat(path string) (Info, error) {
 
 func (o OSFS) FreeBytes(root string) (uint64, error) { return o.Platform.DiskFree(root) }
 
-// SandboxEnv names the test switch: when set, the executor refuses any root or file outside the
-// sandbox prefix. "1" means the OS temporary directory (where t.TempDir lives); any other value
-// is the prefix itself. The prune tests set it for their whole run (TestMain).
-const SandboxEnv = "SANDBOX_ONLY"
+// SandboxEnv names the test switch (archive.SandboxEnv): when set, the executor refuses any root
+// or file outside the sandbox prefix. The prune tests set it for their whole run (TestMain).
+const SandboxEnv = archive.SandboxEnv
 
 // ErrOutsideSandbox is returned when a sandbox is in force and a path lies outside it.
-var ErrOutsideSandbox = errors.New("outside the sandbox")
+var ErrOutsideSandbox = archive.ErrOutsideSandbox
 
-// CheckSandbox returns nil only when path lies strictly inside prefix, judged on the absolute,
-// cleaned paths and again with existing links resolved.
-func CheckSandbox(path, prefix string) error {
-	if prefix == "" {
-		return nil
-	}
-	inside := func(p, base string) bool {
-		rel, err := filepath.Rel(base, p)
-		return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
-	}
-	ap, err1 := filepath.Abs(path)
-	bp, err2 := filepath.Abs(prefix)
-	if err1 != nil || err2 != nil || !inside(ap, bp) {
-		return fmt.Errorf("%w: %s is not inside %s", ErrOutsideSandbox, path, prefix)
-	}
-	rp, rb := resolve(ap), resolve(bp)
-	if !inside(rp, rb) {
-		return fmt.Errorf("%w: %s resolves to %s, not inside %s", ErrOutsideSandbox, path, rp, rb)
-	}
-	return nil
-}
-
-// resolve follows links in the longest existing prefix of p.
-func resolve(p string) string {
-	rest := ""
-	for cur := p; ; {
-		if r, err := filepath.EvalSymlinks(cur); err == nil {
-			return filepath.Join(r, rest)
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return p
-		}
-		rest = filepath.Join(filepath.Base(cur), rest)
-		cur = parent
-	}
-}
+// CheckSandbox is archive.CheckSandbox: nil only when path lies strictly inside prefix.
+func CheckSandbox(path, prefix string) error { return archive.CheckSandbox(path, prefix) }
 
 // Executor performs a plan. Before each removal it checks that one file again - it still exists,
 // is still a plain file in a plain camera folder directly under the root (or in a plain day folder
