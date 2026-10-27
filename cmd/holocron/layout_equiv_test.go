@@ -129,3 +129,70 @@ func TestArchiveStatsEqualTheOld(t *testing.T) {
 	}
 	t.Logf("%d trees: identical archive stats, %d segments counted", len(trees), segs)
 }
+
+// oldFiles is drun.files as it was before the layout library (reference).
+func oldFiles(r *drun, cam config.Camera) camFiles {
+	safe, err := archive.SafeName(cam.Name)
+	if err != nil {
+		return camFiles{Err: err}
+	}
+	cf := camFiles{Safe: safe, Dir: filepath.Join(r.e.paths.Root, safe)}
+	entries, err := os.ReadDir(cf.Dir)
+	if err != nil {
+		cf.Err = err
+		return cf
+	}
+	m := archive.MatcherFor(r.e.opts.Platform)
+	since := r.now.Add(-25 * time.Hour)
+	for _, en := range entries {
+		if en.IsDir() || !m.IsSegmentOf(en.Name(), safe, r.ext()) {
+			continue
+		}
+		_, start, ok := archive.ParseSegment(en.Name())
+		info, err := en.Info()
+		if !ok || err != nil || start.Before(since) {
+			continue
+		}
+		cf.Segs = append(cf.Segs, segFile{Name: en.Name(), Start: start, MTime: info.ModTime(), Size: info.Size()})
+	}
+	sort.Slice(cf.Segs, func(i, j int) bool { return cf.Segs[i].Start.Before(cf.Segs[j].Start) })
+	return cf
+}
+
+// TestDoctorFilesEqualTheOld: for every folder of every tree (and the display names that map to
+// folders), doctor's per-camera segments of the last 25 h are what the old code gave; each one's
+// Path is the listed file.
+func TestDoctorFilesEqualTheOld(t *testing.T) {
+	trees := archivetest.All(t, "../../testdata/golden", 120)
+	segs := 0
+	for _, tr := range trees {
+		e, root := layoutEnv(t, tr)
+		ents, err := os.ReadDir(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := []string{"Cam A", "Front Door", "Back Yard", "Missing Camera", "CON"}
+		for _, en := range ents {
+			names = append(names, en.Name())
+		}
+		for _, name := range names {
+			r := &drun{e: e, now: tr.Now.Add(12 * time.Hour), cache: map[string]*onceValue{}}
+			cam := config.Camera{Name: name}
+			want, got := oldFiles(r, cam), r.files(cam)
+			for i, s := range got.Segs {
+				if s.Path != filepath.Join(got.Dir, s.Name) {
+					t.Fatalf("%s/%s: Path %q", tr.Name, name, s.Path)
+				}
+				got.Segs[i].Path = ""
+			}
+			if !reflect.DeepEqual(want, got) {
+				t.Fatalf("%s/%s:\n old %+v\n new %+v", tr.Name, name, want, got)
+			}
+			segs += len(got.Segs)
+		}
+	}
+	if segs == 0 {
+		t.Error("no segment within 25 h in any tree")
+	}
+	t.Logf("%d trees: identical doctor file lists, %d segments", len(trees), segs)
+}

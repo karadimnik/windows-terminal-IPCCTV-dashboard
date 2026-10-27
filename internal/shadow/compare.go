@@ -278,13 +278,13 @@ func absClean(p string) string {
 
 // cameraFolders lists the folders of root that are not the recorder's own ("_" prefix).
 func cameraFolders(root string) ([]string, error) {
-	ents, err := os.ReadDir(root)
+	ents, err := archive.Layout{Root: root}.Folders()
 	if err != nil {
 		return nil, err
 	}
 	var out []string
 	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), "_") || !e.IsDir() {
+		if !e.IsDir() {
 			continue
 		}
 		out = append(out, e.Name())
@@ -301,8 +301,7 @@ type listing struct {
 
 func list(o *Options, root, folder string) (listing, error) {
 	var l listing
-	dir := filepath.Join(root, folder)
-	ents, err := os.ReadDir(dir)
+	ents, err := archive.Layout{Root: root}.Entries(folder)
 	if err != nil {
 		return l, err
 	}
@@ -316,7 +315,7 @@ func list(o *Options, root, folder string) (listing, error) {
 		_, start, _ := archive.ParseSegment(name)
 		// os.Stat, not DirEntry.Info: on Windows the listing's times and sizes of a file that is
 		// being written can be stale
-		path := filepath.Join(dir, name)
+		path := e.Path
 		fi, err := os.Stat(path)
 		if err != nil {
 			continue
