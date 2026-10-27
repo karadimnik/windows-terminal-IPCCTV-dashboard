@@ -14,6 +14,11 @@ import (
 // folder are not entered, links are reported and never followed), each folder's archive.Scan
 // Newest, and the free space. dryRun previews the next start for an unmarked root that would be
 // claimed (VerifyRoot).
+//
+// Day folders (decision D20) are NOT read until task L3: Collect stays on the flat view, the spool
+// (a day folder is a sub-folder and is not entered) and Newest from Layout.ScanSpool, so the
+// planner never sees a filed file and never gets a Newest it cannot list. Filed segments are not
+// pruned yet; L3 must change this before the L4 mover files anything.
 func Collect(root string, p osx.Platform, r Rules, now time.Time, dryRun bool) (Inputs, error) {
 	in := Inputs{Root: root, Matcher: archive.MatcherFor(p), Rules: r, Now: now.UTC()}
 	if in.RootProblem = archive.CheckRoot(root, p); in.RootProblem != "" {

@@ -13,6 +13,7 @@ specification and `testdata/golden/prune/` holds its recorded decisions.
     type Inputs struct { Root string; Matcher archive.Matcher; Cameras []Camera; Skipped []string; FreeBytes uint64
                          Rules Rules; Now time.Time; RootProblem /* archive.CheckRoot */, MarkerProblem /* archive.VerifyRoot */ string }
     func Collect(root string, p osx.Platform, r Rules, now time.Time, dryRun bool) (Inputs, error)   // read-only
+                                                 // flat view only until task L3: day folders (D20) are not entered, Newest is archive.Layout.ScanSpool's
 
     // the planner (pure)
     func Plan(in Inputs) Decision
