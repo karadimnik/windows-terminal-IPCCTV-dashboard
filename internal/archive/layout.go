@@ -20,8 +20,8 @@ import (
 //	<Root>/<camera>/<YYYY-MM-DD>/<camera>_<stamp><ext>  a filed day: the local date written in the names
 //
 // A tree with no day folders is the flat layout of before D20, and every reader gives exactly
-// what it gave then. Nothing in this package moves a file into a day folder (the mover is task
-// L4). A Layout is a plain value: build one wherever it is needed.
+// what it gave then. FileDays and UnfileDays (move.go, task L4a) are the only code that moves a
+// file between the spool and a day folder. A Layout is a plain value: build one wherever it is needed.
 //
 // What reads what. The spool alone (one listing of the camera folder) answers whether a camera
 // is recording: Newest and Scan, behind the status tick, the age of the last closed segment, the
