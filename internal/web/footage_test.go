@@ -312,8 +312,10 @@ func TestTheRepeatedHourOnTheDSTChangeIsNotAGap(t *testing.T) {
 	if body.Segments[7].StartAt != "2026-10-25T03:00:00+03:00" {
 		t.Fatalf("oldest segment is the first pass: %+v", body.Segments[7])
 	}
+	// The gap from the last segment to the end of the day exists once that day
+	// is over (it ends at midnight); only a gap between the passes is the fault.
 	for _, gap := range body.Gaps {
-		if gap.From == "04:00:00" || gap.Seconds == 3600 {
+		if (gap.From == "04:00:00" && gap.To != "00:00:00") || gap.Seconds == 3600 {
 			t.Fatalf("the repeated hour was read as a gap: %+v", gap)
 		}
 	}
