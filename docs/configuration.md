@@ -27,6 +27,10 @@ Values written by the UI go through the same code the CLI uses: validated, writt
 | `PruneIntervalSeconds` | `300` | How often it looks. |
 | `MaxRetentionDays` **UI** | `null` | Optional age cap, on top of the space rule. |
 | `MaxAgePruneFraction` | `0.5` | Circuit breaker on `MaxRetentionDays`. A run that would delete more than this share of the archive by age - by segment count or by bytes - deletes nothing by age, logs one `PRUNE AGE RULE HELD` line with both shares and alerts once (event id 122), so a mistyped retention cannot empty the archive. Lower `MaxRetentionDays` in steps to shorten retention a long way. Must be from `0.01` to `1.0`; `1.0` switches the brake off. Never holds back the free-space rule: a disk below `ReserveGB` keeps pruning. |
+| `MoveToDayFolders` | `true` | The mover (decision D20): every closed segment is filed from the camera folder into `<camera>\<YYYY-MM-DD>\` (the date in its name); the camera folder keeps the segment being written and the newest closed one. `false` stops filing at the next reconcile (no restart); filed days stay and are still shown and pruned. See [how it works](how-it-works.md#the-mover). |
+| `MoveIntervalSeconds` | `60` | How often the mover looks. At least `10`. |
+| `MoveMarginSeconds` | `120` | A segment written less than this long ago is never filed. At least `30`. |
+| `MoveMaxPerCycle` | `200` | Files filed per camera per cycle, so a first run over a large flat archive spreads its disk work. At least `1`. |
 
 ## Supervisor
 

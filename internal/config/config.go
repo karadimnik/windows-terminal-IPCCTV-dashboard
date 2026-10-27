@@ -27,6 +27,12 @@ type Config struct {
 	MaxRetentionDays     *float64 // nil: age rule off
 	MaxAgePruneFraction  float64
 
+	// Mover (decision D20): files closed spool segments into <camera>/<YYYY-MM-DD>/
+	MoveToDayFolders    bool    // the kill switch; false: nothing is filed (filed days stay and are still read and pruned)
+	MoveIntervalSeconds float64 // a mover cycle every this many seconds
+	MoveMarginSeconds   float64 // a spool segment written less than this long ago stays
+	MoveMaxPerCycle     int     // at most this many files filed per camera per cycle
+
 	// Supervisor and timing
 	ReconcileSeconds         float64
 	StatusIntervalSeconds    float64
@@ -127,6 +133,11 @@ func Defaults(p osx.Platform) Config {
 		PruneHysteresisGB:    5,
 		PruneIntervalSeconds: 300,
 		MaxAgePruneFraction:  0.5,
+
+		MoveToDayFolders:    true,
+		MoveIntervalSeconds: 60,
+		MoveMarginSeconds:   120,
+		MoveMaxPerCycle:     200,
 
 		ReconcileSeconds:         5,
 		StatusIntervalSeconds:    5,

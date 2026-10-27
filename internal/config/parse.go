@@ -31,6 +31,7 @@ var liveKeys = []string{"LiveViewEnabled", "LiveExePath", "LiveConfigPath", "Liv
 var keptKeys = []string{
 	"RootPath", "FfmpegPath", "FfprobePath", "SegmentSeconds", "Container", "ContainerProfiles", "RtspTransport", "TimeoutMicroseconds",
 	"ReserveGB", "PruneHysteresisGB", "PruneIntervalSeconds", "MaxRetentionDays", "MaxAgePruneFraction",
+	"MoveToDayFolders", "MoveIntervalSeconds", "MoveMarginSeconds", "MoveMaxPerCycle",
 	"ReconcileSeconds", "StatusIntervalSeconds", "ArchiveScanSeconds", "CameraDownAlertMinutes", "CameraDownRepeatHours",
 	"StopTimeoutSeconds", "BackoffStartSeconds", "BackoffMaxSeconds", "HealthyResetSeconds", "StallFactor", "LogMaxBytes",
 	"LogRepeatSuppressSeconds", "StatusEventCount",
@@ -271,6 +272,10 @@ func (d *decoder) run(c *Config) {
 	d.float("PruneIntervalSeconds", &c.PruneIntervalSeconds, 0, true)
 	d.retention(c)
 	d.fraction(c)
+	d.boolean("MoveToDayFolders", &c.MoveToDayFolders)
+	d.float("MoveIntervalSeconds", &c.MoveIntervalSeconds, 10, false)
+	d.float("MoveMarginSeconds", &c.MoveMarginSeconds, 30, false)
+	d.integer("MoveMaxPerCycle", &c.MoveMaxPerCycle, 1)
 
 	d.float("ReconcileSeconds", &c.ReconcileSeconds, 0, true)
 	d.float("StatusIntervalSeconds", &c.StatusIntervalSeconds, 0, true)
