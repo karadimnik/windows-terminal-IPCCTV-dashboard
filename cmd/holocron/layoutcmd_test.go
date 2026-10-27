@@ -491,3 +491,63 @@ func TestArchiveMigrateBesideTheSupervisorsMover(t *testing.T) {
 	}
 	t.Logf("migrate moved %d, the other mover %d, skipped %d", rep.Moved, other.moved, len(rep.Skipped))
 }
+
+// D2: flatten refuses, even as a dry run, while the recorder is reported running (by its status
+// file, or by a supervisor answering on the control endpoint), changes nothing, exits 1 and shows
+// the fix; stopped, it proceeds (positive control). D3: its dry run is the default, --json carries
+// the schema and the counts of the plan and of the applied run.
+func TestArchiveFlattenRefusesWhileRecording(t *testing.T) {
+	r := corpusRig(t)
+	if _, _, code := r.run("archive", "migrate", "--now"); code != 0 {
+		t.Fatal(code)
+	}
+	filed := manifest(t, r.root)
+	r.running()
+	for _, args := range [][]string{{"archive", "flatten", "--now"}, {"archive", "flatten"}} {
+		out, _, code := r.run(args...)
+		if code != 1 || !strings.Contains(out, "REFUSED: the recorder is running") || !strings.Contains(out, "reports running") || !strings.Contains(out, "fix: holocron down") {
+			t.Errorf("%v with a running status: %d %s", args, code, out)
+		}
+	}
+	r.stopped()
+	r.noCtl = false // the fake control endpoint answers
+	out, _, code := r.run("--json", "archive", "flatten", "--now")
+	if rep := decodeLayout(t, out); code != 1 || !strings.Contains(rep.Refused, "control endpoint") || rep.Fix != "holocron down" || rep.Moved != 0 {
+		t.Errorf("with a supervisor answering: %d %+v", code, rep)
+	}
+	if d := manifestDiff(filed, manifest(t, r.root)); len(d) != 0 {
+		t.Fatalf("a refused flatten changed the tree: %v", d)
+	}
+	r.noCtl = true
+	out, _, code = r.run("--json", "archive", "flatten")
+	plan := decodeLayout(t, out)
+	if code != 0 || plan.Schema != 1 || plan.Command != "archive flatten" || !plan.DryRun || plan.Moved != corpusCams*(corpusPerCam-2) || len(plan.Left) != 2 || plan.Refused != "" {
+		t.Fatalf("dry run: %d %+v", code, plan)
+	}
+	for _, c := range plan.Cameras {
+		want := 5
+		if c.Camera == "Cam_C" {
+			want = 4 // 2026-10-22 keeps the misfiled segment and the foreign file
+		}
+		if len(c.RemovedDays) != want || c.InSpool != corpusPerCam {
+			t.Errorf("dry run %s: %+v", c.Camera, c)
+		}
+	}
+	if d := manifestDiff(filed, manifest(t, r.root)); len(d) != 0 {
+		t.Fatalf("a dry run changed the tree: %v", d)
+	}
+	out, _, code = r.run("--json", "archive", "flatten", "--now")
+	rep := decodeLayout(t, out)
+	if code != 0 || rep.DryRun || rep.Moved != plan.Moved || !rep.Complete || len(rep.Left) != 2 || !strings.Contains(rep.Next, "archive stats") {
+		t.Fatalf("stopped: %d %+v", code, rep)
+	}
+	for i, c := range rep.Cameras {
+		if strings.Join(c.RemovedDays, ",") != strings.Join(plan.Cameras[i].RemovedDays, ",") {
+			t.Errorf("%s: removed %v, the plan said %v", c.Camera, c.RemovedDays, plan.Cameras[i].RemovedDays)
+		}
+	}
+	out, _, _ = r.run("archive", "flatten")
+	if !strings.Contains(out, "the archive is flat already") {
+		t.Errorf("a dry run after flatten: %s", out)
+	}
+}

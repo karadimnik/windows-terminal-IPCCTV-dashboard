@@ -549,3 +549,105 @@ func printIssues(w io.Writer, r *layoutReport) {
 		fmt.Fprintf(w, "%d eligible file(s) were not reached in this run\n", r.Deferred)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// archive flatten
+// ---------------------------------------------------------------------------
+
+func cmdArchiveFlatten(ctx context.Context, e *env) error {
+	fs := newFlags(e, "archive flatten")
+	now := fs.Bool("now", false, "put the segments back (without it: a dry run that shows the plan and moves nothing)")
+	camera := fs.String("camera", "", "only this camera (a camera of cameras.json, or a camera folder of the root)")
+	pos, err := parseFlags(fs, e.args)
+	if err != nil {
+		return err
+	}
+	if err := wantArgs("archive flatten", pos, 0, 0); err != nil {
+		return err
+	}
+	if err := e.needConfig(); err != nil {
+		return err
+	}
+	l := archiveLayout(e)
+	r := newLayoutReport("archive flatten", e.paths.Root, !*now)
+	running, why := recorderRunning(ctx, e)
+	o := archive.MoveOptions{Platform: e.opts.Platform, Now: time.Now(), DryRun: !*now, RecorderRunning: running}
+	if running { // refused before anything is read: the library refuses the same way
+		rep := archive.UnfileDays(l, o)
+		r.Refused, r.Fix = rep.Refused+" ("+why+")", "holocron down"
+		r.Next = "holocron down, then holocron archive flatten again"
+		return finishLayout(e, r, printFlatten)
+	}
+	cams, err := layoutCameras(e, l, *camera)
+	if err != nil {
+		return err
+	}
+	before := spoolsOf(l, cams)
+	rep := archive.UnfileDays(l, o, cams...)
+	if rep.Refused != "" {
+		r.Refused, r.Fix = rep.Refused, migrateFix(rep.Refused)
+		r.Next = r.Fix
+		return finishLayout(e, r, printFlatten)
+	}
+	if r.DryRun {
+		predictConflicts(&rep)
+	} else {
+		r.Cycles = 1
+	}
+	t := newTally(r)
+	t.add(rep)
+	t.finish()
+	t.summarize(l, cams, before, false)
+	if !r.DryRun {
+		logRun(e, "archive.unfile", r)
+	}
+	switch {
+	case len(r.Conflicts)+len(r.Errors) > 0:
+		r.Next = "resolve the files listed above (a conflict: the camera folder already holds that name; compare the two files and keep one), then run holocron archive flatten --now again"
+	case r.DryRun && r.Moved == 0:
+		r.Next = "nothing is filed: the archive is flat already; holocron archive stats shows it"
+	case r.DryRun:
+		r.Next = "holocron archive flatten --now applies this plan (the recorder must stay stopped until it is done)"
+	case !r.Complete:
+		r.Next = "run holocron archive flatten --now again for the files above, then holocron archive stats"
+	default:
+		r.Next = "holocron archive stats should show 0 filed for every camera; then go on with the rollback (docs/rollback.md). holocron up files the segments again unless MoveToDayFolders is false"
+	}
+	return finishLayout(e, r, printFlatten)
+}
+
+func printFlatten(e *env, r *layoutReport) {
+	w := e.out
+	verb, removed := "put back", "removed"
+	if r.DryRun {
+		verb, removed = "would put back", "would be removed"
+		fmt.Fprintf(w, "archive flatten - DRY RUN, nothing is moved: %s\n", r.Root)
+	} else {
+		fmt.Fprintf(w, "archive flatten --now: %s\n", r.Root)
+	}
+	if r.Refused != "" {
+		fmt.Fprintf(w, "REFUSED: %s\nnothing was moved\nfix: %s\n", r.Refused, r.Fix)
+		return
+	}
+	fmt.Fprintln(w, "every filed segment goes back into its camera folder (the flat layout the PowerShell recorder reads), and each day folder this empties is removed")
+	for _, c := range r.Cameras {
+		line := fmt.Sprintf("  %-20s nothing filed", c.Camera)
+		if c.Moves > 0 {
+			line = fmt.Sprintf("  %-20s %s %d segment(s), %s, from %d day folder(s); %d day folder(s) %s", c.Camera, verb, c.Moves, sizeText(c.Bytes), len(c.Days), len(c.RemovedDays), removed)
+		}
+		fmt.Fprintf(w, "%s; %d segment(s) in the camera folder after\n", line, c.InSpool)
+	}
+	printIssues(w, r)
+	if r.DryRun {
+		fmt.Fprintf(w, "total: would put back %d segment(s), %s\n", r.Moved, sizeText(r.Bytes))
+	} else {
+		state := "done, the archive is flat"
+		if !r.Complete {
+			state = "INCOMPLETE, see above"
+		} else if len(r.Left) > 0 {
+			state = "done; the files left in day folders above are not footage and the PowerShell recorder ignores them"
+		}
+		fmt.Fprintf(w, "total: put back %d segment(s), %s: %s\n", r.Moved, sizeText(r.Bytes), state)
+	}
+	fmt.Fprintln(w, "next:", r.Next)
+}
