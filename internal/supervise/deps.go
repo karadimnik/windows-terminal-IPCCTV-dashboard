@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -73,34 +71,25 @@ type ArchiveScan struct {
 // is not a link or reparse point, each scanned like a camera folder.
 func (a ArchiveScanner) ScanRoot(root string, now time.Time) (ArchiveScan, error) {
 	out := ArchiveScan{ScannedAt: now, Dirs: map[string]archive.DirScan{}}
-	entries, err := os.ReadDir(root)
+	l := a.Layout
+	l.Root = root
+	cams, err := l.Cameras()
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return out, nil
 		}
 		return out, err
 	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "_") {
+	for _, c := range cams {
+		if c.Link {
+			out.Skipped = append(out.Skipped, c.Path)
 			continue
 		}
-		dir := filepath.Join(root, e.Name())
-		fi, err := os.Lstat(dir)
+		s, err := l.Scan(c.Name, now, a.SegmentSeconds)
 		if err != nil {
 			continue
 		}
-		if archive.IsReparse(fi) {
-			out.Skipped = append(out.Skipped, dir)
-			continue
-		}
-		if !fi.IsDir() {
-			continue
-		}
-		s, err := a.Scan(dir, now)
-		if err != nil {
-			continue
-		}
-		out.Dirs[e.Name()] = s
+		out.Dirs[c.Name] = s
 		out.Files += int64(s.Files)
 		out.Bytes += s.Bytes
 		if !s.OldestWrite.IsZero() && (out.Oldest.IsZero() || s.OldestWrite.Before(out.Oldest)) {

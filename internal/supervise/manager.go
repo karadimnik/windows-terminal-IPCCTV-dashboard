@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -353,7 +352,7 @@ func (m *Manager) Reconcile(cams []config.Camera) {
 			path = ""
 		}
 		m.entries[safe] = &Entry{
-			cam: c, safe: safe, dir: filepath.Join(m.s.RootPath, safe), relayPath: path,
+			cam: c, safe: safe, dir: archive.Layout{Root: m.s.RootPath}.CameraDir(safe), relayPath: path,
 			createdWall: nowWall, nextWall: nowWall, nextMono: nowMono,
 		}
 		if m.reconciled {

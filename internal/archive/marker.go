@@ -92,16 +92,14 @@ func ClaimProblem(root string, p osx.Platform, container string) string {
 	if err != nil || !fi.IsDir() {
 		return fmt.Sprintf("RootPath '%s' does not exist", root)
 	}
-	entries, err := os.ReadDir(root)
+	l := Layout{Root: root, Matcher: MatcherFor(p), Container: container}
+	entries, err := l.Folders()
 	if err != nil {
 		return fmt.Sprintf("RootPath '%s' cannot be listed: %v", root, err)
 	}
 	var blockers []string
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, "_") {
-			continue
-		}
 		info, err := e.Info()
 		switch {
 		case err != nil:
@@ -113,7 +111,7 @@ func ClaimProblem(root string, p osx.Platform, container string) string {
 			blockers = append(blockers, name+" (a file at the top level)")
 			continue
 		}
-		children, err := os.ReadDir(filepath.Join(root, name))
+		children, err := l.Entries(name)
 		if err != nil {
 			blockers = append(blockers, name+" (cannot be listed)")
 			continue
@@ -127,7 +125,7 @@ func ClaimProblem(root string, p osx.Platform, container string) string {
 				blockers = append(blockers, name+"/"+c.Name()+" (a folder inside a camera folder)")
 				break
 			}
-			if IsReparse(ci) || !ci.Mode().IsRegular() || !MatcherFor(p).IsSegmentOf(c.Name(), name, container) {
+			if IsReparse(ci) || !ci.Mode().IsRegular() || !l.Matcher.IsSegmentOf(c.Name(), name, container) {
 				blockers = append(blockers, name+"/"+c.Name()+" (not a recorder segment)")
 				break
 			}
