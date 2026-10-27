@@ -108,7 +108,12 @@ func seconds(v float64) time.Duration { return time.Duration(v * float64(time.Se
 // reconcile re-reads the camera list (and notices a configuration change). A list that cannot be
 // read keeps the current set (R:3871-3875); an unchanged list does nothing.
 func (s *Supervisor) reconcile(ls *loopState) {
-	if cfg, err := s.d.Source.Config(); err != nil || !sameConfigIgnoringLive(cfg, s.cfg) {
+	cfg, err := s.d.Source.Config()
+	if err == nil && s.moveOn.Swap(cfg.MoveToDayFolders) != cfg.MoveToDayFolders {
+		s.plog.Info(fmt.Sprintf("MoveToDayFolders is now %v: the mover %s", cfg.MoveToDayFolders, map[bool]string{true: "files closed segments into day folders again", false: "stops filing; filed days stay and are still read and pruned"}[cfg.MoveToDayFolders]),
+			logx.Action("config.reload"), logx.Result(logx.ResultOK))
+	}
+	if err != nil || !sameConfigIgnoringRuntime(cfg, s.cfg) {
 		note := "holocron.config.json changed; the running supervisor keeps the values it started with until it is restarted"
 		if err != nil {
 			note = fmt.Sprintf("holocron.config.json cannot be read now (%v); the running supervisor keeps the values it started with", err)

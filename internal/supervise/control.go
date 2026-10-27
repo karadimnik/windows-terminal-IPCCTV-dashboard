@@ -138,8 +138,10 @@ func (s *Supervisor) stopControl() {
 	s.ctlStarted, s.ctlStopped = false, true
 }
 
-// sameConfigIgnoringLive is sameConfig without LiveViewEnabled, which Reload applies at run time.
-func sameConfigIgnoringLive(a, b config.Config) bool {
+// sameConfigIgnoringRuntime is sameConfig without the keys applied at run time: LiveViewEnabled
+// (Reload) and MoveToDayFolders (every reconcile).
+func sameConfigIgnoringRuntime(a, b config.Config) bool {
 	a.LiveViewEnabled = b.LiveViewEnabled
+	a.MoveToDayFolders = b.MoveToDayFolders
 	return sameConfig(a, b)
 }

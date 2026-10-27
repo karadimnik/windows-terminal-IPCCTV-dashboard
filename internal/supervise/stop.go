@@ -30,7 +30,9 @@ func (s *Supervisor) pruneLoop(done chan<- struct{}) {
 
 func (s *Supervisor) pruneOnce(st *prune.State) {
 	now := s.clk.Now()
+	s.archMu.Lock()
 	res, err := s.d.Pruner.Run(now, st)
+	s.archMu.Unlock()
 	if err != nil {
 		s.plog.Error("prune failed: "+err.Error(), logx.Action("prune.run"), logx.Target(s.cfg.RootPath), logx.Result(logx.ResultFail), logx.Err(err))
 		return
@@ -54,7 +56,7 @@ func (s *Supervisor) sandboxRefuses(path string) bool {
 // teardown is the ordered stop (IS 2.2 G6/G7, R:4133-4191): cameras (hard kill), then the live
 // view, then the relay, each waited for; survivors are reported, never hidden; then the final
 // document, the stop-request file removed. The lock is released by Run.
-func (s *Supervisor) teardown(req stopRequest, loopQuit chan struct{}, loopDone, pruneDone <-chan struct{}, hbCancel func(), hbDone <-chan struct{}) {
+func (s *Supervisor) teardown(req stopRequest, loopQuit chan struct{}, loopDone, pruneDone, moveDone <-chan struct{}, hbCancel func(), hbDone <-chan struct{}) {
 	s.log.Info("supervisor shutting down: "+req.reason, logx.Action("supervisor.stop"), "kind", req.kind)
 	s.mu.Lock()
 	s.stopping = true
@@ -125,6 +127,9 @@ func (s *Supervisor) teardown(req stopRequest, loopQuit chan struct{}, loopDone,
 	}
 	if !s.waitClosed(pruneDone, deadline) {
 		s.plog.Warn("the pruner is still in a run; it is not interrupted", logx.Action("prune.run"))
+	}
+	if !s.waitClosed(moveDone, deadline) {
+		s.plog.Warn("the mover is still in a cycle; it is not interrupted (a rename is atomic)", logx.Action("archive.file"))
 	}
 
 	// verify: every child we started must be gone
