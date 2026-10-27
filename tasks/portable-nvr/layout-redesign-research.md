@@ -88,7 +88,11 @@ Rough effort: 7 commissions, the first three are the bulk (about the size of W3 
   the existing differential goldens, then the nested fixtures.
 - Day-folder date source (local vs UTC): local, matching the name; revisit only if the host changes zone.
 
-## 7. Open decisions for the Operator
+## 7. Decisions (Operator, 27 Oct 2026) - recorded as D20 in os-independent-hld.md
+
+1. D18 reversed, after a risk assessment (below) and with backups. 2. Camera first: `<camera>\<date>\`. 3. The disk is fixed, so retention stays near 3 to 4 days (it changes only with bitrate, camera count or `ReserveGB`); the tidiness and resource gains matter regardless. 4. Both goals. Option D approved. The Operator allows deleting the existing recordings; the plan does not need it (migration is a rename) and will not delete any.
+
+### Open decisions as asked (kept for the record)
 
 1. Accept reversing D18 (shared layout with the PowerShell system), with `archive flatten` as part of rollback?
 2. Shape: camera first `<camera>\<date>\` (recommended) or date first `<date>\<camera>\`?

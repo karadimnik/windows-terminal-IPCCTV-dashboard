@@ -230,6 +230,7 @@ Decided by the Operator on 2026-10-17 (D7 to D18 "ok" as recommended; D2 and D5 
 | D17 | The Go system manages both MediaMTX instances | Yes |
 | D18 | Archive layout and file names | Unchanged, so both systems can share footage |
 | D19 | Reproduce documented intent where the PowerShell code differs (`LastWindowClose` carried across a restart; no immediate alert 110 for a late-enabled camera) | Recommended yes. Still to be confirmed |
+| D20 | Archive layout: supersedes D18 (Operator, 2026-10-27) | Spool and archive: ffmpeg keeps writing flat into `<camera>\`; a mover files closed segments into `<camera>\<YYYY-MM-DD>\` (local date of the file name). Camera first. One shared archive library reads both. `archive migrate` and `archive flatten`. The PowerShell system is no longer a drop-in over the same root: rollback to it needs `archive flatten` first. Research: `layout-redesign-research.md`. |
 
 **What D5 is.** Before the Operator trusts the new recorder with the real footage, it runs next to the old one for a while:
 it reads the same relay (so the cameras see no extra connection), writes its own copy into a separate folder under a small
