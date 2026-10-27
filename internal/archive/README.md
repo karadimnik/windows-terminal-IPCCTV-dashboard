@@ -42,6 +42,7 @@ non-test file elsewhere lists a folder or joins a root with a camera (allow-list
     func (Layout) ScanAll(camera, now, segmentSeconds) (DirScan, error)   // Scan, with Files/Bytes/write times/Filed over every day folder too
     func (Layout) ScanSpool(camera, now, segmentSeconds) (DirScan, error) // the spool alone, never a day folder (the flat view)
     func (Layout) Resolve(camera, name string) (Entry, error)          // MATCHES name: the spool's listing, then the listed day folder of the name's date; never joins it
+    func (Layout) Strays(camera string) ([]Stray, error) // WalkDir (no link followed): files under the camera folder that are not footage: StrayMisfiled | StrayLoose | StrayNested
     func (Layout) Classify(path string) Class        // lexical: Class{Camera, Day, Name, Kind}, Kind Foreign | Spooled | Filed | Misfiled; (Class) Footage()
     func IsDayName(name string) bool; func DayName(start time.Time) string   // YYYY-MM-DD and a calendar date; the local date written in a segment name
     type Entry struct { fs.DirEntry; Path, Dir, Day string }; (Entry) IsDay() bool   // Day: the day folder holding it, "" in the spool

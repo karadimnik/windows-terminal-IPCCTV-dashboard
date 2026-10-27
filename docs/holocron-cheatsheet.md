@@ -55,7 +55,7 @@ Names with a space need quotes: `holocron cam enable "Front Door"`. `--since` ta
 | `connections` | each camera answers TCP and RTSP OPTIONS (as `cam test`), the relay serves every camera's path (with its readers), the expected listeners answer |
 | `live` | the live instance alive, the web role's live-secret login accepted by it (the 22 Oct 502), every camera's live paths |
 | `web` | the web role alive, `GET /api/status` on loopback (control path), HTTPS handshake, certificate days left, the CA's fingerprint, a login user, web errors of the last hour |
-| `storage` | free space against the reserve (at the reserve edge is normal), the pruner's last run (blocked fails, circuit breaker warns), the ownership marker, segments per camera in 24 h |
+| `storage` | free space against the reserve (at the reserve edge is normal), the pruner's last run (blocked fails, circuit breaker warns), the ownership marker, segments per camera in 24 h, files the pruner cannot see (a misfiled segment, anything else in a day folder, a segment in a folder it does not enter: warns) |
 | `system` | stray or orphan processes, the old system's supervisor, two supervisors, autostart runs this executable with this config, log errors of 24 h, alert channels, version, `HOLOCRON_SANDBOX_ONLY` / camera login variables in this window |
 
 `--json` prints one document: `schema` 1, `root`, `groups`, `checks` (`id`, `group`, `level`, `title`, `detail`, `fix`, `data`) and `summary` (`verdict`, `running`, counts, `elapsedMs`).
