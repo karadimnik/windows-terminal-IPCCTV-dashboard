@@ -430,3 +430,46 @@ func (tr Tree) Flat() Tree {
 	}
 	return out
 }
+
+// Resolve is a clip request's name resolved by the documented procedure, with os.ReadDir: the
+// camera folder's entries (exact, then ASCII-folded when fold), then those of the listed day folder
+// whose name is the date written in name.
+func (c TCamera) Resolve(name string, fold bool) (string, bool) {
+	look := func(dir string) (string, bool) {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			return "", false
+		}
+		for _, e := range ents {
+			if e.Name() == name {
+				return filepath.Join(dir, e.Name()), true
+			}
+		}
+		for _, e := range ents {
+			if fold && strings.EqualFold(e.Name(), name) {
+				return filepath.Join(dir, e.Name()), true
+			}
+		}
+		return "", false
+	}
+	if name == "" {
+		return "", false
+	}
+	if p, ok := look(c.Dir); ok {
+		return p, true
+	}
+	dot := strings.LastIndexByte(name, '.')
+	if dot < 22 || strings.ContainsAny(name[:dot], "/\\\x00") {
+		return "", false
+	}
+	start, ok := SegStart(name[:dot]+".x", name[:dot-21], ".x", false)
+	if !ok {
+		return "", false
+	}
+	for _, d := range c.Days {
+		if d == start.Format("2006-01-02") {
+			return look(filepath.Join(c.Dir, d))
+		}
+	}
+	return "", false
+}
