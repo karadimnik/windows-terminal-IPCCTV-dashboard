@@ -12,8 +12,10 @@ import (
 	"testing"
 )
 
-// The layout guard: outside internal/archive, no non-test Go file lists a folder or joins an
-// archive root with a further component other than one of the recorder's own "_" folders. Every
+// The layout guard: outside internal/archive, no non-test Go file lists a folder, joins an
+// archive root with a further component other than one of the recorder's own "_" folders, or joins
+// onto a camera folder or a day name (Layout.CameraDir, archive.DayName: the day folders of D20 are
+// reached only through Layout.Spool, DayFiles, Files and Resolve). Every
 // camera folder and segment path comes from archive.Layout, so a change of layout stays inside this
 // package. The exceptions below are listings of folders that are not camera folders, and the one
 // string that is a pattern for ffmpeg rather than a path this program opens.
@@ -30,6 +32,10 @@ var listingCalls = map[string]bool{"ReadDir": true, "Readdir": true, "Readdirnam
 
 // rootNames are the identifiers that hold an archive root in this code base.
 var rootNames = map[string]bool{"root": true, "Root": true, "RootPath": true, "ArchiveRoot": true}
+
+// layoutPaths are the archive identifiers whose result a Join would extend into a camera's folder:
+// a day folder or a segment path built outside the Layout (decision D20).
+var layoutPaths = map[string]bool{"CameraDir": true, "DayName": true}
 
 type guardHit struct {
 	file, call string
@@ -57,6 +63,8 @@ func guardFile(fset *token.FileSet, name string, src any) ([]guardHit, error) {
 		switch {
 		case listingCalls[sel.Sel.Name]:
 			hits = append(hits, guardHit{name, sel.Sel.Name, pos.Line, exprText(call.Fun)})
+		case sel.Sel.Name == "Join" && len(call.Args) >= 2 && mentions(call.Args, layoutPaths):
+			hits = append(hits, guardHit{name, "Join", pos.Line, exprText(call.Fun) + "(... a camera folder or day ...)"})
 		case sel.Sel.Name == "Join" && len(call.Args) >= 2 && mentionsRoot(call.Args[0]):
 			if lit, ok := call.Args[1].(*ast.BasicLit); ok && lit.Kind == token.STRING {
 				if v, err := strconv.Unquote(lit.Value); err == nil && strings.HasPrefix(v, "_") {
@@ -68,6 +76,23 @@ func guardFile(fset *token.FileSet, name string, src any) ([]guardHit, error) {
 		return true
 	})
 	return hits, nil
+}
+
+// mentions reports whether any of args calls or names one of the identifiers.
+func mentions(args []ast.Expr, names map[string]bool) bool {
+	for _, a := range args {
+		found := false
+		ast.Inspect(a, func(n ast.Node) bool {
+			if x, ok := n.(*ast.SelectorExpr); ok && names[x.Sel.Name] {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 func mentionsRoot(e ast.Expr) bool {
@@ -161,6 +186,8 @@ func f(root, cam string, e struct{ paths struct{ Root string } }) {
 	_ = filepath.Join(root, "_state", "status.json") // allowed: the recorder's own folder
 	_ = filepath.Join(SystemRoot, "System32")         // allowed: not an archive root
 	filepath.WalkDir(root, nil)
+	_ = filepath.Join(l.CameraDir(cam), archive.DayName(t), "x.mkv")
+	_ = filepath.Join(dir, archive.DayName(t))
 }`
 	hits, err := guardFile(token.NewFileSet(), "x.go", src)
 	if err != nil {
@@ -170,7 +197,7 @@ func f(root, cam string, e struct{ paths struct{ Root string } }) {
 	for _, h := range hits {
 		got = append(got, h.call+"@"+strconv.Itoa(h.line))
 	}
-	if strings.Join(got, " ") != "ReadDir@4 Join@4 Join@5 Join@6 WalkDir@9" {
+	if strings.Join(got, " ") != "ReadDir@4 Join@4 Join@5 Join@6 WalkDir@9 Join@10 Join@11" {
 		t.Errorf("hits %v", got)
 	}
 }
