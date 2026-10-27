@@ -325,7 +325,7 @@ func (a *API) resolveCamera(requested string) (archiveCamera, error) {
 // listSegments returns one camera's segments, oldest first. Files that do not
 // match the recorder's naming scheme are ignored rather than guessed at.
 func (a *API) listSegments(cam archiveCamera) ([]segmentFile, error) {
-	files, err := a.archive().Files(cam.Dir)
+	files, _, err := a.archive().Spool(cam.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("read the folder for camera %q: %w", cam.Name, scrubErr(err))
 	}

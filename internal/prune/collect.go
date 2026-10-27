@@ -47,7 +47,7 @@ func Collect(root string, p osx.Platform, r Rules, now time.Time, dryRun bool) (
 				Reparse: archive.IsReparse(ci) || !ci.Mode().IsRegular(),
 			})
 		}
-		if scan, err := l.Scan(f.Name, now, int(r.SegmentSeconds)); err == nil {
+		if scan, err := l.ScanSpool(f.Name, now, int(r.SegmentSeconds)); err == nil {
 			cam.Newest = scan.Newest
 		}
 		in.Cameras = append(in.Cameras, cam)

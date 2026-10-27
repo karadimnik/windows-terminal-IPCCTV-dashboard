@@ -235,7 +235,7 @@ func collectStats(e *env) (archiveStats, error) {
 			continue
 		}
 		cs := camStats{Folder: entry.Name(), Camera: known[strings.ToLower(entry.Name())]}
-		files, err := l.Files(entry.Name())
+		files, _, err := l.Spool(entry.Name())
 		if err != nil {
 			continue
 		}

@@ -113,7 +113,7 @@ func (r *drun) files(cam config.Camera) camFiles {
 		m := archive.MatcherFor(r.e.opts.Platform)
 		l := archive.Layout{Root: r.e.paths.Root, Matcher: m, Container: r.ext()}
 		cf := camFiles{Safe: safe, Dir: l.CameraDir(safe)}
-		files, err := l.Files(safe)
+		files, _, err := l.Spool(safe)
 		if err != nil {
 			cf.Err = err
 			return cf

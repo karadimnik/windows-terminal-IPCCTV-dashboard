@@ -3,6 +3,7 @@ package archive
 import (
 	"io/fs"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -11,7 +12,8 @@ import (
 	"time"
 )
 
-// Cache makes Layout.Files incremental: a folder is still listed on every call, but the file
+// Cache makes the Layout's listings incremental (the camera folder and each day folder is one
+// folder to it): a folder is still listed on every call, but the file
 // information of an entry seen before is reused instead of stat'ed again, except where it can
 // still change. One Cache per process (the supervisor, the web role); it is safe for concurrent use
 // and keeps nothing on disk.
@@ -43,7 +45,8 @@ import (
 // DirEntry.Info is an lstat.
 //
 // Memory is bounded: at most MaxDirs folders are remembered (the least recently listed is dropped
-// first) and a folder holds only the entries of its last listing.
+// first) and a folder holds only the entries of its last listing. Day folders count: 6 cameras
+// with 30 days each are 186 folders; past MaxDirs the cache only stats more, it never errs.
 type Cache struct {
 	// Set these before the first use; zero means the default.
 	FullEvery int           // every FullEvery-th call of a folder re-reads every entry; default 30
@@ -93,7 +96,8 @@ func (c *Cache) Stats() CacheStats {
 	return CacheStats{Listings: c.listings.Load(), Stats: c.stats.Load(), FullRereads: c.full.Load()}
 }
 
-// Invalidate forgets the folder dir (as Layout.CameraDir names it): its next listing re-reads every entry.
+// Invalidate forgets the folder dir (a camera folder as Layout.CameraDir names it, or a day folder's
+// Entry.Path): its next listing re-reads every entry.
 func (c *Cache) Invalidate(dir string) {
 	c.mu.Lock()
 	delete(c.dirs, dir)
@@ -107,11 +111,20 @@ func (c *Cache) InvalidateAll() {
 	c.mu.Unlock()
 }
 
-// Invalidate forgets the camera's folders in the layout's Cache (a no-op without one).
+// Invalidate forgets the camera's folders in the layout's Cache, its day folders included (a
+// no-op without one).
 func (l Layout) Invalidate(camera string) {
-	if l.Cache != nil {
-		l.Cache.Invalidate(l.CameraDir(camera))
+	if l.Cache == nil {
+		return
 	}
+	dir := l.CameraDir(camera)
+	l.Cache.mu.Lock()
+	for d := range l.Cache.dirs {
+		if d == dir || filepath.Dir(d) == dir {
+			delete(l.Cache.dirs, d)
+		}
+	}
+	l.Cache.mu.Unlock()
 }
 
 func orDefault[T int | time.Duration](v, d T) T {
@@ -155,18 +168,19 @@ func (c *Cache) forget(dir string, st *dirState) {
 	c.mu.Unlock()
 }
 
-// files is Layout.Files of one folder through the cache.
-func (c *Cache) files(dir string) ([]File, error) {
+// list is Layout.list of one folder through the cache.
+func (c *Cache) list(dir, day string) (listing, error) {
 	st := c.state(dir)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 
 	// os.ReadDir is Open, ReadDir(-1), Close and a sort by name; the open handle also gives the
 	// folder's own information for the identity and mtime checks.
+	listings.Add(1)
 	f, err := os.Open(dir)
 	if err != nil {
 		c.forget(dir, st)
-		return nil, err
+		return listing{}, err
 	}
 	var di fs.FileInfo
 	if c.reuse {
@@ -177,7 +191,7 @@ func (c *Cache) files(dir string) ([]File, error) {
 	f.Close()
 	if err != nil {
 		c.forget(dir, st)
-		return nil, err
+		return listing{}, err
 	}
 	slices.SortFunc(ents, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	c.listings.Add(1)
@@ -197,10 +211,13 @@ func (c *Cache) files(dir string) ([]File, error) {
 	if now == nil {
 		now = time.Now
 	}
-	out := make([]File, 0, len(ents))
+	ls := listing{files: make([]File, 0, len(ents))}
 	next := make(map[string]cachedFile, len(ents))
 	for _, e := range ents {
 		if e.IsDir() {
+			if d := entryOf(dir, "", e); day == "" && d.IsDay() {
+				ls.days = append(ls.days, d)
+			}
 			continue
 		}
 		name := e.Name()
@@ -214,12 +231,12 @@ func (c *Cache) files(dir string) ([]File, error) {
 			cf = cachedFile{typ: e.Type(), info: info, seen: now()}
 		}
 		next[name] = cf
-		out = append(out, File{Entry: entryOf(dir, e), Info: cf.info})
+		ls.files = append(ls.files, File{Entry: entryOf(dir, day, e), Info: cf.info})
 	}
 	st.files, st.dir = next, di
 	st.racy = di != nil && now().Sub(di.ModTime()) < racyWindow
 	st.calls++
-	return out, nil
+	return ls, nil
 }
 
 // racyWindow covers file systems whose folder times are coarse (FAT: 2 s): a folder modified this
