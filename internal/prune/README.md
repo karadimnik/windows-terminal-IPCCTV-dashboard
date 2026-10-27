@@ -92,9 +92,11 @@ the next run; removed ones are logged at INFO and listed in `Result.DaysRemoved`
   allowed are only those in `testdata/golden/prune/EXPECTED-DIFFERENCES.md`; negative controls.
 - `property_test.go`: 4000 seeded trees (seed 20261020) against rules re-derived in the test, plus the
   executor over an in-memory filesystem that changes files under it; negative controls.
-- `mixed_test.go` (L3): every golden scenario and 60 generated archives (the fall-back day, midnight, the
+- `mixed_test.go` (L3): golden scenarios and generated archives (the fall-back day, midnight, the
   retention cutoff inside a day folder) with most closed segments filed into day folders decide exactly
-  as the flat original; the awkward trees of `archivetest.Mixed` delete only footage; each hazard
+  as the flat original - by default a fixed sample (the 31 table scenarios, every 10th corpus tree, 8
+  generated archives), with `HOLOCRON_FULL_EQUIV=1` all 231 goldens and 60 generated archives (about
+  5 min under `-race`, 25 min on Windows); the awkward trees of `archivetest.Mixed` delete only footage; each hazard
   (misfiled, foreign, nested, non-day folder, link) beside a positive control; a day folder swapped for
   a junction after the plan; the newest survives any pressure.
 - `units_test.go`: rounding tie, .NET number formatting, tie order, executor re-checks, directories

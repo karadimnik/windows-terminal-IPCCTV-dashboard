@@ -240,15 +240,109 @@ func syntheticScenarios(n int) []gScenario {
 	return out
 }
 
-// TestFiledEqualsFlat is acceptance B1 of task L3: for every prune golden scenario (the 231 trees
+// fullEquivEnv runs TestFiledEqualsFlat over every scenario: HOLOCRON_FULL_EQUIV=1 (minutes under
+// -race, about 25 on Windows). By default it runs a fixed sample that fits the CI timeout.
+const fullEquivEnv = "HOLOCRON_FULL_EQUIV"
+
+// equivSample is the default sample: every table scenario, every 10th corpus tree, and 8 of the
+// generated archives - the smallest that holds the fall-back day, then the smallest others.
+// It fails the test unless the sample holds the fall-back day, a midnight and a retention cutoff
+// inside a day folder.
+func equivSample(t *testing.T, table, corpus, synthetic []gScenario) []gScenario {
+	out := append([]gScenario{}, table...)
+	for i := 0; i < len(corpus); i += 10 {
+		out = append(out, corpus[i])
+	}
+	type seg struct {
+		day string
+		mt  time.Time
+	}
+	segsOf := func(s gScenario) []seg {
+		var out []seg
+		for _, e := range s.Entries {
+			if _, st, ok := archive.ParseSegment(filepath.Base(e.Path)); ok {
+				mt, _ := time.Parse(time.RFC3339Nano, e.MTime)
+				out = append(out, seg{archive.DayName(st), mt})
+			}
+		}
+		return out
+	}
+	fallBack := func(s gScenario) bool {
+		var east, west bool
+		for _, e := range s.Entries {
+			n := filepath.Base(e.Path)
+			east = east || strings.Contains(n, "_20261025_") && strings.Contains(n, "+0300")
+			west = west || strings.Contains(n, "_20261025_") && strings.Contains(n, "+0200")
+		}
+		return east && west
+	}
+	midnight := func(s gScenario) bool {
+		days := map[string]bool{}
+		for _, x := range segsOf(s) {
+			days[x.day] = true
+		}
+		return len(days) > 1
+	}
+	cutoffInDay := func(s gScenario) bool {
+		now, _ := time.Parse(time.RFC3339Nano, s.Now)
+		cut := now.Add(-time.Duration(*s.Steps[1].Config.MaxRetentionDays * float64(24*time.Hour)))
+		before, after := map[string]bool{}, map[string]bool{}
+		for _, x := range segsOf(s) {
+			if x.mt.Before(cut) {
+				before[x.day] = true
+			} else {
+				after[x.day] = true
+			}
+		}
+		for d := range before {
+			if after[d] {
+				return true
+			}
+		}
+		return false
+	}
+	// the smallest first (fewest files), so the sample stays cheap; ties in generation order
+	synthetic = append([]gScenario{}, synthetic...)
+	sort.SliceStable(synthetic, func(i, j int) bool { return len(synthetic[i].Entries) < len(synthetic[j].Entries) })
+	var picked []gScenario
+	for _, s := range synthetic {
+		if fallBack(s) {
+			picked = append(picked, s)
+			break
+		}
+	}
+	for _, s := range synthetic {
+		if len(picked) == 8 {
+			break
+		}
+		if len(picked) == 0 || s.Name != picked[0].Name {
+			picked = append(picked, s)
+		}
+	}
+	var fb, mn, cd int
+	for _, s := range picked {
+		fb, mn, cd = fb+btoi(fallBack(s)), mn+btoi(midnight(s)), cd+btoi(cutoffInDay(s))
+	}
+	if fb == 0 || mn == 0 || cd == 0 {
+		t.Fatalf("the sample misses a case: fall-back %d, midnight %d, cutoff inside a day %d", fb, mn, cd)
+	}
+	t.Logf("sample: %d table, %d corpus, %d generated (fall-back %d, midnight %d, cutoff inside a day %d); %s=1 runs all", len(table), (len(corpus)+9)/10, len(picked), fb, mn, cd, fullEquivEnv)
+	return append(out, picked...)
+}
+
+// TestFiledEqualsFlat is acceptance B1 of task L3: for the prune golden scenarios (the 231 trees
 // of testdata/golden/prune) and for generated archives across the fall-back day, midnight and the
 // retention cutoff, the same files with most closed segments filed into their day folders give,
 // step by step, the same deletions, kept and protected files, plan, decision, messages, alerts,
-// breaker and clock outcomes, state and logs as the flat original. It replaces
+// breaker and clock outcomes, state and logs as the flat original. By default a fixed sample
+// (equivSample); with HOLOCRON_FULL_EQUIV=1 every golden and 60 generated archives. It replaces
 // TestCollectStaysOnTheSpoolUntilL3 (task L2's pin of the pruner to the spool).
 func TestFiledEqualsFlat(t *testing.T) {
 	table, corpus := loadGoldens(t)
 	all := append(append(table, corpus...), syntheticScenarios(60)...)
+	if os.Getenv(fullEquivEnv) != "1" {
+		all = equivSample(t, table, corpus, syntheticScenarios(60))
+	}
 	compared, filed, deleted, filedDeleted, breaker, clock, blocked := 0, 0, 0, 0, 0, 0, 0
 	for _, s := range all {
 		ext := "." + s.Container
@@ -288,8 +382,8 @@ func TestFiledEqualsFlat(t *testing.T) {
 	if filedDeleted == 0 || breaker == 0 || clock == 0 || blocked == 0 {
 		t.Errorf("the comparison does not exercise filed deletions (%d), the breaker (%d), the clock gate (%d) and blocked runs (%d)", filedDeleted, breaker, clock, blocked)
 	}
-	t.Logf("%d scenarios (%d goldens), %d replays identical; %d segments filed, %d real deletions (%d of filed segments); breaker held %d, clock refused %d, blocked %d",
-		len(all), len(table)+len(corpus), compared, filed, deleted, filedDeleted, breaker, clock, blocked)
+	t.Logf("%d scenarios, %d replays identical; %d segments filed, %d real deletions (%d of filed segments); breaker held %d, clock refused %d, blocked %d",
+		len(all), compared, filed, deleted, filedDeleted, breaker, clock, blocked)
 }
 
 // The comparison can fail: a planner that ignores filed segments (Collect's old spool view) gives
