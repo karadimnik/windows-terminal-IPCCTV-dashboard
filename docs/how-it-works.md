@@ -34,6 +34,8 @@ E:\cameras\
                             rotated the same way
 ```
 
+Holocron also reads day folders inside a camera folder (decision D20): `Front_Entrance\2026-10-26\Front_Entrance_20261026_...mkv`, the folder being the local date written in the file names, so the repeated hour of the clock change stays in one folder with both offsets. ffmpeg keeps writing into the camera folder itself (the spool); nothing files segments into day folders yet (a later mover will, and the pruner learns the day folders first). Every reader goes through one library: the Footage tab, `holocron archive stats`, `archive compare`, the doctor and the disk figures read the spool and every day folder; the status tick, alert 110 and the stall watchdog read only the camera folder while it holds the open and the last closed segment, one listing per camera however many days are filed. A file under a day folder that is not the date in its name is misfiled: it is not footage, and `archive stats` and the doctor report it. A folder named like a day that is not a real date, a link or a junction is never entered.
+
 Three details in there are not preferences:
 
 * **MKV, not MP4.** All six of these cameras emit `pcm_alaw` audio, and MP4 refuses `pcm_alaw` with stream copy. MKV is also the only container here that survives a crash: a file that was being written when the power went out still plays.
