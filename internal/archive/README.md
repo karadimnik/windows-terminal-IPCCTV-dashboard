@@ -40,7 +40,7 @@ non-test file elsewhere lists a folder or joins a root with a camera (allow-list
     func (Layout) Newest(camera) (Segment, bool, error) // spool-first: the spool's newest, else the newest day folder's that holds one
     func (Layout) Scan(camera, now, segmentSeconds) (DirScan, error)      // status tick: the spool; day folders only while < 2 segments seen
     func (Layout) ScanAll(camera, now, segmentSeconds) (DirScan, error)   // Scan, with Files/Bytes/write times/Filed over every day folder too
-    func (Layout) ScanSpool(camera, now, segmentSeconds) (DirScan, error) // the spool alone, never a day folder (the pruner until task L3)
+    func (Layout) ScanSpool(camera, now, segmentSeconds) (DirScan, error) // the spool alone, never a day folder (the flat view)
     func (Layout) Resolve(camera, name string) (Entry, error)          // MATCHES name: the spool's listing, then the listed day folder of the name's date; never joins it
     func (Layout) Classify(path string) Class        // lexical: Class{Camera, Day, Name, Kind}, Kind Foreign | Spooled | Filed | Misfiled; (Class) Footage()
     func IsDayName(name string) bool; func DayName(start time.Time) string   // YYYY-MM-DD and a calendar date; the local date written in a segment name
@@ -110,7 +110,7 @@ non-test file elsewhere lists a folder or joins a root with a camera (allow-list
   closed segment, alert 110, stall watchdog) list only the camera folder while it holds two or more segments. **Contract for the L4 mover:
   it must always leave the open segment AND the newest closed segment in the spool.** With one segment in the spool `Scan` also lists the
   newest day folder (two listings, the newest closed write stays exact), with none it lists day folders newest first until it has seen two
-  segments; `Newest` is then the newest of the newest day folder that holds one. `ScanSpool` is the spool only (the pruner, until L3).
+  segments; `Newest` is then the newest of the newest day folder that holds one. `ScanSpool` is the spool only (the flat view). The pruner reads the spool and every day folder (L3).
   Everything that shows or counts footage reads every day folder: `Files`, `Segments`, `ScanAll` (archive-wide disk figures), the Footage
   index, `archive stats`, `archive compare`, the doctor. `Resolve` reads the spool and at most the one listed day folder of the name's date.
   Measured (`TestStatusTickListsOnlyTheSpool`, 6 cameras x 30 days x 96 segments, spool of 2, cached and not): a tick is 1 listing per

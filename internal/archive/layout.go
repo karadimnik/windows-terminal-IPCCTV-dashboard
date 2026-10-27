@@ -30,7 +30,7 @@ import (
 // the open segment AND the newest closed segment in the spool. When the spool holds fewer than
 // two segments, Newest and Scan also read day folders, newest first, until they have seen two
 // segments (so with one segment in the spool a status tick is two listings, and the answer is
-// still exact). ScanSpool reads the spool and nothing else (the pruner, until task L3).
+// still exact). ScanSpool reads the spool and nothing else (the flat view, the reference the tests compare with).
 // Everything that shows or counts footage reads the spool and every day folder: Files, Segments
 // and ScanAll (the archive-wide scan, the footage index, archive stats, archive compare, the
 // doctor). Resolve reads the spool and at most the one day folder a segment name implies.

@@ -94,8 +94,8 @@ func resolve(p string) string {
 }
 
 // Executor performs a plan. Before each removal it checks that one file again - it still exists,
-// is still a plain file in a plain camera folder directly under the root, still passes the
-// allowlist, still has the planned size and write time, and is still strictly older than its
+// is still a plain file in a plain camera folder directly under the root (or in a plain day folder
+// of its own date directly in that camera folder), still passes the allowlist, still has the planned size and write time, and is still strictly older than its
 // folder's protected newest - and skips it on any change (a recorder may be writing). It deletes
 // only files of the plan, re-reads free space after each one and stops at the target.
 type Executor struct {
@@ -307,8 +307,13 @@ func (a *realActor) revalidate(s *seg) string {
 	if err != nil || !di.Dir || di.Reparse {
 		return "its folder is gone or became a link"
 	}
+	if s.f.Day != "" {
+		if di, err := fsys.Stat(filepath.Join(s.dir, s.f.Day)); err != nil || !di.Dir || di.Reparse {
+			return "its day folder is gone or became a link"
+		}
+	}
 	if !in.same(filepath.Dir(filepath.Clean(s.dir)), filepath.Clean(in.Root)) || strings.HasPrefix(s.folder, "_") ||
-		!in.Matcher.IsSegmentOf(s.f.Name, s.folder, in.Rules.Container) {
+		!footageOf(in.layout().Classify(s.path), s.folder, s.f.Day) {
 		return "it fails the allowlist"
 	}
 	gi, err := fsys.Stat(s.guard.path)

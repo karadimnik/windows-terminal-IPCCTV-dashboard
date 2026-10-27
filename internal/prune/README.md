@@ -5,15 +5,15 @@ The archive pruner (W3): a pure planner and a guarded executor. Port of `Invoke-
 specification and `testdata/golden/prune/` holds its recorded decisions.
 
     // inputs
-    type File struct { Name string; MTime time.Time; Size int64; Reparse bool; Created time.Time /* Windows only, else zero */ }
-    type Camera struct { Dir string; Reparse bool; Files []File; Newest string /* archive.Scan's Newest: always protected */ }
+    type File struct { Name, Day string /* the day folder holding it, "" in the spool */; MTime time.Time; Size int64; Reparse bool; Created time.Time /* Windows only, else zero */ }
+    type Camera struct { Dir string; Reparse bool; Files []File; Days []string /* the day folders listed */; Newest string /* archive.Layout's Newest: always protected */ }
     type Rules struct { ReserveGB, PruneHysteresisGB float64; MaxRetentionDays *float64; MaxAgePruneFraction float64
                         Container string /* ".mkv" */; SegmentSeconds, StallFactor float64 }
     func RulesFrom(c config.Config) Rules
     type Inputs struct { Root string; Matcher archive.Matcher; Cameras []Camera; Skipped []string; FreeBytes uint64
                          Rules Rules; Now time.Time; RootProblem /* archive.CheckRoot */, MarkerProblem /* archive.VerifyRoot */ string }
     func Collect(root string, p osx.Platform, r Rules, now time.Time, dryRun bool) (Inputs, error)   // read-only
-                                                 // flat view only until task L3: day folders (D20) are not entered, Newest is archive.Layout.ScanSpool's
+                                                 // archive.Layout: the spool and every day folder (D20), every file listed; Plan classifies
 
     // the planner (pure)
     func Plan(in Inputs) Decision
@@ -45,8 +45,12 @@ specification and `testdata/golden/prune/` holds its recorded decisions.
 1. Root (`RootProblem`), 2. ownership marker (`MarkerProblem`): refuse the whole run, `Blocked`,
    alert 120 once per distinct message (re-armed by a passing run).
 3. Per file: links and reparse points refused by name; underscore folders and files directly in the
-   root never looked at; a folder that is not an immediate child of the root, or a name that is not
-   `archive.Matcher.IsSegmentOf(name, folder, container)`, is foreign (counted, never deleted).
+   root never looked at; a file is a segment only where `archive.Layout.Classify` says it is footage of
+   its folder: in the camera folder (an immediate child of the root) or in a day folder of the date in
+   its name directly inside it (D20), and `archive.Matcher.IsSegmentOf(name, folder, container)`.
+   Anything else, a misfiled segment or a foreign file in a day folder included, is foreign (counted
+   per folder, never deleted). Filed segments take part in everything after this gate exactly as
+   spooled ones: protection, the clock, the breaker's shares and the oldest-first order.
 4. Protection, per folder: every segment at the latest name instant, every segment at the latest
    creation time where the OS reports one (Windows), the newest by write time (the file ffmpeg holds
    open) and `Camera.Newest`. A candidate must be strictly older (write time) than the earliest write
@@ -64,8 +68,9 @@ specification and `testdata/golden/prune/` holds its recorded decisions.
 
 `Plan` predicts free space after each deletion as the reading plus the bytes freed. The executor
 re-reads it after every removal, deletes only planned files (in order), re-checks each file just
-before removing it (exists, plain file, same size and write time, still passes the allowlist, still
-strictly older than its guard) and skips it otherwise; when the plan runs out before the target the
+before removing it (exists, plain file, same size and write time, its camera folder and day folder
+still plain folders and not links or junctions, still passes the allowlist, still strictly older than
+its guard) and skips it otherwise; when the plan runs out before the target the
 run is `Short` (not `Blocked`) and the next run continues. Every deletion is logged at INFO with
 `action=prune.delete`, `target`, `bytes`, `reason`, `result`; each run ends with its stop line.
 
@@ -77,6 +82,11 @@ run is `Short` (not `Blocked`) and the next run continues. Every deletion is log
   allowed are only those in `testdata/golden/prune/EXPECTED-DIFFERENCES.md`; negative controls.
 - `property_test.go`: 4000 seeded trees (seed 20261020) against rules re-derived in the test, plus the
   executor over an in-memory filesystem that changes files under it; negative controls.
+- `mixed_test.go` (L3): every golden scenario and 60 generated archives (the fall-back day, midnight, the
+  retention cutoff inside a day folder) with most closed segments filed into day folders decide exactly
+  as the flat original; the awkward trees of `archivetest.Mixed` delete only footage; each hazard
+  (misfiled, foreign, nested, non-day folder, link) beside a positive control; a day folder swapped for
+  a junction after the plan; the newest survives any pressure.
 - `units_test.go`: rounding tie, .NET number formatting, tie order, executor re-checks, directories
   never removed, dry run, sandbox guard.
 - Every test runs with `SANDBOX_ONLY=1` (TestMain): the executor refuses anything outside the OS temp dir.

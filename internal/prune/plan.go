@@ -28,21 +28,24 @@ const (
 // futureSkew is how far ahead of the wall clock a segment may be written (Get-CamPruneClockProblem).
 const futureSkew = 60 * time.Second
 
-// File is one directory entry of a camera folder (never a subdirectory: those are not entered).
+// File is one directory entry of a camera folder or of one of its day folders (never a
+// subdirectory: those are not entered).
 type File struct {
 	Name    string
+	Day     string    // the day folder holding it (decision D20), "" in the camera folder (the spool)
 	MTime   time.Time // UTC
 	Size    int64
 	Reparse bool      // a symbolic link, junction, any reparse point, or not a regular file
 	Created time.Time // creation time where the OS reports it (Windows); zero elsewhere
 }
 
-// Camera is one immediate subfolder of the root and its files.
+// Camera is one immediate subfolder of the root, its files and its day folders' files.
 type Camera struct {
 	Dir     string // full path; its base name is the camera's safe name
 	Reparse bool   // the folder itself is a link or reparse point
 	Files   []File
-	Newest  string // archive.Scan's Newest for this folder: always protected
+	Days    []string // the day folders listed (archive.Entry.IsDay), oldest first: the executor removes an empty one
+	Newest  string   // archive.Layout's Newest for this folder: always protected
 }
 
 // Rules are the configuration the pruner reads.
@@ -125,7 +128,7 @@ type Decision struct {
 
 	Protected  []string // every protected newest segment
 	Rejected   []string // refused links and paths, "<path> (<why>)"
-	Foreign    []Count  // files left alone because they are not segments of the folder
+	Foreign    []Count  // files left alone because they are not footage of the folder: Dir is the camera folder or a day folder in it
 	Kept       []Count  // segments not strictly older than the folder's newest
 	Messages   []string // what PowerShell logs at the gates, in order
 	Candidates int
@@ -146,7 +149,7 @@ var faults struct {
 
 // seg is a segment that passed the per-file gate.
 type seg struct {
-	dir, folder, path string
+	dir, folder, path string // dir is the camera folder; path is in it or in its day folder f.Day
 	f                 File
 	start             time.Time // the instant in its name
 	guard             *seg
@@ -187,6 +190,18 @@ func (in Inputs) same(a, b string) bool {
 	return a == b
 }
 
+// layout is the archive layout Plan and the executor classify paths with.
+func (in Inputs) layout() archive.Layout {
+	return archive.Layout{Root: in.Root, Matcher: in.Matcher, Container: in.Rules.Container}
+}
+
+// footageOf: c is a segment of camera folder that is where it belongs, in the spool (day "") or
+// filed under its own date in the day folder day, as Collect listed it. The camera folder is a
+// direct child of the root and does not start with "_" (Classify says so).
+func footageOf(c archive.Class, folder, day string) bool {
+	return c.Footage() && c.Camera == folder && c.Day == day
+}
+
 // validLeaf: a directory entry name that cannot step out of its folder.
 func validLeaf(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\`+"\x00")
@@ -221,7 +236,7 @@ func run(in Inputs, a actor) Decision {
 		d.Rejected = append(d.Rejected, s)
 		d.Messages = append(d.Messages, "prune guard: refusing to prune "+s)
 	}
-	root := filepath.Clean(in.Root)
+	layout := in.layout()
 	var candidates, unprotected, newest, seen []*seg
 	for _, cam := range in.Cameras {
 		folder := filepath.Base(cam.Dir)
@@ -237,34 +252,37 @@ func run(in Inputs, a actor) Decision {
 		if len(cam.Files) == 0 {
 			continue
 		}
-		parentOK := in.same(filepath.Dir(filepath.Clean(cam.Dir)), root)
 		var segs []*seg
-		foreign := 0
+		foreign := map[string]int{} // by day folder, "" the spool
+		var foreignOrder []string
 		for _, f := range cam.Files {
-			path := filepath.Join(cam.Dir, f.Name)
+			path := filepath.Join(cam.Dir, f.Day, f.Name)
 			switch {
 			case f.Reparse:
 				d.Rejected = append(d.Rejected, path+" (reparse point)")
 				d.Messages = append(d.Messages, "prune guard: refusing to delete "+path+": reparse point")
 				continue
-			case !validLeaf(f.Name):
+			case !validLeaf(f.Name) || (f.Day != "" && !validLeaf(f.Day)):
 				d.Rejected = append(d.Rejected, path+" (outside the archive root)")
 				d.Messages = append(d.Messages, "prune guard: refusing to delete "+path+": outside the archive root")
 				continue
-			case !parentOK || !in.Matcher.IsSegmentOf(f.Name, folder, r.Container):
-				foreign++
-				continue
 			}
 			_, start, ok := archive.ParseSegment(f.Name)
-			if !ok {
-				foreign++
+			if !ok || !footageOf(layout.Classify(path), folder, f.Day) {
+				// not a segment of the folder, or in a day folder that is not the date in its name
+				// (misfiled): never a candidate; the doctor names it (storage.unseen)
+				if foreign[f.Day] == 0 {
+					foreignOrder = append(foreignOrder, f.Day)
+				}
+				foreign[f.Day]++
 				continue
 			}
 			segs = append(segs, &seg{dir: cam.Dir, folder: folder, path: path, f: f, start: start})
 		}
-		if foreign > 0 {
-			d.Foreign = append(d.Foreign, Count{Dir: cam.Dir, Count: foreign})
-			d.Messages = append(d.Messages, fmt.Sprintf("prune: %d foreign file(s) left alone in %s", foreign, cam.Dir))
+		for _, day := range foreignOrder {
+			dir := filepath.Join(cam.Dir, day)
+			d.Foreign = append(d.Foreign, Count{Dir: dir, Count: foreign[day]})
+			d.Messages = append(d.Messages, fmt.Sprintf("prune: %d foreign file(s) left alone in %s", foreign[day], dir))
 		}
 		if len(segs) == 0 {
 			continue
@@ -347,7 +365,10 @@ func run(in Inputs, a actor) Decision {
 		if a.f.Name != b.f.Name {
 			return a.f.Name < b.f.Name
 		}
-		return a.dir < b.dir
+		if a.dir != b.dir {
+			return a.dir < b.dir
+		}
+		return a.f.Day < b.f.Day
 	})
 	d.Candidates = len(candidates)
 
