@@ -1,10 +1,6 @@
 package archive
 
 import (
-	"errors"
-	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -68,72 +64,8 @@ func Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, er
 // Deviation from the task text: container is an extra parameter, because "matches the strict
 // pattern" depends on the configured container.
 func (m Matcher) Scan(dir, container string, now time.Time, segmentSeconds int) (DirScan, error) {
-	now = now.UTC()
-	scan := DirScan{Dir: dir, ScannedAt: now}
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		if fi, serr := os.Stat(dir); serr == nil && !fi.IsDir() { // Windows reports a file as "path not found"
-			return scan, fmt.Errorf("%s is not a directory", dir)
-		}
-		return scan, nil
-	}
-	if err != nil {
-		return scan, err
-	}
-	safe := filepath.Base(filepath.Clean(dir))
-
-	type file struct {
-		name  string
-		mtime time.Time
-	}
-	var files []file
-	var newest fs.FileInfo
-	var newestM time.Time
-	for _, e := range entries { // sorted by name
-		if e.IsDir() {
-			continue
-		}
-		info, err := e.Info()
-		if err != nil { // vanished between listing and stat
-			continue
-		}
-		mtime := info.ModTime().UTC()
-		scan.Files++
-		scan.Bytes += info.Size()
-		if scan.OldestWrite.IsZero() || mtime.Before(scan.OldestWrite) {
-			scan.OldestWrite = mtime
-		}
-		if mtime.After(scan.NewestWrite) {
-			scan.NewestWrite = mtime
-		}
-		files = append(files, file{e.Name(), mtime})
-
-		if !info.Mode().IsRegular() || !m.IsSegmentOf(e.Name(), safe, container) {
-			continue
-		}
-		// entries are in name order, so !Before lets the later name win an mtime tie
-		if newest == nil || !mtime.Before(newestM) {
-			newest, newestM = info, mtime
-		}
-	}
-	if newest != nil {
-		scan.Newest = newest.Name()
-		scan.NewestMTime = newestM
-		scan.NewestBytes = newest.Size()
-		if n, err := newestSize(filepath.Join(dir, newest.Name())); err == nil {
-			scan.Bytes += n - scan.NewestBytes
-			scan.NewestBytes = n
-		}
-		age := now.Sub(newestM)
-		scan.Recent = age <= time.Duration(segmentSeconds)*time.Second+openGrace
-		scan.Anomaly = -age > futureTolerance
-	}
-	for _, f := range files {
-		if f.name != scan.Newest && f.mtime.After(scan.NewestClosedWrite) {
-			scan.NewestClosedWrite = f.mtime
-		}
-	}
-	return scan, nil
+	files, err := listFiles(dir)
+	return scanOf(dir, filepath.Base(filepath.Clean(dir)), m, container, files, err, now, segmentSeconds)
 }
 
 // Tracker remembers, between scans, when each camera's newest segment was first seen: the stand-in
