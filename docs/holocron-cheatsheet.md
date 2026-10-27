@@ -27,6 +27,8 @@ One page of lookups. First time here: [holocron-quickstart.md](holocron-quicksta
 | follow the log | `holocron logs -f` |
 | change a log level now (needs the supervisor running) | `holocron log level supervisor debug` (all components: `holocron log level all info`; keep it: add `--save`) |
 | archive size, GB per day, days left | `holocron archive stats` |
+| file the flat history into day folders (the plan, then apply it; safe while recording) | `holocron archive migrate`, then `holocron archive migrate --now` |
+| put the archive back flat (rollback to the PowerShell system; Holocron stopped) | `holocron archive flatten`, then `holocron archive flatten --now` |
 | preview what the pruner would delete | `holocron prune --dry-run` (deleting: `holocron prune --now --yes`, only with no supervisor running) |
 | compare two archives (read only) | `holocron archive compare --old E:\cameras --new D:\holocron-shadow` |
 | add / change password / list users | `holocron user add anna`, `holocron user passwd anna`, `holocron user list` (password on standard input) |

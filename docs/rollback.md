@@ -1,6 +1,6 @@
 # Rollback: from Holocron back to the PowerShell system
 
-This page undoes [the cutover](cutover.md): it stops Holocron, proves it is gone, switches its autostart off and starts the old system (`cam.ps1`, `cam.recorder.ps1`, `camui.exe`) again, on the same archive. The old system was never changed by the cutover, so there is nothing to restore; rolling back is "stop one, start the other". It takes minutes: Holocron's `down` took 0.4 s with fake cameras (CONFIRMED, cmd/holocron README, not timed with six real ones), and the old system's own start chain measured 18 to 32 s (the old project's notes, 2026-10-13).
+This page undoes [the cutover](cutover.md): it stops Holocron, proves it is gone, switches its autostart off and starts the old system (`cam.ps1`, `cam.recorder.ps1`, `camui.exe`) again, on the same archive. The old system was never changed by the cutover; the one thing to restore is the flat archive: Holocron files closed segments into day folders (decision D20), which the old system does not read, so step R2a puts them back with `holocron archive flatten` before it starts. Otherwise rolling back is "stop one, start the other". It takes minutes: Holocron's `down` took 0.4 s with fake cameras (CONFIRMED, cmd/holocron README, not timed with six real ones), and the old system's own start chain measured 18 to 32 s (the old project's notes, 2026-10-13).
 
 Same labels as the cutover page: **CONFIRMED** (a recorded run), **source-checked** (read in this branch's code, not run for this page), **documented-only**, **UNVERIFIED**.
 
@@ -61,6 +61,18 @@ tasklist /fi "imagename eq holocron.exe"
 ```
 
 **Expect:** `status` exits 1 and prints `supervisor: NOT RUNNING (...)` with `last stop: requested ...`, `host: not running` and `web app: not running (would listen on ...)`. `netstat` prints nothing. Each `tasklist` prints `INFO: No tasks are running which match the specified criteria.` (standard Windows tools; the `netstat` output also matches a remote port, so a line with `ESTABLISHED` to a camera's port is not a listener of yours). **Stop if:** anything is listed: R1 was not finished. Why this is not optional: both systems read and write `<archive root>\_state\status.json`, and each decides "already running" from it. If Holocron were still alive, the old `-Start` would see a fresh heartbeat and say it is already running, or the two would fight for the cameras and ports. Never run both on one root.
+
+### R2a. Put the archive back flat
+
+The old system lists only the files directly in each camera folder. With Holocron stopped (R1), put every filed segment back (the command refuses while Holocron runs):
+
+```powershell
+& $h --config $c archive flatten
+& $h --config $c archive flatten --now
+& $h --config $c archive stats
+```
+
+**Expect:** the dry run lists per camera what comes back and which day folders go; `--now` ends with `total: put back N segment(s) ...: done` and exit 0; `archive stats` shows no camera with segments filed in day folders. Files listed as left in a day folder are not footage (misfiled or foreign) and the old system ignores them. Exit 1 with a conflict: the camera folder already holds that name; compare the two files, keep one, run `--now` again.
 
 ### R3. Switch Holocron's autostart off
 
