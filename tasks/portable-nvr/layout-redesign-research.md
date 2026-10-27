@@ -2,7 +2,7 @@
 
 Status (L3, 27 Oct 2026): L1 (the `archive.Layout` library), L2 (every reader reads the spool and day folders, read side only) and L3 (the
 pruner deletes filed segments exactly as flat ones, removes emptied past day folders; the doctor's `storage.unseen` names what it cannot see)
-are built; the mover (L4) is not, so nothing is filed yet. The L4 mover's contract from L2: it must always leave the open segment AND
+are built; L4a (the mover library and the supervisor loop) is built, `archive migrate` / `archive flatten` (L4b) are not. The L4 mover's contract from L2: it must always leave the open segment AND
 the newest closed segment in the spool (then a status tick is one listing per camera); see `internal/archive/README.md` "Spool and day folders".
 Original status: research only, nothing built. Decision D18 ("archive layout and file names unchanged, so both systems can share footage") would be
 reversed by any of the options below. Dependency map with file:line for every claim: [spec/layout-dependencies.md](spec/layout-dependencies.md).
