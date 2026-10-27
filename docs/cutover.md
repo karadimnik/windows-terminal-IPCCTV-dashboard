@@ -24,7 +24,8 @@ This page moves the real NVR - all cameras, the existing archive, the web app - 
 
 | | PowerShell system | Holocron |
 |---|---|---|
-| Archive root, folder and file names, MKV, 15-minute segments, the `+0300` suffix | the same | the same (decision D18); one folder per camera under `RootPath` |
+| Archive root, folder and file names, MKV, 15-minute segments, the `+0300` suffix | the same | the same; one folder per camera under `RootPath`, and ffmpeg still writes flat into it |
+| Where closed segments live | flat in the camera folder | filed into `<Camera>\YYYY-MM-DD\` day folders by Holocron's mover (decision D20, which replaced D18's unchanged layout). The old system reads only the camera folder itself, so going back needs `archive flatten` first ([rollback R2a](rollback.md#r2a-put-the-archive-back-flat)) |
 | Pruner | free-space watermark, optional age rule | the same rules and gates, ported; same ownership marker file (see C6) |
 | Program | scripts + `camui.exe` | `holocron.exe` only (rule R1); the web app is its web role |
 | Settings | `recorder.config.json`, `cameras.json` | `holocron.config.json` (same key names, it loads a copy of the old file unchanged) and `cameras.json` beside it |
@@ -236,7 +237,7 @@ Open `C:\Holocron\holocron.config.json` and check:
 
 ### P11. Read the rollback and rehearse it
 
-Open [rollback.md](rollback.md), do its "Rehearse the rollback" section once, and keep the page open in a second window during the cutover. **Stop if:** you could not finish that rehearsal's checks.
+Open [rollback.md](rollback.md), do its "Rehearse the rollback" section once, and keep the page open in a second window during the cutover. Note step R2a: because Holocron files the archive into day folders, the way back includes `holocron archive flatten --now`. **Stop if:** you could not finish that rehearsal's checks.
 
 ### P12. Choose the window
 
@@ -301,15 +302,17 @@ Test-Path E:\cameras\_state\archive-owner.json
 & $h --config $c doctor
 & $h --config $c prune --dry-run
 & $h --config $c archive stats
+& $h --config $c archive migrate
 ```
 
-**Ownership, precisely** (`internal/archive`, `internal/prune` READMEs, source-checked). The pruner deletes only under a root that carries the marker `<root>\_state\archive-owner.json`. The PowerShell recorder writes that file with `Owner` `IPCCTV recorder`, and Holocron writes and accepts the same content, so a root the PowerShell system claimed is already owned. Holocron is stricter in one way: the `RootPath` inside the marker must name the configured root (a copied marker does not count). At its first start, `holocron up` calls the claim: with a valid marker it is a no-op and writes nothing; with no valid marker it writes one only if the root holds nothing but recorder files (every top-level entry starts with `_`, or is a camera folder whose files are all segments of that camera in the configured container, e.g. `Front_Door_20261027_120001+0200.mkv`). A foreign file or folder at the top of the root, a symlink or junction, or a drive root blocks the claim, and then the pruner refuses everything (alert 120, the disk will fill) while recording is not stopped by it. Existing segments are accepted as they are, and the newest file of every camera is always protected.
+**Ownership, precisely** (`internal/archive`, `internal/prune` READMEs, source-checked). The pruner deletes only under a root that carries the marker `<root>\_state\archive-owner.json`. The PowerShell recorder writes that file with `Owner` `IPCCTV recorder`, and Holocron writes and accepts the same content, so a root the PowerShell system claimed is already owned. Holocron is stricter in one way: the `RootPath` inside the marker must name the configured root (a copied marker does not count). At its first start, `holocron up` calls the claim: with a valid marker it is a no-op and writes nothing; with no valid marker it writes one only if the root holds nothing but recorder files (every top-level entry starts with `_`, or is a camera folder whose files are all segments of that camera in the configured container, e.g. `Front_Door_20261027_120001+0200.mkv`, or day folders holding only such segments). A foreign file or folder at the top of the root, a symlink or junction, or a drive root blocks the claim, and then the pruner refuses everything (alert 120, the disk will fill) while recording is not stopped by it. Existing segments are accepted as they are, and the newest file of every camera is always protected.
 
 **Expect:**
 - `Test-Path` prints `True`. (`False`: the old system never claimed it, which is unusual; the claim above decides.)
 - `doctor`: no line starting `fail`. Now that the old stack is down, `ok relay RTSP  tcp 127.0.0.1:8554 is free`, `ok relay API ... :9997 is free` (and the live ports if `LiveViewEnabled`); `ok archive root  E:\cameras, claimed`; `ok credentials`; `ok autostart` not installed; `ok old tasks ... disabled`; `warn status  not running: ...` (the old supervisor's clean stop). `fail archive root` names the blocker (for example a file at the top of the root): move that entry out of `<archive root>` and run `doctor` again. Doctor creates `_state` and `_logs` if missing and writes then deletes one temporary file in the root, `_state` and `_logs` (source-checked): tiny, and it is why it is not run earlier.
 - `prune --dry-run` (a preview, deletes nothing, though it does write a line to `_logs\holocron.log` and `audit.log`, both Holocron's own and ignored by the old system): `prune (dry run: nothing is deleted): E:\cameras`, the free/reserve/target line, and `would delete N file(s)`. Compare with what the old pruner would do (oldest first, only if free space is below the reserve or the age rule applies, never the newest file). **Stop if:** `REFUSED at the root|marker gate`, deletions with reason `age` when you did not intend an age rule, or `age rule HELD by the circuit breaker`.
 - `archive stats`: your cameras' folders with segment counts and the newest segment of each, `free ... GB, reserve ... GB`. Note the figures: they are the "before".
+- `archive migrate` (a dry run: it moves nothing): per camera `would file N segment(s), <size>, into D day folder(s)` and `total: would file ...`; the two newest segments of each camera stay. This is the plan for the existing history, and it is the one layout change of the cutover: Holocron files closed segments into `<Camera>\YYYY-MM-DD\` day folders (decision D20), which the old system does not read. At C7 the supervisor's mover files the history by itself (at the defaults 200 files per camera per minute, oldest first). To file it now instead, with the old system stopped as it is here, run `archive migrate --now` (resumable; `INCOMPLETE` or a conflict names the files, see [troubleshooting](troubleshooting.md#holocron-archive-layout)). To keep the archive flat until you decide, set `MoveToDayFolders` to `false` in `holocron.config.json` before C7 (`config set` does not edit it). `REFUSED ... not owned` means the marker is missing: see Ownership above. Either way, going back to the old system takes `holocron archive flatten` ([rollback R2a](rollback.md#r2a-put-the-archive-back-flat)).
 
 **Stop if:** any of the above. Rolling back from here is C3's mirror: [rollback.md](rollback.md).
 
@@ -370,11 +373,11 @@ The three that prove it is Holocron and not the old system: `host: pid <m>` is p
 
 ```powershell
 & $h --config $c archive stats
-dir E:\cameras\Front_Door | sort LastWriteTime -desc | select -first 3
+dir E:\cameras\Front_Door -File | sort LastWriteTime -desc | select -first 3
 & C:\ffmpeg\bin\ffprobe.exe -v error -show_entries stream=codec_type,codec_name,sample_rate,channels -of compact=p=0 "E:\cameras\Front_Door\<the segment that just closed>.mkv"
 ```
 
-**Expect:** each camera's NEWEST segment in `archive stats` moves to the new boundary (names like `Front_Door_20261027_121501+0200.mkv`); the one before it, written by Holocron from your start to the boundary, is a partial and shorter than a full one - normal; the next full one is about the size of the old system's full segments for that camera (shadow criterion: ratio 0.90 to 1.10, UNVERIFIED for the four cameras that were not shadowed). `ffprobe` shows a video stream and an audio stream `pcm_alaw`, `sample_rate=8000`, `channels=1`, as in the old files (CONFIRMED for the shadowed cameras, shadow.md). The exact `ffprobe` formatting is UNVERIFIED. Expect ONE gap in each camera's timeline, between the old system's last file and Holocron's first: that is the swap, not a fault. **Stop if:** a camera has no new segment two boundaries later, a segment is far smaller than its neighbours, or the audio is missing. That is a rollback trigger ([rollback.md](rollback.md#when-to-roll-back)).
+**Expect:** each camera's NEWEST segment in `archive stats` moves to the new boundary (names like `Front_Door_20261027_121501+0200.mkv`); the one before it, written by Holocron from your start to the boundary, is a partial and shorter than a full one - normal; the next full one is about the size of the old system's full segments for that camera (shadow criterion: ratio 0.90 to 1.10, UNVERIFIED for the four cameras that were not shadowed). `ffprobe` shows a video stream and an audio stream `pcm_alaw`, `sample_rate=8000`, `channels=1`, as in the old files (CONFIRMED for the shadowed cameras, shadow.md). The exact `ffprobe` formatting is UNVERIFIED. Expect ONE gap in each camera's timeline, between the old system's last file and Holocron's first: that is the swap, not a fault. Within a few minutes the camera folder holds only the open segment and the newest closed one (plus any younger than `MoveMarginSeconds`); the rest is in the day folders, and `archive stats` shows `N segment(s) in the spool, M filed in day folders` per camera. **Stop if:** a camera has no new segment two boundaries later, a segment is far smaller than its neighbours, or the audio is missing. That is a rollback trigger ([rollback.md](rollback.md#when-to-roll-back)).
 
 ### C9. Install the logon task
 

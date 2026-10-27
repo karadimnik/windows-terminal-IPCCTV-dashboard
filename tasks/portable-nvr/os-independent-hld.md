@@ -40,7 +40,8 @@ behaviour as the PowerShell system today, driven from the browser app that alrea
 
 - ffmpeg and MediaMTX stay external programs (both ship for all three OSes). We do not write a muxer.
 - The archive on disk is unchanged: one folder per camera, the same file names, so footage, the pruner's safety rules and
-  the web app's Footage screen work with either implementation.
+  the web app's Footage screen work with either implementation. (Superseded by D20 for the layout: closed segments are
+  filed into day folders, which the PowerShell system does not read; see section 9.)
 - `status.json` becomes a written, versioned contract. The web app, the CLI and any other tool read only that.
 - The PowerShell system remains installable and working as a permanent fallback (decision D6). The two never write the same
   archive at the same time.
@@ -228,7 +229,7 @@ Decided by the Operator on 2026-10-17 (D7 to D18 "ok" as recommended; D2 and D5 
 | D15 | macOS | Best effort; Windows and Linux are first-class |
 | D16 | New repository | At the end (D1) |
 | D17 | The Go system manages both MediaMTX instances | Yes |
-| D18 | Archive layout and file names | Unchanged, so both systems can share footage |
+| D18 | Archive layout and file names | Unchanged, so both systems can share footage. **SUPERSEDED by D20 (2026-10-27)**: file names are unchanged, the layout is not |
 | D19 | Reproduce documented intent where the PowerShell code differs (`LastWindowClose` carried across a restart; no immediate alert 110 for a late-enabled camera) | Recommended yes. Still to be confirmed |
 | D20 | Archive layout: supersedes D18 (Operator, 2026-10-27) | Spool and archive: ffmpeg keeps writing flat into `<camera>\`; a mover files closed segments into `<camera>\<YYYY-MM-DD>\` (local date of the file name). Camera first. One shared archive library reads both. `archive migrate` and `archive flatten`. The PowerShell system is no longer a drop-in over the same root: rollback to it needs `archive flatten` first. Research: `layout-redesign-research.md`. |
 

@@ -64,7 +64,7 @@ tasklist /fi "imagename eq holocron.exe"
 
 ### R2a. Put the archive back flat
 
-The old system lists only the files directly in each camera folder. With Holocron stopped (R1), put every filed segment back (the command refuses while Holocron runs):
+Holocron files closed segments into day folders (`<Camera>\YYYY-MM-DD\`, decision D20); the old system lists only the files directly in each camera folder (source-checked, `cam.recorder.ps1`: `Get-ChildItem -File`). Left filed, those days would not be pruned by the old pruner (the disk would fill with them), would be missing from the old UI's Footage screen, and with a lost ownership marker the old system would refuse to claim the root (a folder inside a camera folder blocks its claim). With Holocron stopped (R1), put every filed segment back. The command refuses while Holocron runs (`fix: holocron down`), and it is a dry run until `--now`:
 
 ```powershell
 & $h --config $c archive flatten
@@ -72,7 +72,9 @@ The old system lists only the files directly in each camera folder. With Holocro
 & $h --config $c archive stats
 ```
 
-**Expect:** the dry run lists per camera what comes back and which day folders go; `--now` ends with `total: put back N segment(s) ...: done` and exit 0; `archive stats` shows no camera with segments filed in day folders. Files listed as left in a day folder are not footage (misfiled or foreign) and the old system ignores them. Exit 1 with a conflict: the camera folder already holds that name; compare the two files, keep one, run `--now` again.
+**Expect:** the dry run lists per camera what comes back and which day folders go; `--now` ends with `total: put back N segment(s), <size>: done, the archive is flat` and exit 0; `archive stats` prints no `... filed in day folders` line for any camera. Files listed as left in a day folder are not footage (misfiled or foreign) and the old system ignores them. A file another program holds open is listed as busy and stays: run `--now` again. Exit 1 with a conflict: the camera folder already holds that name; compare the two files, keep one, run `--now` again. A run stopped anywhere leaves every file whole in one place or the other, and running it again carries on. **Stop if:** the run is `INCOMPLETE` or exits 1 and you cannot resolve it: do not start the old system on a half-flat root without reading what is left.
+
+Do not start Holocron again between here and R5: `holocron up` would file the segments again (unless `MoveToDayFolders` is false).
 
 ### R3. Switch Holocron's autostart off
 
@@ -141,7 +143,7 @@ compare with the old files, and apply the differences with the old system's tool
 
 ## What happens to the footage Holocron wrote
 
-Nothing needs doing. Holocron's segments are in the same folders with the same names and format as the old system's (`<Camera>_YYYYMMDD_HHMMSS+HHMM.mkv`, decision D18): the old pruner recognises them by name and container alone and deletes oldest first by the same rules, so they age out like any other file. The Footage screen of the old UI lists them by file name, with no database. Two honest details:
+After R2a it is in the old layout: the same folders, names and format as the old system's (`<Camera>_YYYYMMDD_HHMMSS+HHMM.mkv`), directly in the camera folders. Before R2a it is not: the old system would not see the filed days (decision D20 replaced D18, which promised an unchanged layout). Once flat, the old pruner recognises the segments by name and container alone and deletes oldest first by the same rules, so they age out like any other file. The Footage screen of the old UI lists the files directly in a camera folder by file name, with no database (source-checked in the pre-D20 `internal/web/footage.go` that `camui` is built from; the installed `camui.exe` itself was not run for this page: UNVERIFIED). Two honest details:
 
 - Each camera has ONE gap where the systems swapped (cutover C3 to C7) and another where you swap back; the segment around each swap is a partial one, shorter than 15 minutes. Both are normal.
 - The last file Holocron wrote before `down` was cut when its `ffmpeg` was killed. It has its streams but no duration in the header; it plays (MKV is crash-safe) but a tool that wants a duration may show none (CONFIRMED for the shadow, shadow.md). Whether the old UI's clip player handles such a file is UNVERIFIED; the old system's own stop produces the same kind of file.
@@ -152,10 +154,10 @@ Other things Holocron created, all outside the archive and all harmless to the o
 
 ## What NOT to do
 
-- **Do not start the old system before R1 and R2 proved Holocron gone.** Two systems on one root fight for the cameras' two RTSP sessions, the ports and the pruner.
+- **Do not start the old system before R1 and R2 proved Holocron gone and R2a put the archive back flat.** Two systems on one root fight for the cameras' two RTSP sessions, the ports and the pruner.
 - **Do not kill processes by name** (`ffmpeg`, `mediamtx`, `holocron`, `camui`). Stop by the system's own command, or by the exact pid it names.
 - **Do not run `.\cam.ps1 -Install` or `-Uninstall`** as part of a rollback. The tasks already exist; `-Install` from another folder re-points them, `-Uninstall` deletes them and their launchers. `-Start` is enough.
-- **Do not delete, move or edit** `E:\cameras\_state`, `_logs`, the ownership marker, `status.json`, `camera_creds.xml`, `relay_api_creds.xml`, `live_view_secret.txt` or any footage to "clean up". A missing marker makes the pruner refuse (alert 120) until a restart re-claims the root.
+- **Do not delete, move or edit** `E:\cameras\_state`, `_logs`, the ownership marker, `status.json`, `camera_creds.xml`, `relay_api_creds.xml`, `live_view_secret.txt` or any footage by hand to "clean up" (R2a is the one sanctioned move, and it is a command). A missing marker makes the pruner refuse (alert 120) until a restart re-claims the root.
 - **Do not run `holocron prune --now --yes`** at any time during a rollback. It refuses while a supervisor answers, and it deletes recordings.
 - **Do not run `holocron tls rotate`.** It deletes the CA the old `camui.exe` uses too (the folder is shared); every device would have to reinstall it.
 - **Do not use the web page's Start and Stop buttons to switch systems.** The page drives the supervisor's control API when one answers and falls back to the PowerShell scripts when none does (docs/ui.md); a stopped Holocron cannot be started from it (Start answers 409). Use the commands on this page.
@@ -197,6 +199,6 @@ These show the wording of R1 to R3 and change nothing. The real `down` on a star
 
 ## After a rollback
 
-- Holocron stays on disk, switched off. You can cut over again later: re-run the cutover from P4 on (a fresh window, the checks, C5 onwards), `holocron autostart enable` if you kept the entry (it refuses while an old task is enabled; disable those first with `schtasks /Change /TN IPCCTV-Recorder /DISABLE` and the other two), and `holocron up --detach`.
+- Holocron stays on disk, switched off. You can cut over again later: re-run the cutover from P4 on (a fresh window, the checks, C5 onwards), `holocron autostart enable` if you kept the entry (it refuses while an old task is enabled; disable those first with `schtasks /Change /TN IPCCTV-Recorder /DISABLE` and the other two), and `holocron up --detach`. Nothing needs running for the archive: the mover files the flat footage into day folders again by itself (200 per camera per minute at the defaults), or run `holocron archive migrate` to see the plan and do it at once.
 - Keep the Holocron logs (`holocron logs --since 7d`, or the files in `<archive root>\_logs`) and the alerts that made you roll back: they are the evidence for what to fix. The 3-day shadow comparison and the first week are the gates; a rollback is a result, not a failure.
 - Nothing about a rollback needs the elevated prompt.

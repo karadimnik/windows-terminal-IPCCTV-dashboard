@@ -10,7 +10,7 @@ Values written by the UI go through the same code the CLI uses: validated, writt
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `RootPath` | `E:\cameras` | Where footage, `_state` and `_logs` live. |
+| `RootPath` | `E:\cameras` | Where footage, `_state` and `_logs` live. Footage is `<Camera>\` (ffmpeg writes here: the open segment and the newest closed one) plus `<Camera>\YYYY-MM-DD\` (filed days, Holocron only; see [how it works](how-it-works.md#recording)). |
 | `FfmpegPath` / `FfprobePath` | `C:\ffmpeg\bin\...` | The recording tools. |
 | `SegmentSeconds` **UI** | `900` | Segment length, aligned to the clock. |
 | `Container` | `mkv` | Which entry of `ContainerProfiles` to use. `fmp4` re-encodes audio to AAC. |
@@ -27,10 +27,12 @@ Values written by the UI go through the same code the CLI uses: validated, writt
 | `PruneIntervalSeconds` | `300` | How often it looks. |
 | `MaxRetentionDays` **UI** | `null` | Optional age cap, on top of the space rule. |
 | `MaxAgePruneFraction` | `0.5` | Circuit breaker on `MaxRetentionDays`. A run that would delete more than this share of the archive by age - by segment count or by bytes - deletes nothing by age, logs one `PRUNE AGE RULE HELD` line with both shares and alerts once (event id 122), so a mistyped retention cannot empty the archive. Lower `MaxRetentionDays` in steps to shorten retention a long way. Must be from `0.01` to `1.0`; `1.0` switches the brake off. Never holds back the free-space rule: a disk below `ReserveGB` keeps pruning. |
-| `MoveToDayFolders` | `true` | The mover (decision D20): every closed segment is filed from the camera folder into `<camera>\<YYYY-MM-DD>\` (the date in its name); the camera folder keeps the segment being written and the newest closed one. `false` stops filing at the next reconcile (no restart); filed days stay and are still shown and pruned. See [how it works](how-it-works.md#the-mover). |
+| `MoveToDayFolders` | `true` | The mover (decision D20): every closed segment is filed from the camera folder into `<camera>\<YYYY-MM-DD>\` (the date in its name); the camera folder keeps the segment being written and the newest closed one. `false` stops filing at the next reconcile (no restart); filed days stay and are still shown and pruned. To put the archive back flat for the PowerShell system, use `holocron archive flatten` ([rollback](rollback.md#r2a-put-the-archive-back-flat)). See [how it works](how-it-works.md#the-mover). |
 | `MoveIntervalSeconds` | `60` | How often the mover looks. At least `10`. |
-| `MoveMarginSeconds` | `120` | A segment written less than this long ago is never filed. At least `30`. |
-| `MoveMaxPerCycle` | `200` | Files filed per camera per cycle, so a first run over a large flat archive spreads its disk work. At least `1`. |
+| `MoveMarginSeconds` | `120` | A segment written less than this long ago is never filed. At least `30`. The default of `holocron archive migrate --margin`. |
+| `MoveMaxPerCycle` | `200` | Files filed per camera per cycle, so a first run over a large flat archive spreads its disk work (also the size of each cycle of `holocron archive migrate --now`). At least `1`. |
+
+Retention is the free-space watermark (`ReserveGB`), not a number of days, and the day-folder layout does not change it: the pruner counts the camera folder and every day folder together. The four `Move*` keys are new in Holocron ([KEYS.md](../internal/config/KEYS.md)).
 
 ## Supervisor
 

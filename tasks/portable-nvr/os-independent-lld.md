@@ -1,7 +1,7 @@
 # OS-independent NVR: low-level implementation plan
 
 Status: PROPOSAL for the Operator, 2026-10-17. Nothing here is built. Read `os-independent-hld.md` first (architecture,
-technology choices, migration phases, decisions D2 to D18). The specification is `spec/inventory-recorder.md` (call it **IR**)
+technology choices, migration phases, decisions D2 to D18; D18, the unchanged archive layout, is superseded by D20: spool and day folders). The specification is `spec/inventory-recorder.md` (call it **IR**)
 and `spec/inventory-supervisor.md` (call it **IS**); a reference like `IR 3.5` or `IS 2.2 G4` points into them, and every
 constant below that is not marked UNVERIFIED was read from the PowerShell source by those inventories.
 
