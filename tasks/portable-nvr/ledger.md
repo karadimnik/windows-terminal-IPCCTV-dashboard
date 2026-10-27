@@ -120,3 +120,4 @@ Update this file in the same push as each merge: `git log --first-parent --merge
 | ed57b1a | 2026-10-22 | docs: ledger gains the W18 merge |
 | 415feed | 2026-10-22 | docs: ledger gains the W19 merge |
 | db7a4a6 | 2026-10-22 | docs: ledger gains the W19b merge |
+| 86622c0 | 2026-10-27 | Merge Holocron L1: archive.Layout library and scan cache, flat layout, behaviour unchanged (D20 step 1; revert with `git revert -m 1`) |  |
