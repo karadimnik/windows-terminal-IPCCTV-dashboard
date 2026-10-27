@@ -21,6 +21,7 @@ type Layout struct {
 	Root      string
 	Matcher   Matcher // the segment-name rule (case folding); Segments, Newest, Scan, Classify and Resolve use it
 	Container string  // the configured extension, ".mkv"
+	Cache     *Cache  // nil: every call lists and stats afresh; see Cache for what it may reuse
 }
 
 // Entry is one directory entry the layout listed, with the full path it built. The DirEntry is the
@@ -118,9 +119,13 @@ func (l Layout) Entries(camera string) ([]Entry, error) {
 
 // Files lists the camera's non-directory entries in name order with their file information; an
 // entry whose information cannot be read (it vanished between the listing and the stat) is left
-// out. The error is os.ReadDir's.
+// out. Through the Cache when one is set (Entries never is). The error is os.ReadDir's.
 func (l Layout) Files(camera string) ([]File, error) {
-	return listFiles(l.CameraDir(camera))
+	dir := l.CameraDir(camera)
+	if l.Cache != nil {
+		return l.Cache.files(dir)
+	}
+	return listFiles(dir)
 }
 
 // Segments are the camera's strict-pattern segments (regular files, not links, whose name is a
@@ -152,7 +157,7 @@ func (l Layout) Newest(camera string) (Segment, bool, error) {
 	return segs[0], true, nil
 }
 
-// Scan is Matcher.Scan of the camera's folder.
+// Scan is Matcher.Scan of the camera's folder, through the Cache when one is set.
 func (l Layout) Scan(camera string, now time.Time, segmentSeconds int) (DirScan, error) {
 	dir := l.CameraDir(camera)
 	files, err := l.Files(camera)
