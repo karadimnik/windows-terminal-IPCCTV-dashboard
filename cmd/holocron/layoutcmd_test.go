@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"holocron/internal/config"
 	"holocron/internal/osx"
 	"holocron/internal/prune"
+	"holocron/internal/shadow"
 )
 
 // The flat corpus of the layout command tests: what the archive looked like before D20, with the
@@ -549,5 +551,108 @@ func TestArchiveFlattenRefusesWhileRecording(t *testing.T) {
 	out, _, _ = r.run("archive", "flatten")
 	if !strings.Contains(out, "the archive is flat already") {
 		t.Errorf("a dry run after flatten: %s", out)
+	}
+}
+
+// D1, the proof on a copy, through the command dispatcher as the Operator runs it: the corpus and
+// an identical untouched copy; migrate's dry run changes nothing; --now files every closed segment
+// into the day folder of its name and leaves the two newest per camera, foreign and misfiled files
+// untouched; `archive compare` of the copy against the migrated tree finds the same segments (names
+// and sizes); a second --now moves nothing; flatten --now gives back the original tree byte for byte
+// (paths, sizes, hashes, write times, no day folder left over).
+func TestArchiveMigrateFlattenProofOnACopy(t *testing.T) {
+	r := corpusRig(t)
+	orig := filepath.Join(r.base(), "original")
+	buildCorpus(t, orig, corpusShift())
+	m0 := manifest(t, r.root)
+	if d := manifestDiff(manifest(t, orig), m0); len(d) != 0 {
+		t.Fatalf("the copy differs: %v", d)
+	}
+	if _, _, code := r.run("archive", "migrate"); code != 0 {
+		t.Fatal("dry run", code)
+	}
+	if d := manifestDiff(m0, manifest(t, r.root)); len(d) != 0 {
+		t.Fatalf("the dry run changed the tree: %v", d)
+	}
+	out, errw, code := r.run("archive", "migrate", "--now")
+	if code != 0 {
+		t.Fatalf("migrate: %d %q\n%s", code, errw, out)
+	}
+	m1 := manifest(t, r.root)
+	if strings.Join(contentsOf(m0), "\n") != strings.Join(contentsOf(m1), "\n") {
+		t.Fatal("the migration lost, changed or duplicated a file")
+	}
+	l := archive.Layout{Root: r.root, Matcher: archive.MatcherFor(osx.Current()), Container: ".mkv"}
+	strays := map[string]bool{"Cam_A/notes.txt": true, "Cam_C/2026-10-22/readme.txt": true}
+	for p := range m0 {
+		if strings.Count(p, "/") == 2 || strings.HasPrefix(filepath.Base(p), "Cam_A_") && strings.HasPrefix(p, "Cam_B/") {
+			strays[p] = true
+		}
+	}
+	spool := map[string]int{}
+	for p, v := range m1 {
+		parts := strings.Split(p, "/")
+		switch {
+		case strays[p]:
+			if m0[p] != v {
+				t.Errorf("a foreign or misfiled file changed: %s", p)
+			}
+		case v == "dir":
+		case len(parts) == 2:
+			spool[parts[0]]++
+		case len(parts) == 3:
+			if c := l.Classify(filepath.Join(r.root, filepath.FromSlash(p))); c.Kind != archive.Filed {
+				t.Errorf("%s is %v, not filed under the date in its name", p, c.Kind)
+			}
+		default:
+			t.Errorf("unexpected entry %s", p)
+		}
+	}
+	for c := 0; c < corpusCams; c++ {
+		if cam := fmt.Sprintf("Cam_%c", 'A'+c); spool[cam] != 2 {
+			t.Errorf("%s keeps %d segments in the camera folder, want the 2 newest", cam, spool[cam])
+		}
+	}
+
+	orig2 := newProber
+	newProber = func(string) shadow.Prober { return textProber{} }
+	defer func() { newProber = orig2 }()
+	stand := filepath.Join(r.base(), "ffprobe-stand-in")
+	os.WriteFile(stand, []byte("x"), 0o755)
+	var cout, cerr strings.Builder
+	run(context.Background(), []string{"--json", "archive", "compare", "--old", orig, "--new", r.root, "--ffprobe", stand, "--segment-seconds", "900"}, &cout, &cerr, &seams{})
+	var cmp shadow.Report
+	if err := json.Unmarshal([]byte(cout.String()), &cmp); err != nil || len(cmp.Cameras) != corpusCams {
+		t.Fatalf("compare: %v %q %q", err, cout.String(), cerr.String())
+	}
+	for _, c := range cmp.Cameras {
+		if c.Old.Closed != c.New.Closed || c.Old.Closed != corpusPerCam || len(c.UnmatchedOld)+len(c.UnmatchedNew) != 0 || c.Old.Bytes != c.New.Bytes {
+			t.Errorf("compare %s: closed %d/%d unmatched %v %v bytes %d/%d", c.Camera, c.Old.Closed, c.New.Closed, c.UnmatchedOld, c.UnmatchedNew, c.Old.Bytes, c.New.Bytes)
+		}
+		for _, p := range c.Pairs {
+			if p.Old != p.New || p.OldBytes != p.NewBytes {
+				t.Errorf("compare %s: pair %+v", c.Camera, p)
+			}
+		}
+		for _, d := range c.Differences { // the zero-byte segment cannot be probed on either side; the stray in Cam_B is in both
+			if !strings.Contains(d, "cannot be read") && !strings.Contains(d, "not segment names of this camera") {
+				t.Errorf("compare %s: %s", c.Camera, d)
+			}
+		}
+	}
+
+	out, _, code = r.run("--json", "archive", "migrate", "--now")
+	if rep := decodeLayout(t, out); code != 0 || rep.Moved != 0 {
+		t.Errorf("second migrate: %d moved %d", code, rep.Moved)
+	}
+	if d := manifestDiff(m1, manifest(t, r.root)); len(d) != 0 {
+		t.Errorf("the second migrate changed the tree: %v", d)
+	}
+	out, errw, code = r.run("archive", "flatten", "--now")
+	if code != 0 {
+		t.Fatalf("flatten: %d %q\n%s", code, errw, out)
+	}
+	if d := manifestDiff(m0, manifest(t, r.root)); len(d) != 0 {
+		t.Errorf("after flatten the tree differs from the original: %v", d)
 	}
 }
