@@ -2,6 +2,7 @@ package supervise
 
 import (
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"holocron/internal/archive"
@@ -104,13 +105,14 @@ func (m *Manager) blindMono(from, to clock.Mono) time.Duration {
 	return sum
 }
 
-// ArchiveScanner is the production Scanner: archive's Scan with the configured container.
+// ArchiveScanner is the production Scanner: archive.Layout's Scan with the configured container,
+// through the layout's Cache when it has one (the status tick and the archive scan share it).
 type ArchiveScanner struct {
-	Matcher        archive.Matcher
-	Container      string
+	Layout         archive.Layout
 	SegmentSeconds int
 }
 
+// Scan scans the camera whose folder is dir: an Entry's Dir, which is Layout.CameraDir of its safe name.
 func (a ArchiveScanner) Scan(dir string, now time.Time) (archive.DirScan, error) {
-	return a.Matcher.Scan(dir, a.Container, now, a.SegmentSeconds)
+	return a.Layout.Scan(filepath.Base(dir), now, a.SegmentSeconds)
 }

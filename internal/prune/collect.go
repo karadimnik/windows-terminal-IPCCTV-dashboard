@@ -2,8 +2,6 @@ package prune
 
 import (
 	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"holocron/internal/archive"
@@ -24,42 +22,32 @@ func Collect(root string, p osx.Platform, r Rules, now time.Time, dryRun bool) (
 	if in.MarkerProblem = archive.VerifyRoot(root, p, r.Container, dryRun); in.MarkerProblem != "" {
 		return in, nil
 	}
-	entries, err := os.ReadDir(root)
+	l := archive.Layout{Root: root, Matcher: in.Matcher, Container: r.Container}
+	folders, err := l.Cameras()
 	if err != nil {
 		return in, err
 	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "_") {
+	for _, f := range folders {
+		if f.Link {
+			in.Skipped = append(in.Skipped, f.Path+" (reparse point: its content is outside the archive)")
 			continue
 		}
-		dir := filepath.Join(root, e.Name())
-		fi, err := os.Lstat(dir)
-		if err != nil {
-			continue // vanished
-		}
-		if archive.IsReparse(fi) {
-			in.Skipped = append(in.Skipped, dir+" (reparse point: its content is outside the archive)")
-			continue
-		}
-		if !fi.IsDir() {
-			continue // a file at the top level is never pruned
-		}
-		cam := Camera{Dir: dir}
-		children, err := os.ReadDir(dir)
+		cam := Camera{Dir: f.Path}
+		children, err := l.Entries(f.Name)
 		if err != nil {
 			continue
 		}
 		for _, c := range children {
-			ci, err := os.Lstat(filepath.Join(dir, c.Name()))
+			ci, err := os.Lstat(c.Path) // not the listing's information: the pruner's own lstat
 			if err != nil || ci.IsDir() {
 				continue
 			}
 			cam.Files = append(cam.Files, File{
-				Name: c.Name(), MTime: ci.ModTime().UTC(), Size: ci.Size(), Created: created(ci),
+				Name: c.Name(), MTime: ci.ModTime().UTC(), Size: ci.Size(), Created: archive.CreatedTime(ci),
 				Reparse: archive.IsReparse(ci) || !ci.Mode().IsRegular(),
 			})
 		}
-		if scan, err := in.Matcher.Scan(dir, r.Container, now, int(r.SegmentSeconds)); err == nil {
+		if scan, err := l.Scan(f.Name, now, int(r.SegmentSeconds)); err == nil {
 			cam.Newest = scan.Newest
 		}
 		in.Cameras = append(in.Cameras, cam)

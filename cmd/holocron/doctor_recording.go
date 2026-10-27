@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -85,6 +84,7 @@ func (r *drun) row(name string) *status.Camera {
 // segFile is one strict-pattern segment of a camera.
 type segFile struct {
 	Name  string
+	Path  string    // where archive.Layout listed it
 	Start time.Time // from the name
 	MTime time.Time // the last write: the end of a closed segment
 	Size  int64
@@ -110,24 +110,24 @@ func (r *drun) files(cam config.Camera) camFiles {
 		if err != nil {
 			return camFiles{Err: err}
 		}
-		cf := camFiles{Safe: safe, Dir: filepath.Join(r.e.paths.Root, safe)}
-		entries, err := os.ReadDir(cf.Dir)
+		m := archive.MatcherFor(r.e.opts.Platform)
+		l := archive.Layout{Root: r.e.paths.Root, Matcher: m, Container: r.ext()}
+		cf := camFiles{Safe: safe, Dir: l.CameraDir(safe)}
+		files, err := l.Files(safe)
 		if err != nil {
 			cf.Err = err
 			return cf
 		}
-		m := archive.MatcherFor(r.e.opts.Platform)
 		since := r.now.Add(-25 * time.Hour)
-		for _, en := range entries {
-			if en.IsDir() || !m.IsSegmentOf(en.Name(), safe, r.ext()) {
+		for _, f := range files {
+			if !m.IsSegmentOf(f.Name(), safe, r.ext()) {
 				continue
 			}
-			_, start, ok := archive.ParseSegment(en.Name())
-			info, err := en.Info()
-			if !ok || err != nil || start.Before(since) {
+			_, start, ok := archive.ParseSegment(f.Name())
+			if !ok || start.Before(since) {
 				continue
 			}
-			cf.Segs = append(cf.Segs, segFile{Name: en.Name(), Start: start, MTime: info.ModTime(), Size: info.Size()})
+			cf.Segs = append(cf.Segs, segFile{Name: f.Name(), Path: f.Path, Start: start, MTime: f.Info.ModTime(), Size: f.Info.Size()})
 		}
 		sort.Slice(cf.Segs, func(i, j int) bool { return cf.Segs[i].Start.Before(cf.Segs[j].Start) })
 		return cf
@@ -267,7 +267,7 @@ func (r *drun) growth(ctx context.Context) map[string]growthSample {
 			g := growthSample{Err: cf.Err}
 			if n, closed, ok := cf.newest(); ok {
 				g.Newest, g.Found = n, true
-				g.Before, g.Err = r.d.liveSize(filepath.Join(cf.Dir, n.Name))
+				g.Before, g.Err = r.d.liveSize(n.Path)
 				for _, c := range closed {
 					if c.MTime.After(g.ClosedMTime) {
 						g.ClosedMTime = c.MTime
@@ -297,7 +297,7 @@ func (r *drun) growth(ctx context.Context) map[string]growthSample {
 				if err != nil {
 					g.Err = err
 				} else {
-					g.After, g.Err = r.d.liveSize(filepath.Join(r.files(cam).Dir, g.Newest.Name))
+					g.After, g.Err = r.d.liveSize(g.Newest.Path)
 					g.Rounds = round
 					g.SampleMillis = r.d.now().Sub(start).Milliseconds()
 				}
@@ -325,7 +325,7 @@ func recGrowth(ctx context.Context, r *drun) []check {
 		case !g.Found && g.Err != nil && !os.IsNotExist(g.Err):
 			cs = append(cs, mk(lvFail, cam.Name, "the camera folder cannot be read: %v", g.Err).fix("%s", fix).data(data))
 		case !g.Found:
-			cs = append(cs, mk(lvFail, cam.Name, "not recording: no segment of the last 25 h in %s", filepath.Join(r.e.paths.Root, safe)).fix("%s", fix).data(data))
+			cs = append(cs, mk(lvFail, cam.Name, "not recording: no segment of the last 25 h in %s", r.files(cam).Dir).fix("%s", fix).data(data))
 		case g.Err != nil:
 			cs = append(cs, mk(lvWarn, cam.Name, "%s: the size could not be sampled: %v", g.Newest.Name, g.Err).fix("run holocron doctor --group recording again").data(data))
 		case !g.ClosedMTime.IsZero() && r.now.Sub(g.ClosedMTime) <= seg+closedMargin:
@@ -485,7 +485,7 @@ func recSegments(ctx context.Context, r *drun) []check {
 			}
 		}
 		if r.deep {
-			c = deepProbe(ctx, r, cam, filepath.Join(cf.Dir, last.Name), c, safe)
+			c = deepProbe(ctx, r, cam, last.Path, c, safe)
 		}
 		cs = append(cs, c.data(data))
 	}

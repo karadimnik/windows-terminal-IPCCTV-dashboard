@@ -444,7 +444,8 @@ func (s *Supervisor) setup(cfg config.Config) error {
 		d.ReadPrevious = func() (*status.Document, error) { return status.Read(path) }
 	}
 	if d.Scanner == nil {
-		d.Scanner = ArchiveScanner{Matcher: archive.MatcherFor(d.Platform), Container: prof.Extension, SegmentSeconds: cfg.SegmentSeconds}
+		d.Scanner = ArchiveScanner{Layout: archive.Layout{Root: cfg.RootPath, Matcher: archive.MatcherFor(d.Platform), Container: prof.Extension, Cache: archive.NewCache()},
+			SegmentSeconds: cfg.SegmentSeconds}
 	}
 	if d.Pruner == nil {
 		d.Pruner = ArchivePruner{Root: cfg.RootPath, Platform: d.Platform, Rules: prune.RulesFrom(cfg), Container: prof.Extension, Log: s.plog}

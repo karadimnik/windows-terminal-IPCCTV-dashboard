@@ -41,27 +41,30 @@ type EmptyResult struct {
 // never touched: it starts with a full header and plays after a hard kill.
 func RemoveEmptySegment(dir, container string, o EmptyOptions) EmptyResult {
 	var r EmptyResult
-	entries, err := os.ReadDir(dir)
+	// the folder itself is listed (not Root/<its name>), so the gates below judge what was listed
+	c := filepath.Clean(dir)
+	entries, err := archive.Layout{Root: filepath.Dir(c)}.Entries(filepath.Base(c))
 	if err != nil {
 		return r
 	}
-	var empty []string
+	type file struct{ name, path string } // name "": a link that reads as empty
+	var empty []file
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		fi, err := os.Lstat(filepath.Join(dir, e.Name()))
+		fi, err := os.Lstat(e.Path)
 		if err != nil {
 			continue
 		}
 		if archive.IsReparse(fi) { // a link is never removed; one that reads as empty counts as foreign
-			if ti, err := os.Stat(filepath.Join(dir, e.Name())); err == nil && ti.Size() == 0 {
-				empty = append(empty, "")
+			if ti, err := os.Stat(e.Path); err == nil && ti.Size() == 0 {
+				empty = append(empty, file{})
 			}
 			continue
 		}
 		if fi.Mode().IsRegular() && fi.Size() == 0 {
-			empty = append(empty, e.Name())
+			empty = append(empty, file{e.Name(), e.Path})
 		}
 	}
 	if len(empty) == 0 {
@@ -76,18 +79,18 @@ func RemoveEmptySegment(dir, container string, o EmptyOptions) EmptyResult {
 	}
 	folderOK := folderGate(dir, o)
 	safe := filepath.Base(dir)
-	for _, name := range empty {
-		if name == "" || !folderOK || !o.Matcher.IsSegmentOf(name, safe, container) {
+	for _, f := range empty {
+		if f.name == "" || !folderOK || !o.Matcher.IsSegmentOf(f.name, safe, container) {
 			r.Foreign++
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, name)); err != nil {
-			r.Failures = append(r.Failures, name+": "+err.Error())
-			r.Messages = append(r.Messages, fmt.Sprintf("could not remove empty segment %s: %v", name, err))
+		if err := os.Remove(f.path); err != nil {
+			r.Failures = append(r.Failures, f.name+": "+err.Error())
+			r.Messages = append(r.Messages, fmt.Sprintf("could not remove empty segment %s: %v", f.name, err))
 			continue
 		}
-		r.Removed = append(r.Removed, name)
-		r.Messages = append(r.Messages, fmt.Sprintf("removed empty segment %s: the child was stopped before its header reached disk", name))
+		r.Removed = append(r.Removed, f.name)
+		r.Messages = append(r.Messages, fmt.Sprintf("removed empty segment %s: the child was stopped before its header reached disk", f.name))
 	}
 	if r.Foreign > 0 {
 		r.Messages = append(r.Messages, fmt.Sprintf("%d empty foreign file(s) left alone in %s: not recorder segments", r.Foreign, dir))

@@ -34,9 +34,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	"holocron/internal/archive"
 )
 
 const (
@@ -255,7 +258,7 @@ func (a *API) footageCameras() ([]FootageCamera, error) {
 // enumeration is the allow-list every camera parameter is matched against;
 // folders beginning with an underscore are the recorder's own (_state, _logs).
 func (a *API) archiveCameras() ([]archiveCamera, error) {
-	entries, err := os.ReadDir(a.cfg.ArchiveRoot)
+	entries, err := a.archive().Folders()
 	if err != nil {
 		return nil, fmt.Errorf("read the archive root: %w", scrubErr(err))
 	}
@@ -268,8 +271,8 @@ func (a *API) archiveCameras() ([]archiveCamera, error) {
 	}
 
 	byDir := make(map[string]archiveCamera, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), "_") {
+	for _, entry := range entries { // the recorder's own "_" folders are not listed
+		if !entry.IsDir() {
 			continue
 		}
 		byDir[strings.ToLower(entry.Name())] = archiveCamera{Dir: entry.Name(), Name: entry.Name()}
@@ -322,33 +325,26 @@ func (a *API) resolveCamera(requested string) (archiveCamera, error) {
 // listSegments returns one camera's segments, oldest first. Files that do not
 // match the recorder's naming scheme are ignored rather than guessed at.
 func (a *API) listSegments(cam archiveCamera) ([]segmentFile, error) {
-	dir := filepath.Join(a.cfg.ArchiveRoot, cam.Dir)
-	entries, err := os.ReadDir(dir)
+	files, err := a.archive().Files(cam.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("read the folder for camera %q: %w", cam.Name, scrubErr(err))
 	}
 
-	out := make([]segmentFile, 0, len(entries))
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		start, ok := parseSegmentName(cam.Dir, entry.Name())
+	// A segment that vanished between the listing and the stat is the pruner
+	// doing its job, not an error worth failing the index for: Files leaves it out.
+	out := make([]segmentFile, 0, len(files))
+	for _, file := range files {
+		start, ok := parseSegmentName(cam.Dir, file.Name())
 		if !ok {
 			continue
 		}
-		info, err := entry.Info()
-		if err != nil {
-			// A segment that vanished between the listing and the stat is the
-			// pruner doing its job, not an error worth failing the index for.
-			continue
-		}
+		info := file.Info
 		seconds := info.ModTime().Sub(start).Seconds()
 		if seconds < 0 {
 			seconds = 0
 		}
 		out = append(out, segmentFile{
-			Name:      entry.Name(),
+			Name:      file.Name(),
 			Start:     start,
 			Date:      start.Format("2006-01-02"),
 			Seconds:   seconds,
@@ -366,6 +362,17 @@ func (a *API) listSegments(cam archiveCamera) ([]segmentFile, error) {
 		out[last].InProgress = true
 	}
 	return out, nil
+}
+
+// archive is the archive root's layout. The cache lives as long as the API, so
+// the footage index stats only what changed since the last click (on Linux and
+// macOS; on Windows the listing already carries every file's size and times).
+// Folding case when resolving a clip keeps what the file systems of Windows
+// and macOS do with a name that differs only in case.
+func (a *API) archive() archive.Layout {
+	a.footageOnce.Do(func() { a.footageCache = archive.NewCache() })
+	fold := runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+	return archive.Layout{Root: a.cfg.ArchiveRoot, Matcher: archive.Matcher{FoldCase: fold}, Cache: a.footageCache}
 }
 
 // parseSegmentName returns the start time a segment filename encodes. The time
@@ -496,20 +503,26 @@ func (a *API) handleClip(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveSegment turns a requested segment name into a path on disk, or refuses.
-// Three independent checks, because each would be sufficient and none is
+// Four independent checks, because each would be sufficient and none is
 // trusted alone:
 //
 //  1. the name must match the recorder's naming scheme for THIS camera, which
 //     no name holding a separator, a drive letter or ".." can do;
-//  2. the joined path must resolve inside the archive root, the same test
+//  2. the name must MATCH a name the camera's folder lists (archive.Layout's
+//     Resolve): the path is the listed entry's, the request is never joined;
+//  3. that path must resolve inside the archive root, the same test
 //     Test-CamPathInside makes before the pruner deletes anything;
-//  3. the result must already exist as a regular file.
+//  4. the result must already exist as a regular file.
 func (a *API) resolveSegment(cam archiveCamera, segment string) (string, error) {
 	if _, ok := parseSegmentName(cam.Dir, segment); !ok {
 		return "", errNoSuchSegment
 	}
 
-	full := filepath.Join(a.cfg.ArchiveRoot, cam.Dir, segment)
+	entry, err := a.archive().Resolve(cam.Dir, segment)
+	if err != nil {
+		return "", errNoSuchSegment
+	}
+	full := entry.Path
 	if !pathInside(a.cfg.ArchiveRoot, full) {
 		return "", errNoSuchSegment
 	}
