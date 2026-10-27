@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"holocron/internal/archive"
+	"holocron/internal/archive/archivetest"
 	"holocron/internal/clock"
 	"holocron/internal/config"
 	"holocron/internal/osx"
@@ -148,11 +149,7 @@ func TestSupervisorMoverEndToEnd(t *testing.T) {
 	}
 	run := func(move bool) outcome {
 		days := 3.0
-		r := newSRig(t, cams, func(c *config.Config) {
-			c.MoveToDayFolders, c.MoveIntervalSeconds, c.MoveMaxPerCycle = move, 10, 100
-			c.PruneIntervalSeconds, c.MaxRetentionDays = 45, &days
-		})
-		r.deps.Pruner, r.deps.Mover, r.deps.Scanner = nil, nil, nil
+		var nodes []archivetest.Node
 		for _, cam := range []string{"Front", "Back"} {
 			for k := 0; k < 5*96; k++ {
 				st := tStart.Add(-time.Duration(k+1) * 15 * time.Minute)
@@ -160,9 +157,17 @@ func TestSupervisorMoverEndToEnd(t *testing.T) {
 				if k == 0 {
 					mt = tStart.Add(-5 * time.Second)
 				}
-				writeSeg(t, filepath.Join(r.root, cam, cam+"_"+st.UTC().Format("20060102_150405")+"+0000.mkv"), mt)
+				nodes = append(nodes, archivetest.Node{Path: "archive/" + cam + "/" + cam + "_" + st.UTC().Format("20060102_150405") + "+0000.mkv", Kind: "file", Bytes: 13, MTime: mt, CTime: st})
 			}
 		}
+		root := buildRoot(t, nodes) // creation times set: the age rule reads them on Windows
+		r := newSRig(t, cams, func(c *config.Config) {
+			c.RootPath = root
+			c.MoveToDayFolders, c.MoveIntervalSeconds, c.MoveMaxPerCycle = move, 10, 100
+			c.PruneIntervalSeconds, c.MaxRetentionDays = 45, &days
+		})
+		r.root = root
+		r.deps.Pruner, r.deps.Mover, r.deps.Scanner = nil, nil, nil
 		r.start()
 		// mover cycles every 10 s, prune (age rule) at 0 and 45 s, the archive-wide scan (which adds
 		// the filed days to a row's ArchiveFiles) at 0 and 60 s
@@ -208,16 +213,17 @@ func TestSupervisorMoverEndToEnd(t *testing.T) {
 // of a moved file is a benign skip ("it is gone"), nothing fails, no alert; the next run deletes
 // them in their day folders (positive control).
 func TestPrunePlanThenMoverThenExec(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "archive")
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	var nodes []archivetest.Node
 	for k := 0; k < 8; k++ {
 		st := now.Add(-time.Duration(k+1) * 6 * time.Hour)
 		mt := st.Add(15 * time.Minute)
 		if k == 0 {
 			mt = now.Add(-5 * time.Second)
 		}
-		writeSeg(t, filepath.Join(root, "Front", "Front_"+st.Format("20060102_150405")+"+0000.mkv"), mt)
+		nodes = append(nodes, archivetest.Node{Path: "archive/Front/Front_" + st.Format("20060102_150405") + "+0000.mkv", Kind: "file", Bytes: 13, MTime: mt, CTime: st})
 	}
+	root := buildRoot(t, nodes)
 	p := osx.Current()
 	if res, err := archive.ClaimRoot(root, p, ".mkv", now); err != nil || !res.Owned {
 		t.Fatalf("claim %+v %v", res, err)
@@ -250,4 +256,11 @@ func TestPrunePlanThenMoverThenExec(t *testing.T) {
 	if res, _ := ex.Run(in, st); len(res.Deletions) == 0 || res.Failed != 0 {
 		t.Errorf("positive control: the next run deleted %d, failed %d", len(res.Deletions), res.Failed)
 	}
+}
+
+// buildRoot builds nodes (paths under "archive/") in a temp dir with their write and creation
+// times and returns the archive root.
+func buildRoot(t *testing.T, nodes []archivetest.Node) string {
+	root, _ := archivetest.Tree{Container: ".mkv", Now: tStart, Nodes: nodes}.Build(t, t.TempDir())
+	return root
 }
