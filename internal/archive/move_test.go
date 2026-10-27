@@ -550,7 +550,21 @@ func TestFileDaysLosesARaceBenignly(t *testing.T) {
 			t.Errorf("%s: files changed: %v -> %v", c.name, before, after)
 		}
 	}
+	// the other mover finished first and this rename sees the destination taken (Windows checks
+	// the destination first; link-then-unlink meets it when the other unlinked in between)
 	base, root, _ := build(t, spoolTree(3, time.Hour))
+	renameFile = func(src, dst string) error {
+		if err := renameNoReplace(src, dst); err != nil {
+			t.Fatal(err)
+		}
+		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: fs.ErrExist}
+	}
+	rep := FileDays(moveLayout(root, ".mkv"), moveOpts(base, mt0))
+	renameFile = renameNoReplace
+	if len(rep.Conflicts) != 0 || len(rep.Skipped) != 1 {
+		t.Errorf("finished by the other: conflicts %+v skipped %+v", rep.Conflicts, rep.Skipped)
+	}
+	base, root, _ = build(t, spoolTree(3, time.Hour))
 	if rep := FileDays(moveLayout(root, ".mkv"), moveOpts(base, mt0)); len(rep.Moved) != 1 || len(rep.Errors) != 0 {
 		t.Errorf("positive control: %+v", rep)
 	}
