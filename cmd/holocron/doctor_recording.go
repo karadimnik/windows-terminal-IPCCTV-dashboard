@@ -90,10 +90,13 @@ type segFile struct {
 	Size  int64
 }
 
-// camFiles is one camera folder: its segments started within the last 25 h, oldest first.
+// camFiles is one camera folder: its segments started within the last 25 h, oldest first, from
+// the spool and the day folders.
 type camFiles struct {
 	Safe, Dir string
 	Segs      []segFile
+	Filed     int // of Segs, those in day folders
+	Misfiled  int // segments in a day folder that is not the date in their name (any age): not in Segs
 	Err       error
 }
 
@@ -120,12 +123,19 @@ func (r *drun) files(cam config.Camera) camFiles {
 		}
 		since := r.now.Add(-25 * time.Hour)
 		for _, f := range files {
-			if !m.IsSegmentOf(f.Name(), safe, r.ext()) {
+			c := l.Classify(f.Path)
+			if c.Kind == archive.Misfiled {
+				cf.Misfiled++
+			}
+			if !c.Footage() {
 				continue
 			}
 			_, start, ok := archive.ParseSegment(f.Name())
 			if !ok || start.Before(since) {
 				continue
+			}
+			if c.Kind == archive.Filed {
+				cf.Filed++
 			}
 			cf.Segs = append(cf.Segs, segFile{Name: f.Name(), Path: f.Path, Start: start, MTime: f.Info.ModTime(), Size: f.Info.Size()})
 		}

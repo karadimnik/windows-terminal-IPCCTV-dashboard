@@ -301,26 +301,44 @@ type listing struct {
 
 func list(o *Options, root, folder string) (listing, error) {
 	var l listing
-	ents, err := archive.Layout{Root: root}.Entries(folder)
+	lay := archive.Layout{Root: root, Matcher: o.Matcher, Container: o.Container}
+	ents, err := lay.Entries(folder)
 	if err != nil {
 		return l, err
 	}
 	var all []*seg
+	add := func(e archive.Entry) {
+		_, start, _ := archive.ParseSegment(e.Name())
+		// os.Stat, not DirEntry.Info: on Windows the listing's times and sizes of a file that is
+		// being written can be stale
+		fi, err := os.Stat(e.Path)
+		if err != nil {
+			return
+		}
+		all = append(all, &seg{name: e.Name(), path: e.Path, start: start, size: fi.Size(), mod: fi.ModTime()})
+	}
 	for _, e := range ents {
 		name := e.Name()
+		if e.IsDay() { // a day folder (D20): its segments filed under its date; anything else there is other
+			files, err := lay.DayFiles(e)
+			if err != nil {
+				l.other = append(l.other, name)
+				continue
+			}
+			for _, f := range files {
+				if !f.Type().IsRegular() || lay.Classify(f.Path).Kind != archive.Filed {
+					l.other = append(l.other, name+"/"+f.Name())
+					continue
+				}
+				add(f.Entry)
+			}
+			continue
+		}
 		if !e.Type().IsRegular() || !o.Matcher.IsSegmentOf(name, folder, o.Container) {
 			l.other = append(l.other, name)
 			continue
 		}
-		_, start, _ := archive.ParseSegment(name)
-		// os.Stat, not DirEntry.Info: on Windows the listing's times and sizes of a file that is
-		// being written can be stale
-		path := e.Path
-		fi, err := os.Stat(path)
-		if err != nil {
-			continue
-		}
-		all = append(all, &seg{name: name, path: path, start: start, size: fi.Size(), mod: fi.ModTime()})
+		add(e)
 	}
 	sort.Slice(all, func(i, j int) bool {
 		a, b := all[i], all[j]

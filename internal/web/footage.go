@@ -4,7 +4,9 @@ package web
 //
 // Three things here are load-bearing.
 //
-// The index is parsed from FILENAMES. "Front_Entrance_20261013_190147+0300.mkv"
+// The index is parsed from FILENAMES, in the camera's spool and its day folders
+// (archive.Layout, decision D20: a file in a day folder counts only under the
+// date in its name). "Front_Entrance_20261013_190147+0300.mkv"
 // already carries the camera, the date, the time and the UTC offset, so there is
 // no database and nothing reads a segment's contents. The %z suffix is what
 // keeps a date unambiguous across the DST change: every segment is placed in
@@ -179,7 +181,16 @@ func (a *API) handleFootage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	segments, err := a.listSegments(cam)
+	if date != "" && !datePattern.MatchString(date) {
+		writeAPIError(w, http.StatusBadRequest, "a date must be written YYYY-MM-DD")
+		return
+	}
+	var segments []segmentFile
+	if date == "" {
+		segments, err = a.listSegments(cam)
+	} else {
+		segments, err = a.daySegments(cam, date)
+	}
 	if err != nil {
 		a.log.Error("footage index", "camera", cam.Dir, "error", err)
 		writeAPIError(w, http.StatusInternalServerError, err.Error())
@@ -192,11 +203,6 @@ func (a *API) handleFootage(w http.ResponseWriter, r *http.Request) {
 			Camera: cam.Name,
 			Dates:  footageDates(segments),
 		})
-		return
-	}
-
-	if !datePattern.MatchString(date) {
-		writeAPIError(w, http.StatusBadRequest, "a date must be written YYYY-MM-DD")
 		return
 	}
 
@@ -322,20 +328,50 @@ func (a *API) resolveCamera(requested string) (archiveCamera, error) {
 	return archiveCamera{}, errNoSuchCamera
 }
 
-// listSegments returns one camera's segments, oldest first. Files that do not
-// match the recorder's naming scheme are ignored rather than guessed at.
+// listSegments returns one camera's segments, oldest first: the spool's and
+// every day folder's (one listing per day folder; the index is not polled).
+// Files that do not match the recorder's naming scheme are ignored rather than
+// guessed at.
 func (a *API) listSegments(cam archiveCamera) ([]segmentFile, error) {
 	files, err := a.archive().Files(cam.Dir)
 	if err != nil {
 		return nil, fmt.Errorf("read the folder for camera %q: %w", cam.Name, scrubErr(err))
 	}
+	return segmentsOf(cam, files), nil
+}
 
+// daySegments returns the segments a date's page needs: the spool's and those
+// of the one day folder named date (two listings, however many days are
+// filed), oldest first, so the newest of them is the one in progress exactly
+// as in the whole index (the spool holds the newest segment).
+func (a *API) daySegments(cam archiveCamera, date string) ([]segmentFile, error) {
+	l := a.archive()
+	files, days, err := l.Spool(cam.Dir)
+	if err != nil {
+		return nil, fmt.Errorf("read the folder for camera %q: %w", cam.Name, scrubErr(err))
+	}
+	for _, d := range days {
+		if d.Name() == date {
+			if df, err := l.DayFiles(d); err == nil {
+				files = append(files, df...)
+			}
+			break
+		}
+	}
+	return segmentsOf(cam, files), nil
+}
+
+// segmentsOf parses listed files into segments, oldest first, the newest in
+// progress when it was written within inProgressWindow. A file in a day folder
+// counts only when the day is the date in its name (archive.DayName); a
+// misfiled one is not footage.
+func segmentsOf(cam archiveCamera, files []archive.File) []segmentFile {
 	// A segment that vanished between the listing and the stat is the pruner
-	// doing its job, not an error worth failing the index for: Files leaves it out.
+	// doing its job, not an error worth failing the index for: the listing leaves it out.
 	out := make([]segmentFile, 0, len(files))
 	for _, file := range files {
 		start, ok := parseSegmentName(cam.Dir, file.Name())
-		if !ok {
+		if !ok || (file.Day != "" && archive.DayName(start) != file.Day) {
 			continue
 		}
 		info := file.Info
@@ -361,7 +397,7 @@ func (a *API) listSegments(cam archiveCamera) ([]segmentFile, error) {
 	if last := len(out) - 1; last >= 0 && time.Since(out[last].writtenAt) < inProgressWindow {
 		out[last].InProgress = true
 	}
-	return out, nil
+	return out
 }
 
 // archive is the archive root's layout. The cache lives as long as the API, so

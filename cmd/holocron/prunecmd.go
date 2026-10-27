@@ -194,6 +194,8 @@ type camStats struct {
 	Folder   string     `json:"folder"`
 	Camera   string     `json:"camera,omitempty"`
 	Segments int        `json:"segments"`
+	Filed    int        `json:"filed"`    // of Segments, those in day folders (the rest are in the spool)
+	Misfiled int        `json:"misfiled"` // segments in a day folder that is not the date in their name: not counted in Segments
 	Bytes    int64      `json:"bytes"`
 	Oldest   *time.Time `json:"oldest,omitempty"`
 	Newest   *time.Time `json:"newest,omitempty"`
@@ -241,7 +243,11 @@ func collectStats(e *env) (archiveStats, error) {
 		}
 		var lo, hi time.Time
 		for _, f := range files {
-			if !m.IsSegmentOf(f.Name(), entry.Name(), container) {
+			c := l.Classify(f.Path)
+			if c.Kind == archive.Misfiled {
+				cs.Misfiled++
+			}
+			if !c.Footage() {
 				continue
 			}
 			_, start, ok := archive.ParseSegment(f.Name())
@@ -249,6 +255,9 @@ func collectStats(e *env) (archiveStats, error) {
 				continue
 			}
 			cs.Segments++
+			if c.Kind == archive.Filed {
+				cs.Filed++
+			}
 			cs.Bytes += f.Info.Size()
 			if lo.IsZero() || start.Before(lo) {
 				lo = start
@@ -315,6 +324,15 @@ func cmdArchiveStats(ctx context.Context, e *env) error {
 			oldest, newest = c.Oldest.Format("2006-01-02 15:04:05"), c.Newest.Format("2006-01-02 15:04:05")
 		}
 		fmt.Fprintf(e.out, "%-22s %9d %10.2f  %-19s  %s\n", c.Folder, c.Segments, float64(c.Bytes)/gib, oldest, newest)
+	}
+	for _, c := range st.Cameras { // day folders (D20): only where something is filed
+		if c.Filed > 0 || c.Misfiled > 0 {
+			fmt.Fprintf(e.out, "%s: %d segment(s) in the spool, %d filed in day folders", c.Folder, c.Segments-c.Filed, c.Filed)
+			if c.Misfiled > 0 {
+				fmt.Fprintf(e.out, ", %d MISFILED (in a day folder that is not the date in the name: not footage, not counted)", c.Misfiled)
+			}
+			fmt.Fprintln(e.out)
+		}
 	}
 	fmt.Fprintf(e.out, "total %d segment(s), %.2f GB; free %.2f GB, reserve %.2f GB", st.Segments, float64(st.Bytes)/gib, st.FreeGB, st.ReserveGB)
 	if st.RetentionDays != nil {

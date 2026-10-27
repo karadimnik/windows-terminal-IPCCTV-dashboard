@@ -1,6 +1,9 @@
 # Recordings layout redesign: research (27 Oct 2026)
 
-Status: research only, nothing built. Decision D18 ("archive layout and file names unchanged, so both systems can share footage") would be
+Status (L2, 27 Oct 2026): L1 (the `archive.Layout` library) and L2 (every reader reads the spool and day folders, read side only) are built;
+the pruner (L3) and the mover (L4) are not, so nothing is filed yet. The L4 mover's contract from L2: it must always leave the open segment AND
+the newest closed segment in the spool (then a status tick is one listing per camera); see `internal/archive/README.md` "Spool and day folders".
+Original status: research only, nothing built. Decision D18 ("archive layout and file names unchanged, so both systems can share footage") would be
 reversed by any of the options below. Dependency map with file:line for every claim: [spec/layout-dependencies.md](spec/layout-dependencies.md).
 
 ## 1. The problem, measured

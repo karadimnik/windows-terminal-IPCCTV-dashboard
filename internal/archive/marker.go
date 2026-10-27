@@ -82,8 +82,10 @@ func stripBOM(b []byte) []byte {
 // ClaimProblem says why the recorder may not claim root as its own archive, or "" when it may:
 // the root passes CheckRoot, exists as a folder, and holds nothing the recorder did not write -
 // every top-level entry is "_"-prefixed (the recorder's own folders) or a real folder whose
-// children are all segment files of that folder's camera in the container. An empty root
-// qualifies. Read only. Up to five blockers are named.
+// children are all segment files of that folder's camera in the container, or day folders
+// (Entry.IsDay, decision D20) whose children are all segment files of that camera filed under
+// that day. Any other sub-folder, a folder inside a day folder and a misfiled segment block the
+// claim. An empty root and an empty day folder qualify. Read only. Up to five blockers are named.
 func ClaimProblem(root string, p osx.Platform, container string) string {
 	if problem := CheckRoot(root, p); problem != "" {
 		return problem
@@ -121,6 +123,13 @@ func ClaimProblem(root string, p osx.Platform, container string) string {
 			if err != nil {
 				continue
 			}
+			if ci.IsDir() && c.IsDay() {
+				if b := l.dayBlocker(name, c); b != "" {
+					blockers = append(blockers, b)
+					break
+				}
+				continue
+			}
 			if ci.IsDir() {
 				blockers = append(blockers, name+"/"+c.Name()+" (a folder inside a camera folder)")
 				break
@@ -143,6 +152,35 @@ func ClaimProblem(root string, p osx.Platform, container string) string {
 		plural = "y"
 	}
 	return fmt.Sprintf("RootPath '%s' holds %d top-level entr%s the recorder did not write: %s", root, len(blockers), plural, strings.Join(shown, ", "))
+}
+
+// dayBlocker is the first entry of the day folder day of camera that the recorder did not file
+// there, "" when there is none.
+func (l Layout) dayBlocker(camera string, day Entry) string {
+	where := camera + "/" + day.Name()
+	ents, err := readDir(day.Path)
+	if err != nil {
+		return where + " (cannot be listed)"
+	}
+	for _, x := range ents {
+		xi, err := x.Info()
+		switch {
+		case err != nil:
+			continue // vanished
+		case xi.IsDir():
+			return where + "/" + x.Name() + " (a folder inside a day folder)"
+		case IsReparse(xi) || !xi.Mode().IsRegular():
+			return where + "/" + x.Name() + " (not a recorder segment)"
+		}
+		switch l.classOf(camera, day.Name(), x.Name()).Kind {
+		case Filed:
+		case Misfiled:
+			return where + "/" + x.Name() + " (filed under another day)"
+		default:
+			return where + "/" + x.Name() + " (not a recorder segment)"
+		}
+	}
+	return ""
 }
 
 // ClaimResult is the outcome of ClaimRoot.

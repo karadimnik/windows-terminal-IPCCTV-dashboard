@@ -134,9 +134,22 @@ func storageCameras(_ context.Context, r *drun) []check {
 		n := counts[cam.Name]
 		data := map[string]any{"camera": cam.Name, "segments24h": n, "bytes24h": bytes[cam.Name], "median": median}
 		text := fmt.Sprintf("%d segment(s), %.2f GB in the last 24 h", n, float64(bytes[cam.Name])/gb)
+		safe, _ := archive.SafeName(cam.Name)
+		var problems, fixes []string
+		if cf := r.files(cam); cf.Filed > 0 || cf.Misfiled > 0 { // day folders (D20): said only where something is filed
+			data["filed25h"], data["misfiled"] = cf.Filed, cf.Misfiled
+			text += fmt.Sprintf(" (of the last 25 h: %d in the spool, %d filed in day folders)", len(cf.Segs)-cf.Filed, cf.Filed)
+			if cf.Misfiled > 0 {
+				problems = append(problems, fmt.Sprintf("%d segment(s) are MISFILED: in a day folder that is not the date in their name, so they are not footage", cf.Misfiled))
+				fixes = append(fixes, fmt.Sprintf("holocron archive stats ; move each to the YYYY-MM-DD folder of its name in %s", archive.Layout{Root: r.e.paths.Root}.CameraDir(safe)))
+			}
+		}
 		if len(cams) > 1 && float64(n) < 0.5*float64(median) {
-			safe, _ := archive.SafeName(cam.Name)
-			cs = append(cs, mk(lvWarn, cam.Name, "%s, against a median of %d: hours are missing", text, median).fix("holocron doctor --group recording ; %s", camFix(cam, safe)).data(data))
+			problems = append([]string{fmt.Sprintf("against a median of %d: hours are missing", median)}, problems...)
+			fixes = append([]string{"holocron doctor --group recording ; " + camFix(cam, safe)}, fixes...)
+		}
+		if len(problems) > 0 {
+			cs = append(cs, mk(lvWarn, cam.Name, "%s, %s", text, strings.Join(problems, "; ")).fix("%s", strings.Join(fixes, " ; ")).data(data))
 			continue
 		}
 		cs = append(cs, mk(lvOK, cam.Name, "%s", text).data(data))

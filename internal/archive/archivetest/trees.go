@@ -260,10 +260,11 @@ func NameGoldens(t testing.TB, path string) []Tree {
 
 // ---- generated trees ----
 
-// Generated are n seeded trees with the cases the goldens do not cover: names with spaces, case
+// Generated are n seeded flat trees with the cases the goldens do not cover: names with spaces, case
 // differences, foreign files, links and junctions inside and at the top, zero-byte files, 8.3-style
 // short names, +0300 and +0200 segments in one folder (the clock-change night), future-dated files,
-// sub-folders inside a camera folder, a top-level file and a "_" folder.
+// sub-folders inside a camera folder (never a valid day folder: these trees are flat under D20), a
+// top-level file and a "_" folder.
 func Generated(seed uint64, n int) []Tree {
 	rng := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
 	cams := []string{"Cam_A", "Front_Door", "Back Yard", "cam_a", "Garage%Y", "Gate.Two", "Porch_é"}
@@ -318,8 +319,8 @@ func Generated(seed uint64, n int) []Tree {
 					add(Node{Path: dir + foreign, Kind: "file", Bytes: int64(rng.IntN(3)), MTime: now.Add(-time.Duration(rng.IntN(7200)) * time.Second)})
 				}
 			}
-			if rng.IntN(4) == 0 { // a day-like folder: flat readers never enter it
-				add(Node{Path: dir + "2026-10-24/" + cam + "_20261024_120000+0300" + tr.Container, Kind: "file", Bytes: 9, MTime: now.Add(-20 * time.Hour)})
+			if rng.IntN(4) == 0 { // a folder named like a day that is not a date: no reader enters it (D20 day folders: Mixed)
+				add(Node{Path: dir + "2026-02-30/" + cam + "_20261024_120000+0300" + tr.Container, Kind: "file", Bytes: 9, MTime: now.Add(-20 * time.Hour)})
 			}
 			if rng.IntN(4) == 0 {
 				add(Node{Path: "outside/clip_" + fmt.Sprint(ci) + tr.Container, Kind: "file", Bytes: 0, MTime: now.Add(-time.Hour)})

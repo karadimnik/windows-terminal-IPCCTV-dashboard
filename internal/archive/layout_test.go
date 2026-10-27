@@ -304,30 +304,38 @@ func TestClassify(t *testing.T) {
 	l := Layout{Root: root, Matcher: Matcher{}, Container: ".mkv"}
 	seg := "Cam_A_20261017_120000+0300.mkv"
 	for _, tc := range []struct {
-		path      string
-		cam, name string
-		ok        bool
+		path string
+		want Class
 	}{
-		{filepath.Join(root, "Cam_A", seg), "Cam_A", seg, true},
-		{filepath.Join(root, "Cam_A", "x", "..", seg), "Cam_A", seg, true},
-		{filepath.Join(root, "Cam_B", seg), "", "", false},
-		{filepath.Join(root, "_state", "_state_20261017_120000+0300.mkv"), "", "", false},
-		{filepath.Join(root, seg), "", "", false},
-		{filepath.Join(root, "Cam_A", "2026-10-17", seg), "", "", false},
-		{filepath.Join(root+"_old", "Cam_A", seg), "", "", false},
-		{filepath.Join(root, "Cam_A", "notes.txt"), "", "", false},
-		{filepath.Join(strings.ToUpper(root), "Cam_A", seg), "", "", false},
+		{filepath.Join(root, "Cam_A", seg), Class{"Cam_A", "", seg, Spooled}},
+		{filepath.Join(root, "Cam_A", "x", "..", seg), Class{"Cam_A", "", seg, Spooled}},
+		{filepath.Join(root, "Cam_B", seg), Class{}},
+		{filepath.Join(root, "_state", "_state_20261017_120000+0300.mkv"), Class{}},
+		{filepath.Join(root, seg), Class{}},
+		{filepath.Join(root, "Cam_A", "2026-10-17", seg), Class{"Cam_A", "2026-10-17", seg, Filed}},
+		{filepath.Join(root, "Cam_A", "2026-10-18", seg), Class{"Cam_A", "2026-10-18", seg, Misfiled}},
+		{filepath.Join(root, "Cam_A", "2026-02-30", seg), Class{}},
+		{filepath.Join(root, "Cam_A", "2026-10-17", "x", seg), Class{}},
+		{filepath.Join(root, "Cam_B", "2026-10-17", seg), Class{}},
+		{filepath.Join(root, "_state", "2026-10-17", "_state_20261017_120000+0300.mkv"), Class{}},
+		{filepath.Join(root, "2026-10-17", seg), Class{}},
+		{filepath.Join(root+"_old", "Cam_A", seg), Class{}},
+		{filepath.Join(root+"_old", "Cam_A", "2026-10-17", seg), Class{}},
+		{filepath.Join(root, "Cam_A", "notes.txt"), Class{}},
+		{filepath.Join(strings.ToUpper(root), "Cam_A", seg), Class{}},
 	} {
-		cam, name, ok := l.Classify(tc.path)
-		if cam != tc.cam || name != tc.name || ok != tc.ok {
-			t.Errorf("Classify(%q) = %q, %q, %v", tc.path, cam, name, ok)
+		if got := l.Classify(tc.path); got != tc.want {
+			t.Errorf("Classify(%q) = %+v, want %+v", tc.path, got, tc.want)
 		}
 	}
 	l.Matcher.FoldCase = true
-	if cam, _, ok := l.Classify(filepath.Join(strings.ToUpper(root), "Cam_A", strings.ToLower(seg))); !ok || cam != "Cam_A" {
-		t.Errorf("Classify with case folding = %q, %v", cam, ok)
+	if c := l.Classify(filepath.Join(strings.ToUpper(root), "Cam_A", strings.ToLower(seg))); c.Kind != Spooled || c.Camera != "Cam_A" {
+		t.Errorf("Classify with case folding = %+v", c)
 	}
-	if _, _, ok := (Layout{Container: ".mkv"}).Classify(filepath.Join("Cam_A", seg)); ok {
+	if c := l.Classify(filepath.Join(root, "Cam_A", "2026-10-17", strings.ToUpper(seg))); c.Kind != Filed {
+		t.Errorf("Classify of a filed name in another case, folding = %+v", c)
+	}
+	if c := (Layout{Container: ".mkv"}).Classify(filepath.Join("Cam_A", seg)); c.Kind != Foreign {
 		t.Error("a layout without a root classifies nothing")
 	}
 }
