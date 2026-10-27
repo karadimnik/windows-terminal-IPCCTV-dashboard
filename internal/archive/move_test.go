@@ -520,3 +520,38 @@ func TestFileDaysBusyFileWaits(t *testing.T) {
 		t.Fatalf("released: %+v", r)
 	}
 }
+
+// Two movers on one root (the supervisor's and `archive migrate`): when the other one renames the
+// file, or the pruner removes its empty day folder, between this run's check and its rename, the
+// rename finds nothing. That is a benign skip (the next run looks again), never an error, and the
+// other mover's result stands. Positive control: the same tree without interference moves the file.
+func TestFileDaysLosesARaceBenignly(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		steal func(src, dst string) error
+	}{
+		{"source taken", func(src, dst string) error { return renameNoReplace(src, dst) }},
+		{"day folder removed", func(src, dst string) error { return os.Remove(filepath.Dir(dst)) }},
+	} {
+		base, root, _ := build(t, spoolTree(3, time.Hour))
+		renameFile = func(src, dst string) error {
+			if err := c.steal(src, dst); err != nil {
+				t.Fatal(err)
+			}
+			return renameNoReplace(src, dst)
+		}
+		before := contents(snap(t, root))
+		rep := FileDays(moveLayout(root, ".mkv"), moveOpts(base, mt0))
+		renameFile = renameNoReplace
+		if len(rep.Errors) != 0 || len(rep.Moved) != 0 || len(rep.Skipped) != 1 {
+			t.Errorf("%s: errors %+v moved %+v skipped %+v", c.name, rep.Errors, rep.Moved, rep.Skipped)
+		}
+		if after := contents(snap(t, root)); !sameList(before, after) {
+			t.Errorf("%s: files changed: %v -> %v", c.name, before, after)
+		}
+	}
+	base, root, _ := build(t, spoolTree(3, time.Hour))
+	if rep := FileDays(moveLayout(root, ".mkv"), moveOpts(base, mt0)); len(rep.Moved) != 1 || len(rep.Errors) != 0 {
+		t.Errorf("positive control: %+v", rep)
+	}
+}

@@ -70,7 +70,8 @@ type MoveReport struct {
 	Bytes   int64          // the bytes of Moved
 	Cameras map[string]int // moves per camera folder
 	// Skipped: eligible files the check before the rename turned down (the file changed, became a
-	// link, its day folder is not a plain folder); the next run looks again.
+	// link, its day folder is not a plain folder), or that vanished at the rename itself (another
+	// mover or the pruner acted first); the next run looks again.
 	Skipped []MoveSkip
 	// Conflicts: the destination name already exists. Neither file is touched; it is reported until
 	// someone resolves it.
@@ -346,6 +347,11 @@ func (l Layout) rename(cam, src, dst string, fi fs.FileInfo, rep *MoveReport) bo
 			}
 		}
 		rep.Conflicts = append(rep.Conflicts, MoveSkip{Camera: cam, Path: src, Why: "the destination " + dst + " already exists; neither file was touched"})
+	case errors.Is(err, fs.ErrNotExist):
+		// Another actor got there between the check and the rename: a second mover (the
+		// supervisor's beside `archive migrate`) took the file, or the pruner removed the empty
+		// day folder. Nothing was lost; the next run looks again.
+		rep.Skipped = append(rep.Skipped, MoveSkip{Camera: cam, Path: src, Why: "it or its destination folder vanished just before the rename (another mover or the pruner acted first)"})
 	case isBusy(err):
 		rep.Busy = append(rep.Busy, MoveSkip{Camera: cam, Path: src, Why: err.Error()})
 	default:
