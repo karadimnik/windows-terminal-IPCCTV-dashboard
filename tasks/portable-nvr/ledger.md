@@ -123,3 +123,4 @@ Update this file in the same push as each merge: `git log --first-parent --merge
 | 86622c0 | 2026-10-27 | Merge Holocron L1: archive.Layout library and scan cache, flat layout, behaviour unchanged (D20 step 1; revert with `git revert -m 1`) |  |
 | 7f55c1f | 2026-10-27 | Merge Holocron L2: every reader reads the spool and the day folders; pruner pinned to the spool view until L3 (D20 step 2) |  |
 | 87899aa | 2026-10-27 | Merge Holocron L3: the pruner prunes the spool and the day folders alike, empty day folders removed, doctor check for unseen files (D20 step 3) |  |
+| c77c235 | 2026-10-27 | Merge Holocron L4a: mover library (archive.FileDays/UnfileDays), supervisor mover loop, four config keys, doctor backlog check (D20 step 4a) |  |
