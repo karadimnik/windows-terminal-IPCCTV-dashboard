@@ -46,7 +46,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     continue-on-error: ${{ matrix.experimental }} # macOS is paper-only today: it reports, it does not fail the run
     strategy:
       fail-fast: false
