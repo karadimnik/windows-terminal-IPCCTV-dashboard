@@ -216,8 +216,6 @@ type archiveStats struct {
 
 func collectStats(e *env) (archiveStats, error) {
 	st := archiveStats{Root: e.paths.Root, Cameras: []camStats{}, ReserveGB: e.cfg.ReserveGB, RetentionDays: e.cfg.MaxRetentionDays}
-	container := "." + strings.TrimPrefix(prune.RulesFrom(e.cfg).Container, ".")
-	m := archive.MatcherFor(e.opts.Platform)
 	known := map[string]string{}
 	if cams, err := app.LoadCameras(e.paths.Cameras); err == nil {
 		for _, c := range cams.List {
@@ -226,7 +224,7 @@ func collectStats(e *env) (archiveStats, error) {
 			}
 		}
 	}
-	l := archive.Layout{Root: e.paths.Root, Matcher: m, Container: container}
+	l := archiveLayout(e)
 	entries, err := l.Folders()
 	if err != nil {
 		return st, fmt.Errorf("cannot read the archive root: %w", err)

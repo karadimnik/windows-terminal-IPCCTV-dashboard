@@ -117,6 +117,8 @@ Registry: the slice `commands` in `cmd/holocron/commands.go`; `holocron --help` 
 | `secret list [--json]` | secret names (never values) |
 | `prune [--dry-run \| --now --yes] [--json]` | show the pruner's decision (default), or run it now when no supervisor is running |
 | `archive stats [--json]` | per camera: segments, size, oldest and newest; GB per day, free space, projected days |
+| `archive migrate [--now] [--camera NAME] [--margin S] [--json]` | file the flat history into day folders (one folder per date in each camera folder, decision D20) by the mover's rules: a dry run that shows per camera what would move (the default), --now applies; resumable, safe while the recorder runs; exit 1 when refused or a conflict or error remains |
+| `archive flatten [--now] [--camera NAME] [--json]` | put every filed segment back into its camera folder, the flat layout the PowerShell system reads (a step of the rollback): a dry run (the default), --now applies; refused while the recorder runs (holocron down first); exit 1 when refused or a conflict or error remains |
 | `archive compare --old ROOT --new ROOT [--camera NAME ...] [--since TIME] [--json] [--ffprobe PATH]` | read-only: prove the shadow archive equals the existing one (names, clock boundaries, sizes, ffprobe durations, audio, gaps); exit 0 equal, 1 differences, 2 usage |
 | `install [--mode logon\|service\|systemd\|launchd] [--window visible\|hidden] [--dry-run] [--allow-temp] [--i-know-old-tasks-are-enabled] [--yes] [--account A]` | create the autostart entry for this OS (logon task, Windows service, systemd user unit, launchd agent) and verify it; idempotent; never touches the PowerShell system's tasks |
 | `uninstall [--dry-run] [--force]` | remove exactly what install created and recorded |

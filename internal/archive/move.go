@@ -70,7 +70,8 @@ type MoveReport struct {
 	Bytes   int64          // the bytes of Moved
 	Cameras map[string]int // moves per camera folder
 	// Skipped: eligible files the check before the rename turned down (the file changed, became a
-	// link, its day folder is not a plain folder); the next run looks again.
+	// link, its day folder is not a plain folder), or that vanished at the rename itself (another
+	// mover or the pruner acted first); the next run looks again.
 	Skipped []MoveSkip
 	// Conflicts: the destination name already exists. Neither file is touched; it is reported until
 	// someone resolves it.
@@ -337,15 +338,30 @@ func (l Layout) rename(cam, src, dst string, fi fs.FileInfo, rep *MoveReport) bo
 	case errors.Is(err, fs.ErrExist):
 		// The same file under both names is an interrupted link-then-unlink move (not Windows):
 		// finish it. Anything else is a real conflict, and both files stay as they are.
-		if si, e1 := os.Lstat(src); e1 == nil {
+		si, e1 := os.Lstat(src)
+		if e1 == nil {
 			if di, e2 := os.Lstat(dst); e2 == nil && os.SameFile(si, di) {
-				if err := os.Remove(src); err == nil {
+				err := os.Remove(src)
+				if err == nil {
 					rep.moved(cam, src, dst, fi.Size())
 					return true
 				}
+				if errors.Is(err, fs.ErrNotExist) { // another mover finished it in between
+					rep.Skipped = append(rep.Skipped, MoveSkip{Camera: cam, Path: src, Why: lostRace})
+					return false
+				}
 			}
+		} else if errors.Is(e1, fs.ErrNotExist) {
+			// the source is gone and the destination exists: another mover finished this move first
+			rep.Skipped = append(rep.Skipped, MoveSkip{Camera: cam, Path: src, Why: lostRace})
+			return false
 		}
 		rep.Conflicts = append(rep.Conflicts, MoveSkip{Camera: cam, Path: src, Why: "the destination " + dst + " already exists; neither file was touched"})
+	case errors.Is(err, fs.ErrNotExist):
+		// Another actor got there between the check and the rename: a second mover (the
+		// supervisor's beside `archive migrate`) took the file, or the pruner removed the empty
+		// day folder. Nothing was lost; the next run looks again.
+		rep.Skipped = append(rep.Skipped, MoveSkip{Camera: cam, Path: src, Why: lostRace})
 	case isBusy(err):
 		rep.Busy = append(rep.Busy, MoveSkip{Camera: cam, Path: src, Why: err.Error()})
 	default:
@@ -353,6 +369,8 @@ func (l Layout) rename(cam, src, dst string, fi fs.FileInfo, rep *MoveReport) bo
 	}
 	return false
 }
+
+const lostRace = "it or its destination folder vanished just before the rename (another mover or the pruner acted first)"
 
 // checkSource re-validates a file just before its rename; "" means it may move.
 func (l Layout) checkSource(cam, day, src string, listed fs.FileInfo, prefix string) string {

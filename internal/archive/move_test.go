@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -518,5 +519,105 @@ func TestFileDaysBusyFileWaits(t *testing.T) {
 	_ = h.Close()
 	if r := FileDays(l, moveOpts(base, mt0)); len(r.Moved) != 1 || len(r.Busy) != 0 {
 		t.Fatalf("released: %+v", r)
+	}
+}
+
+// Two movers on one root (the supervisor's and `archive migrate`): when the other one renames the
+// file, or the pruner removes its empty day folder, between this run's check and its rename, the
+// rename finds nothing. That is a benign skip (the next run looks again), never an error, and the
+// other mover's result stands. Positive control: the same tree without interference moves the file.
+func TestFileDaysLosesARaceBenignly(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		steal func(src, dst string) error
+	}{
+		{"source taken", func(src, dst string) error { return renameNoReplace(src, dst) }},
+		{"day folder removed", func(src, dst string) error { return os.Remove(filepath.Dir(dst)) }},
+	} {
+		base, root, _ := build(t, spoolTree(3, time.Hour))
+		renameFile = func(src, dst string) error {
+			if err := c.steal(src, dst); err != nil {
+				t.Fatal(err)
+			}
+			return renameNoReplace(src, dst)
+		}
+		before := contents(snap(t, root))
+		rep := FileDays(moveLayout(root, ".mkv"), moveOpts(base, mt0))
+		renameFile = renameNoReplace
+		if len(rep.Errors) != 0 || len(rep.Moved) != 0 || len(rep.Skipped) != 1 {
+			t.Errorf("%s: errors %+v moved %+v skipped %+v", c.name, rep.Errors, rep.Moved, rep.Skipped)
+		}
+		if after := contents(snap(t, root)); !sameList(before, after) {
+			t.Errorf("%s: files changed: %v -> %v", c.name, before, after)
+		}
+	}
+	// the other mover finished first and this rename sees the destination taken (Windows checks
+	// the destination first; link-then-unlink meets it when the other unlinked in between)
+	base, root, _ := build(t, spoolTree(3, time.Hour))
+	renameFile = func(src, dst string) error {
+		if err := renameNoReplace(src, dst); err != nil {
+			t.Fatal(err)
+		}
+		return &os.LinkError{Op: "rename", Old: src, New: dst, Err: fs.ErrExist}
+	}
+	rep := FileDays(moveLayout(root, ".mkv"), moveOpts(base, mt0))
+	renameFile = renameNoReplace
+	if len(rep.Conflicts) != 0 || len(rep.Skipped) != 1 {
+		t.Errorf("finished by the other: conflicts %+v skipped %+v", rep.Conflicts, rep.Skipped)
+	}
+	base, root, _ = build(t, spoolTree(3, time.Hour))
+	if rep := FileDays(moveLayout(root, ".mkv"), moveOpts(base, mt0)); len(rep.Moved) != 1 || len(rep.Errors) != 0 {
+		t.Errorf("positive control: %+v", rep)
+	}
+}
+
+// Two movers renaming the same file at the same instant: exactly one rename succeeds, the other
+// fails (not found, busy or exists), and the file is at the destination once. On Windows MoveFileW
+// opens the source and then renames the open file, so two calls that both opened it before either
+// renamed both returned success (the second "renamed" the file to the name it already had), and
+// both movers reported the move.
+func TestRenameNoReplaceHasOneWinner(t *testing.T) {
+	base := t.TempDir()
+	const files, racers = 200, 6
+	doubles := 0
+	for i := 0; i < files; i++ {
+		src := filepath.Join(base, fmt.Sprintf("f%03d", i))
+		dst := filepath.Join(base, "d", fmt.Sprintf("f%03d", i))
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		wins := 0
+		start := make(chan struct{})
+		for r := 0; r < racers; r++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if renameNoReplace(src, dst) == nil {
+					mu.Lock()
+					wins++
+					mu.Unlock()
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if wins != 1 {
+			doubles++
+			if doubles <= 3 {
+				t.Errorf("%s: %d renames reported success", filepath.Base(src), wins)
+			}
+		}
+		if _, err := os.Lstat(dst); err != nil {
+			t.Fatalf("%s is not at the destination: %v", src, err)
+		}
+	}
+	if doubles > 0 {
+		t.Errorf("%d of %d files had more than one winner", doubles, files)
 	}
 }
