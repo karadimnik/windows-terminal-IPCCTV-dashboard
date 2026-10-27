@@ -712,6 +712,11 @@ func TestFiledNewestSurvives(t *testing.T) {
 	now := time.Date(2026, 10, 27, 9, 7, 0, 0, time.UTC)
 	for _, spool := range []int{0, 1, 2, 3} {
 		tr := archivetest.Filed(fmt.Sprintf("spool-%d", spool), 2, 4, 6, spool, now)
+		for i, n := range tr.Nodes { // created when each started (Windows reports it): no tie at the build's clock resolution
+			if _, st, ok := archive.ParseSegment(filepath.Base(n.Path)); ok {
+				tr.Nodes[i].CTime = st
+			}
+		}
 		for _, reserve := range []float64{0, 1e6} {
 			root, _ := tr.Build(t, t.TempDir())
 			markRoot(t, root)
