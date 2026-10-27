@@ -42,7 +42,11 @@ func TestLiveSizeOfAFileAnotherProcessWrites(t *testing.T) {
 	dir := camDir(t, "Cam_A")
 	put(t, dir, "Cam_A_20261017_114500+0300.mkv", 300, time.Hour)
 	path := filepath.Join(dir, "Cam_A_20261017_120000+0300.mkv")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestLiveWriterHelper$")
+	self, err := os.Executable() // not os.Args[0]: a bare name when the binary is started from WSL
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run=^TestLiveWriterHelper$")
 	cmd.Env = append(os.Environ(), liveWriterEnv+"="+path)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
