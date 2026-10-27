@@ -14,7 +14,7 @@ Branch `portable-nvr`. Rules for agents are in AGENTS.md. Facts in the documents
 ## Operating
 
 - [Cutover](docs/cutover.md): moving the real NVR from the PowerShell system to Holocron, step by step with stop conditions
-- [Rollback](docs/rollback.md): the way back, and how to rehearse it
+- [Rollback](docs/rollback.md): the way back (including `holocron archive flatten`, because the archive is filed into day folders), and how to rehearse it
 - [Autostart](docs/autostart.md): `holocron install`, logon task, Windows service, systemd, launchd, Defender note
 - [The web app](docs/ui.md): screens, Live view, HTTPS on the LAN, users, roles, the Admin tab
 - [Alerts](docs/alerts.md): event ids and meanings
@@ -24,7 +24,7 @@ Branch `portable-nvr`. Rules for agents are in AGENTS.md. Facts in the documents
 
 ## Design and decisions
 
-- [High-level design](tasks/portable-nvr/os-independent-hld.md): rules R1 and R2, architecture, technology choices, decisions D2 to D19
+- [High-level design](tasks/portable-nvr/os-independent-hld.md): rules R1 and R2, architecture, technology choices, decisions D2 to D20 (D20, spool and day folders, supersedes D18)
 - [Low-level design](tasks/portable-nvr/os-independent-lld.md): per-package plan and the work items
 - [Supervisor inventory](tasks/portable-nvr/spec/inventory-supervisor.md): the guarantees G1 to G15 and the status.json fields of the system Holocron reproduces
 - [Commission ledger](tasks/portable-nvr/ledger.md): every merge into `portable-nvr`

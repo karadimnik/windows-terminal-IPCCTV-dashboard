@@ -8,8 +8,9 @@ Holocron is the live NVR of the Operator's home (one Go executable, branch `port
 2. **Never open a credential file** (`camera_creds.xml`, `relay_api_creds.xml`, `live_view_secret.txt`, `relay_api_secret.txt`, `secrets.enc`, `secrets.key`, `users.json`, `sessions.json`, any `*.key`) and never print or log a secret. No real password, camera name, LAN address, user or machine name in a document, test or log: use `192.168.1.50` and `Front Door`, and fake credentials.
 3. **R1: one executable.** Every action is a subcommand of `holocron`; no script or second program. **R2: every action is logged** through `cli.Action`. A change that breaks either is rejected ([how to add a command](docs/ai/holocron-for-agents.md#12-how-to-add-a-command)).
 4. **Commits.** Never commit to `portable-nvr`: branch `<role>/<task-slug>` from it, one commit per logical change (change, tests and doc line together), each building and passing tests alone. Subject `<area>: <imperative summary>`, body why / what / how verified, trailers `Task: <id>` and `Decision: <id>`. No agent as co-author. Never push, merge or publish without the Operator's approval; merges are `--no-ff`, recorded in [tasks/portable-nvr/ledger.md](tasks/portable-nvr/ledger.md), undone with `git revert -m 1`.
-5. **No em dash** in any text; use `-`. `rm`, `cp` and `mv` may be interactive aliases: use `command rm -f`.
-6. **Do not edit** `.ps1` files, `tests/`, `testdata/` or `.github/` unless the task says so; they belong to the legacy system and its harness.
+5. **Archive layout (D20).** `<root>\<Camera>\` is the spool ffmpeg writes into; the mover files closed segments into `<root>\<Camera>\YYYY-MM-DD\`. Never write, move or delete footage there by hand: use `holocron archive migrate` / `archive flatten`, and list or build archive paths only through `archive.Layout`.
+6. **No em dash** in any text; use `-`. `rm`, `cp` and `mv` may be interactive aliases: use `command rm -f`.
+7. **Do not edit** `.ps1` files, `tests/`, `testdata/` or `.github/` unless the task says so; they belong to the legacy system and its harness.
 
 ## Run the tests
 
