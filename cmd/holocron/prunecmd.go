@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -226,32 +224,32 @@ func collectStats(e *env) (archiveStats, error) {
 			}
 		}
 	}
-	entries, err := os.ReadDir(e.paths.Root)
+	l := archive.Layout{Root: e.paths.Root, Matcher: m, Container: container}
+	entries, err := l.Folders()
 	if err != nil {
 		return st, fmt.Errorf("cannot read the archive root: %w", err)
 	}
 	var oldest, newest time.Time
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasPrefix(entry.Name(), "_") {
+	for _, entry := range entries { // the recorder's own "_" folders are not listed
+		if !entry.IsDir() {
 			continue
 		}
 		cs := camStats{Folder: entry.Name(), Camera: known[strings.ToLower(entry.Name())]}
-		files, err := os.ReadDir(filepath.Join(e.paths.Root, entry.Name()))
+		files, err := l.Files(entry.Name())
 		if err != nil {
 			continue
 		}
 		var lo, hi time.Time
 		for _, f := range files {
-			if f.IsDir() || !m.IsSegmentOf(f.Name(), entry.Name(), container) {
+			if !m.IsSegmentOf(f.Name(), entry.Name(), container) {
 				continue
 			}
 			_, start, ok := archive.ParseSegment(f.Name())
-			info, err := f.Info()
-			if !ok || err != nil {
+			if !ok {
 				continue
 			}
 			cs.Segments++
-			cs.Bytes += info.Size()
+			cs.Bytes += f.Info.Size()
 			if lo.IsZero() || start.Before(lo) {
 				lo = start
 			}

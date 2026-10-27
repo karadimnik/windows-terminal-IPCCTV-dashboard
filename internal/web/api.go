@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"holocron/internal/archive"
 	"holocron/internal/cli"
 )
 
@@ -91,6 +92,10 @@ type API struct {
 
 	// ackMu serialises read-modify-write on the acknowledgement sidecar.
 	ackMu sync.Mutex
+
+	// footageCache is the footage index's archive.Cache, created on first use (footage.go).
+	footageCache *archive.Cache
+	footageOnce  sync.Once
 
 	// live is the live-view session table, created on first use (live.go).
 	live     *liveHub
