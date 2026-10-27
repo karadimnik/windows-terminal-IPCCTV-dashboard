@@ -378,3 +378,55 @@ func (c TCamera) AllFiles() []TFile {
 	}
 	return out
 }
+
+// Filed is a tree of cams cameras, each with days day folders of perDay closed 15-minute segments
+// (the days before now's local date, +0300 names) and spool segments in the spool, the newest of
+// them open (written 5 s before now). The newest filed segment is older than the spool's oldest.
+func Filed(name string, cams, days, perDay, spool int, now time.Time) Tree {
+	tr := Tree{Name: name, Container: ".mkv", Now: now, SegmentSeconds: 900}
+	zone := time.FixedZone("", 3*3600)
+	open := now.In(zone).Truncate(15 * time.Minute)
+	for c := 0; c < cams; c++ {
+		cam := "Cam_" + string(rune('A'+c))
+		dir := "archive/" + cam + "/"
+		tr.Nodes = append(tr.Nodes, Node{Path: "archive/" + cam, Kind: "dir"})
+		for d := days; d >= 1; d-- {
+			day := open.AddDate(0, 0, -d)
+			midnight := time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, zone)
+			for k := 0; k < perDay; k++ {
+				st := midnight.Add(time.Duration(k) * 15 * time.Minute)
+				tr.Nodes = append(tr.Nodes, Node{Path: dir + st.Format("2006-01-02") + "/" + cam + "_" + st.Format("20060102_150405-0700") + ".mkv",
+					Kind: "file", Bytes: 3, MTime: st.Add(15 * time.Minute)})
+			}
+		}
+		for k := spool - 1; k >= 0; k-- {
+			st := open.Add(-time.Duration(k) * 15 * time.Minute)
+			mt := st.Add(15 * time.Minute)
+			if k == 0 {
+				mt = now.Add(-5 * time.Second)
+			}
+			tr.Nodes = append(tr.Nodes, Node{Path: dir + cam + "_" + st.Format("20060102_150405-0700") + ".mkv", Kind: "file", Bytes: 4, MTime: mt})
+		}
+	}
+	return tr
+}
+
+// Flat is the tree with every file of a day folder (archive/<camera>/<YYYY-MM-DD>/<name>) moved
+// into its camera folder: the archive as it was before D20, for comparing a reader on a mixed tree
+// with the old reader on its flat copy.
+func (tr Tree) Flat() Tree {
+	out := tr
+	out.Name += "/flat"
+	out.Nodes = nil
+	for _, n := range tr.Nodes {
+		parts := strings.Split(n.Path, "/")
+		if len(parts) == 4 && parts[0] == "archive" && IsDay(parts[2]) {
+			if n.Kind == "dir" {
+				continue
+			}
+			n.Path = strings.Join([]string{parts[0], parts[1], parts[3]}, "/")
+		}
+		out.Nodes = append(out.Nodes, n)
+	}
+	return out
+}

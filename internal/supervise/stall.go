@@ -106,7 +106,9 @@ func (m *Manager) blindMono(from, to clock.Mono) time.Duration {
 }
 
 // ArchiveScanner is the production Scanner: archive.Layout's Scan with the configured container,
-// through the layout's Cache when it has one (the status tick and the archive scan share it).
+// through the layout's Cache when it has one (the status tick and the archive scan share it). The
+// status tick reads the spool alone while it holds the open and the newest closed segment (one
+// listing per camera however many days are filed); see archive.Layout for the fallback.
 type ArchiveScanner struct {
 	Layout         archive.Layout
 	SegmentSeconds int

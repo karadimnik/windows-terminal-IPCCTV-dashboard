@@ -63,12 +63,14 @@ type ArchiveScan struct {
 	Files          int64
 	Bytes          int64
 	Oldest, Newest time.Time                  // min / max write time over every file
-	Dirs           map[string]archive.DirScan // by folder name (= safe name)
+	Dirs           map[string]archive.DirScan // by folder name (= safe name): archive.Layout.ScanAll, spool and day folders
 	Skipped        []string
 }
 
 // ScanRoot is Get-CamArchiveScan: every immediate subfolder of root that does not start with "_" and
-// is not a link or reparse point, each scanned like a camera folder.
+// is not a link or reparse point, each scanned like a camera folder with its day folders
+// (Layout.ScanAll: the disk figures count every filed day, the liveness fields are the status
+// tick's).
 func (a ArchiveScanner) ScanRoot(root string, now time.Time) (ArchiveScan, error) {
 	out := ArchiveScan{ScannedAt: now, Dirs: map[string]archive.DirScan{}}
 	l := a.Layout
@@ -85,7 +87,7 @@ func (a ArchiveScanner) ScanRoot(root string, now time.Time) (ArchiveScan, error
 			out.Skipped = append(out.Skipped, c.Path)
 			continue
 		}
-		s, err := l.Scan(c.Name, now, a.SegmentSeconds)
+		s, err := l.ScanAll(c.Name, now, a.SegmentSeconds)
 		if err != nil {
 			continue
 		}

@@ -10,7 +10,9 @@ import (
 
 // Rows are the status.json Cameras[] rows (IS 1.4, Write-CamStatusFile R:2804-2875): every camera of
 // the last Reconcile, in list order, recording or not. The scan is the camera's own (Refresh) when
-// it has a child, else archiveScans[SafeName] (the archive-wide scan) when given. Names and errors
+// it has a child, else archiveScans[SafeName] (the archive-wide scan) when given. The camera's own
+// scan reads the spool, so ArchiveFiles and ArchiveBytes add the filed days of the archive-wide
+// scan (identical on a flat archive, where nothing is filed). Names and errors
 // are not redacted here: the status Writer redacts the whole document.
 func (m *Manager) Rows(archiveScans map[string]archive.DirScan) []status.Camera {
 	nowWall, nowMono := m.now()
@@ -67,7 +69,13 @@ func (m *Manager) Rows(archiveScans map[string]archive.DirScan) []status.Camera 
 				v := math.RoundToEven(nowWall.Sub(scan.NewestClosedWrite).Seconds()*10) / 10
 				row.SecondsSinceLastClosedSegment = &v
 			}
-			row.ArchiveFiles, row.ArchiveBytes = ptr(int64(scan.Files)), ptr(scan.Bytes)
+			files, bytes := int64(scan.Files), scan.Bytes
+			if e != nil && scan == &e.scan { // the status tick reads the spool: the filed days come from the archive scan
+				if s, ok := archiveScans[safe]; ok {
+					files, bytes = files+int64(s.Filed), bytes+s.FiledBytes
+				}
+			}
+			row.ArchiveFiles, row.ArchiveBytes = ptr(files), ptr(bytes)
 		}
 		rows = append(rows, row)
 	}
